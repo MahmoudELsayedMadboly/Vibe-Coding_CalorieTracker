@@ -290,6 +290,15 @@ export default function CalorieTrackerApp() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
+  function passwordStrengthError(pw) {
+    if (pw.length < 8) return "Password must be at least 8 characters.";
+    if (!/[a-z]/.test(pw)) return "Password must include a lowercase letter.";
+    if (!/[A-Z]/.test(pw)) return "Password must include an uppercase letter.";
+    if (!/[0-9]/.test(pw)) return "Password must include a number.";
+    if (!/[^A-Za-z0-9]/.test(pw)) return "Password must include a special character.";
+    return null;
+  }
+
   async function handleAuthSubmit() {
     setAuthError(null);
     setAuthNotice(null);
@@ -299,13 +308,29 @@ export default function CalorieTrackerApp() {
       return;
     }
 
+    if (authMode === "signup") {
+      const strengthError = passwordStrengthError(authPassword);
+      if (strengthError) {
+        setAuthError(strengthError);
+        return;
+      }
+    }
+
     setAuthBusy(true);
 
     try {
       if (authMode === "signup") {
-        const { error } = await supabase.auth.signUp({ email: authEmail, password: authPassword });
+        const { data, error } = await supabase.auth.signUp({ email: authEmail, password: authPassword });
         if (error) throw error;
-        setAuthNotice("Account created. If email confirmation is required, check your inbox before logging in.");
+
+        // Supabase returns a "fake" user with no error when the email is already
+        // registered and confirmed (this is intentional, to avoid leaking which
+        // emails exist). An empty identities array is the documented way to tell.
+        if (data && data.user && data.user.identities && data.user.identities.length === 0) {
+          setAuthError("This email is already signed up. Please log in instead.");
+        } else {
+          setAuthNotice("Account created. If email confirmation is required, check your inbox before logging in.");
+        }
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
         if (error) throw error;
@@ -863,6 +888,11 @@ export default function CalorieTrackerApp() {
             style={inputStyle}
             autoComplete={authMode === "signup" ? "new-password" : "current-password"}
           />
+          {authMode === "signup" && (
+            <div style={{ marginTop: -10, marginBottom: 14, fontSize: 11, color: INK_SOFT, lineHeight: 1.4 }}>
+              At least 8 characters, with an uppercase letter, lowercase letter, number, and special character.
+            </div>
+          )}
 
           <button
             onClick={handleAuthSubmit}

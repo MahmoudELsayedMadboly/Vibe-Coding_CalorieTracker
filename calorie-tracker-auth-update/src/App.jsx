@@ -238,6 +238,14 @@ function MetricRow({ label, actual, target, unit }) {
 }
 
 export default function CalorieTrackerApp() {
+  const [session, setSession] = useState(undefined);
+  const [authMode, setAuthMode] = useState("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authNotice, setAuthNotice] = useState(null);
+
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
@@ -273,21 +281,106 @@ export default function CalorieTrackerApp() {
   const [tablePage, setTablePage] = useState(1);
 
   useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  async function handleAuthSubmit() {
+    setAuthError(null);
+    setAuthNotice(null);
+
+    if (!authEmail || !authPassword) {
+      setAuthError("Enter both an email and a password.");
+      return;
+    }
+
+    setAuthBusy(true);
+
+    try {
+      if (authMode === "signup") {
+        const { error } = await supabase.auth.signUp({ email: authEmail, password: authPassword });
+        if (error) throw error;
+        setAuthNotice("Account created. If email confirmation is required, check your inbox before logging in.");
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
+        if (error) throw error;
+      }
+    } catch (err) {
+      setAuthError(err && err.message ? err.message : "Something went wrong.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    setLoaded(false);
+  }
+
+  useEffect(() => {
+    if (!session) return;
+
     async function load() {
+      const userId = session.user.id;
+
       try {
-        const [profileRes, personalFoodsRes, planFoodsRes, logsRes] = await Promise.all([
-          supabase.from("profile").select("*").eq("id", 1).single(),
-          supabase.from("personal_foods").select("*").order("created_at", { ascending: true }),
-          supabase.from("plan_foods").select("*").order("created_at", { ascending: true }),
-          supabase.from("meal_logs").select("*").order("created_at", { ascending: true }),
+        let { data: profileRow, error: profileErr } = await supabase
+          .from("profile")
+          .select("*")
+          .eq("user_id", userId)
+          .maybeSingle();
+        if (profileErr) throw profileErr;
+
+        if (!profileRow) {
+          const { data: legacyProfile, error: legacyErr } = await supabase
+            .from("profile")
+            .select("*")
+            .is("user_id", null)
+            .limit(1)
+            .maybeSingle();
+          if (legacyErr) throw legacyErr;
+
+          if (legacyProfile) {
+            // First login ever: claim all unowned legacy rows across every table.
+            await supabase.from("profile").update({ user_id: userId }).is("user_id", null);
+            await supabase.from("personal_foods").update({ user_id: userId }).is("user_id", null);
+            await supabase.from("plan_foods").update({ user_id: userId }).is("user_id", null);
+            await supabase.from("meal_logs").update({ user_id: userId }).is("user_id", null);
+
+            const { data: claimed, error: reErr } = await supabase
+              .from("profile")
+              .select("*")
+              .eq("user_id", userId)
+              .maybeSingle();
+            if (reErr) throw reErr;
+            profileRow = claimed;
+          } else {
+            const { data: created, error: createErr } = await supabase
+              .from("profile")
+              .insert({ user_id: userId })
+              .select()
+              .single();
+            if (createErr) throw createErr;
+            profileRow = created;
+          }
+        }
+
+        const [personalFoodsRes, planFoodsRes, logsRes] = await Promise.all([
+          supabase.from("personal_foods").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
+          supabase.from("plan_foods").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
+          supabase.from("meal_logs").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
         ]);
 
-        if (profileRes.error) throw profileRes.error;
         if (personalFoodsRes.error) throw personalFoodsRes.error;
         if (planFoodsRes.error) throw planFoodsRes.error;
         if (logsRes.error) throw logsRes.error;
 
-        const p = profileRes.data;
+        const p = profileRow;
 
         if (p) {
           setProfile({
@@ -361,9 +454,12 @@ export default function CalorieTrackerApp() {
     }
 
     load();
-  }, []);
+  }, [session]);
 
   async function persist(next) {
+    if (!session || !session.user) return false;
+    const userId = session.user.id;
+
     setSaving(true);
     setSaveError(null);
 
@@ -400,20 +496,21 @@ export default function CalorieTrackerApp() {
             plan_date_to: dTo || null,
             updated_at: new Date().toISOString(),
           })
-          .eq("id", 1);
+          .eq("user_id", userId);
 
         if (error) throw error;
       }
 
-      // Personal food database: simplest correct approach is full replace.
+      // Personal food database: simplest correct approach is full replace, scoped to this user only.
       if (next.personalFoods !== undefined) {
         const list = next.personalFoods;
-        const { error: delErr } = await supabase.from("personal_foods").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+        const { error: delErr } = await supabase.from("personal_foods").delete().eq("user_id", userId);
         if (delErr) throw delErr;
 
         if (list.length > 0) {
           const rows = list.map((f) => ({
             id: f.id,
+            user_id: userId,
             name: f.name,
             cal_per_100g: f.calPer100g,
             typical_grams: f.typicalGrams,
@@ -423,15 +520,16 @@ export default function CalorieTrackerApp() {
         }
       }
 
-      // Configured meal plan ("Food materials" / "Create a plan"): full replace.
+      // Configured meal plan ("Food materials" / "Create a plan"): full replace, scoped to this user only.
       if (next.foods !== undefined) {
         const list = next.foods;
-        const { error: delErr } = await supabase.from("plan_foods").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+        const { error: delErr } = await supabase.from("plan_foods").delete().eq("user_id", userId);
         if (delErr) throw delErr;
 
         if (list.length > 0) {
           const rows = list.map((f) => ({
             id: f.id,
+            user_id: userId,
             name: f.name,
             grams: f.grams,
             meal: f.meal,
@@ -442,10 +540,10 @@ export default function CalorieTrackerApp() {
         }
       }
 
-      // Daily logs: full replace, flattening the {date: [entries]} shape into rows.
+      // Daily logs: full replace, flattening the {date: [entries]} shape into rows, scoped to this user only.
       if (next.logs !== undefined) {
         const dict = next.logs;
-        const { error: delErr } = await supabase.from("meal_logs").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+        const { error: delErr } = await supabase.from("meal_logs").delete().eq("user_id", userId);
         if (delErr) throw delErr;
 
         const rows = [];
@@ -453,6 +551,7 @@ export default function CalorieTrackerApp() {
           (dict[date] || []).forEach((e) => {
             rows.push({
               id: e.id,
+              user_id: userId,
               log_date: date,
               meal: e.meal,
               name: e.name,
@@ -723,6 +822,81 @@ export default function CalorieTrackerApp() {
 
   const historyDates = Object.keys(logs).sort().reverse().slice(0, 14);
 
+  if (session === undefined) {
+    return (
+      <div style={{ fontFamily: "'Inter', sans-serif", padding: "3rem", textAlign: "center", color: INK_SOFT }}>
+        Checking session…
+      </div>
+    );
+  }
+
+  if (session === null) {
+    return (
+      <div style={{ fontFamily: "'Inter', sans-serif", background: PAPER, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link
+          href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+          rel="stylesheet"
+        />
+        <div style={{ background: PANEL, border: `1px solid ${GRID}`, borderRadius: 6, padding: "2rem", width: "100%", maxWidth: 360 }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 6 }}>
+            nutrition tracker
+          </div>
+          <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 20px 0" }}>
+            {authMode === "signup" ? "Create an account" : "Log in"}
+          </h1>
+
+          <label style={labelStyle}>Email</label>
+          <input
+            type="email"
+            value={authEmail}
+            onChange={(e) => setAuthEmail(e.target.value)}
+            style={inputStyle}
+            autoComplete="email"
+          />
+
+          <label style={labelStyle}>Password</label>
+          <input
+            type="password"
+            value={authPassword}
+            onChange={(e) => setAuthPassword(e.target.value)}
+            style={inputStyle}
+            autoComplete={authMode === "signup" ? "new-password" : "current-password"}
+          />
+
+          <button
+            onClick={handleAuthSubmit}
+            disabled={authBusy}
+            style={{ ...primaryButtonStyle, width: "100%", marginTop: 4, opacity: authBusy ? 0.6 : 1 }}
+          >
+            {authBusy ? "Please wait…" : authMode === "signup" ? "Sign up" : "Log in"}
+          </button>
+
+          {authError && (
+            <div style={{ marginTop: 10, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+              {authError}
+            </div>
+          )}
+          {authNotice && (
+            <div style={{ marginTop: 10, padding: "8px 10px", background: TEAL_SOFT, color: TEAL, borderRadius: 4, fontSize: 12 }}>
+              {authNotice}
+            </div>
+          )}
+
+          <div style={{ marginTop: 16, textAlign: "center", fontSize: 12.5, color: INK_SOFT }}>
+            {authMode === "signup" ? "Already have an account?" : "Don't have an account?"}{" "}
+            <button
+              onClick={() => { setAuthMode(authMode === "signup" ? "login" : "signup"); setAuthError(null); setAuthNotice(null); }}
+              style={{ background: "none", border: "none", color: TEAL, fontWeight: 600, cursor: "pointer", padding: 0, fontSize: 12.5 }}
+            >
+              {authMode === "signup" ? "Log in" : "Sign up"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (!loaded) {
     return (
       <div style={{ fontFamily: "'Inter', sans-serif", padding: "3rem", textAlign: "center", color: INK_SOFT }}>
@@ -750,8 +924,13 @@ export default function CalorieTrackerApp() {
             {view === "history" && "History"}
           </h1>
         </div>
-        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-          {saving ? "saving…" : "saved"}
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+            {saving ? "saving…" : "saved"}
+          </span>
+          <button onClick={handleLogout} style={{ ...secondaryButtonStyle, fontSize: 11, padding: "5px 10px" }}>
+            Log out
+          </button>
         </div>
       </div>
 

@@ -34,6 +34,36 @@ const RATES = [
 
 const MEALS = ["Breakfast", "Lunch", "Dinner", "Snack", "Before training", "After training"];
 
+function draftKey(userId) {
+  return `calorie-tracker-draft-${userId}`;
+}
+
+function saveDraft(userId, data) {
+  try {
+    sessionStorage.setItem(draftKey(userId), JSON.stringify(data));
+  } catch (err) {
+    console.error("Draft save error:", err);
+  }
+}
+
+function loadDraft(userId) {
+  try {
+    const raw = sessionStorage.getItem(draftKey(userId));
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    console.error("Draft load error:", err);
+    return null;
+  }
+}
+
+function clearDraft(userId) {
+  try {
+    sessionStorage.removeItem(draftKey(userId));
+  } catch (err) {
+    console.error("Draft clear error:", err);
+  }
+}
+
 function todayStr() {
   const d = new Date();
   return d.toISOString().slice(0, 10);
@@ -343,6 +373,7 @@ export default function CalorieTrackerApp() {
   }
 
   async function handleLogout() {
+    if (session && session.user) clearDraft(session.user.id);
     await supabase.auth.signOut();
     setLoaded(false);
   }
@@ -387,7 +418,7 @@ export default function CalorieTrackerApp() {
           } else {
             const { data: created, error: createErr } = await supabase
               .from("profile")
-              .insert({ user_id: userId })
+              .upsert({ user_id: userId }, { onConflict: "user_id", ignoreDuplicates: false })
               .select()
               .single();
             if (createErr) throw createErr;
@@ -430,6 +461,16 @@ export default function CalorieTrackerApp() {
           setSavedPlanOverride(override);
           setPlanDateFrom(p.plan_date_from || "");
           setPlanDateTo(p.plan_date_to || "");
+
+          // If there's an unsaved draft from earlier in this browser session
+          // (e.g. the page reloaded before the user hit Save), restore it
+          // over the saved DB values so in-progress edits aren't lost.
+          const draft = loadDraft(userId);
+          if (draft) {
+            if (draft.profile) setProfile(draft.profile);
+            if (draft.goal) setGoal(draft.goal);
+            if (draft.planOverride !== undefined) setPlanOverride(draft.planOverride);
+          }
         }
 
         setPersonalFoods(
@@ -479,7 +520,7 @@ export default function CalorieTrackerApp() {
     }
 
     load();
-  }, [session]);
+  }, [session?.user?.id]);
 
   async function persist(next) {
     if (!session || !session.user) return false;
@@ -605,6 +646,11 @@ export default function CalorieTrackerApp() {
     }
   }
 
+  useEffect(() => {
+    if (!loaded || !session || !session.user) return;
+    saveDraft(session.user.id, { profile, goal, planOverride });
+  }, [profile, goal, planOverride, loaded, session]);
+
   const computedPlan = useMemo(() => computePlan(profile, goal), [profile, goal]);
   const bmiInfo = useMemo(() => computeBMI(profile), [profile]);
   const effectivePlan = planOverride || computedPlan;
@@ -684,6 +730,7 @@ export default function CalorieTrackerApp() {
       setSavedPlanOverride(planOverride);
       setSetupSavedFlash(true);
       setTimeout(() => setSetupSavedFlash(false), 2500);
+      if (session && session.user) clearDraft(session.user.id);
     }
   }
 

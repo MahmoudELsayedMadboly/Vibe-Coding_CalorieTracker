@@ -404,7 +404,7 @@ export default function CalorieTrackerApp() {
           if (legacyProfile) {
             // First login ever: claim all unowned legacy rows across every table.
             await supabase.from("profile").update({ user_id: userId }).is("user_id", null);
-            await supabase.from("personal_foods").update({ user_id: userId }).is("user_id", null);
+            await supabase.from("food_list").update({ user_id: userId }).is("user_id", null);
             await supabase.from("plan_foods").update({ user_id: userId }).is("user_id", null);
             await supabase.from("meal_logs").update({ user_id: userId }).is("user_id", null);
 
@@ -427,7 +427,7 @@ export default function CalorieTrackerApp() {
         }
 
         const [personalFoodsRes, planFoodsRes, logsRes] = await Promise.all([
-          supabase.from("personal_foods").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
+          supabase.from("food_list").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
           supabase.from("plan_foods").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
           supabase.from("meal_logs").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
         ]);
@@ -575,7 +575,7 @@ export default function CalorieTrackerApp() {
       // Personal food database: simplest correct approach is full replace, scoped to this user only.
       if (next.personalFoods !== undefined) {
         const list = next.personalFoods;
-        const { error: delErr } = await supabase.from("personal_foods").delete().eq("user_id", userId);
+        const { error: delErr } = await supabase.from("food_list").delete().eq("user_id", userId);
         if (delErr) throw delErr;
 
         if (list.length > 0) {
@@ -586,7 +586,7 @@ export default function CalorieTrackerApp() {
             cal_per_100g: f.calPer100g,
             typical_grams: f.typicalGrams,
           }));
-          const { error: insErr } = await supabase.from("personal_foods").insert(rows);
+          const { error: insErr } = await supabase.from("food_list").insert(rows);
           if (insErr) throw insErr;
         }
       }
@@ -739,7 +739,7 @@ export default function CalorieTrackerApp() {
     }
   }
 
-  function addFood() {
+  async function addFood() {
     setAddFoodError(null);
 
     if (!newFood.personalFoodId) {
@@ -773,18 +773,28 @@ export default function CalorieTrackerApp() {
     };
 
     const next = [...foods, food];
-    setFoods(next);
-    setNewFood({ personalFoodId: "", grams: "", calories: "", meal: newFood.meal });
-    persist({ foods: next });
+    const ok = await persist({ foods: next });
+
+    if (ok) {
+      setFoods(next);
+      setNewFood({ personalFoodId: "", grams: "", calories: "", meal: newFood.meal });
+    } else {
+      setAddFoodError("Couldn't save this food. Please try again.");
+    }
   }
 
-  function removeFood(id) {
+  async function removeFood(id) {
     const next = foods.filter((f) => f.id !== id);
-    setFoods(next);
-    persist({ foods: next });
+    const ok = await persist({ foods: next });
+
+    if (ok) {
+      setFoods(next);
+    } else {
+      setAddFoodError("Couldn't remove this food. Please try again.");
+    }
   }
 
-  function addPersonalFood() {
+  async function addPersonalFood() {
     setPersonalFoodError(null);
 
     if (!newPersonalFood.name || !newPersonalFood.typicalGrams) {
@@ -821,18 +831,28 @@ export default function CalorieTrackerApp() {
     };
 
     const next = [...personalFoods, entry];
-    setPersonalFoods(next);
-    setNewPersonalFood({ name: "", calPer100g: "", typicalGrams: "" });
-    persist({ personalFoods: next });
+    const ok = await persist({ personalFoods: next });
+
+    if (ok) {
+      setPersonalFoods(next);
+      setNewPersonalFood({ name: "", calPer100g: "", typicalGrams: "" });
+    } else {
+      setPersonalFoodError("Couldn't save this food. Please try again.");
+    }
   }
 
-  function removePersonalFood(id) {
+  async function removePersonalFood(id) {
     const next = personalFoods.filter((f) => f.id !== id);
-    setPersonalFoods(next);
-    persist({ personalFoods: next });
+    const ok = await persist({ personalFoods: next });
+
+    if (ok) {
+      setPersonalFoods(next);
+    } else {
+      setPersonalFoodError("Couldn't remove this food. Please try again.");
+    }
   }
 
-  function addEntry() {
+  async function addEntry() {
     setEntryError(null);
 
     if (entryFoodId && customName) {
@@ -884,18 +904,28 @@ export default function CalorieTrackerApp() {
     }
 
     const nextLogs = { ...logs, [selectedDate]: [...dayEntries, entry] };
-    setLogs(nextLogs);
-    persist({ logs: nextLogs });
-    setEntryFoodId("");
-    setCustomName("");
-    setEntryGrams("");
+    const ok = await persist({ logs: nextLogs });
+
+    if (ok) {
+      setLogs(nextLogs);
+      setEntryFoodId("");
+      setCustomName("");
+      setEntryGrams("");
+    } else {
+      setEntryError("Couldn't save this entry. Please try again.");
+    }
   }
 
-  function removeEntryOn(date, id) {
+  async function removeEntryOn(date, id) {
     const nextDay = (logs[date] || []).filter((e) => e.id !== id);
     const nextLogs = { ...logs, [date]: nextDay };
-    setLogs(nextLogs);
-    persist({ logs: nextLogs });
+    const ok = await persist({ logs: nextLogs });
+
+    if (ok) {
+      setLogs(nextLogs);
+    } else {
+      setEntryError("Couldn't remove this entry. Please try again.");
+    }
   }
 
   const historyDates = Object.keys(logs).sort().reverse().slice(0, 14);

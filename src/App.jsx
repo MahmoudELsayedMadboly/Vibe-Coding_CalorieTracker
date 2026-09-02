@@ -33,6 +33,7 @@ const RATES = [
 ];
 
 const MEALS = ["Breakfast", "Lunch", "Dinner", "Snack", "Before training", "After training"];
+const COURSES = ["Main", "Side1", "Side2", "Drink", "Dessert"];
 
 function draftKey(userId) {
   return `calorie-tracker-draft-${userId}`;
@@ -291,7 +292,7 @@ export default function CalorieTrackerApp() {
   const [selectedDate, setSelectedDate] = useState(todayStr());
   const [logMeal, setLogMeal] = useState("Breakfast");
 
-  const [newFood, setNewFood] = useState({ personalFoodId: "", grams: "", calories: "", meal: "Breakfast" });
+  const [newFood, setNewFood] = useState({ personalFoodId: "", grams: "", calories: "", meal: "Breakfast", course: "Main" });
   const [addFoodError, setAddFoodError] = useState(null);
   const [personalFoods, setPersonalFoods] = useState([]);
   const [newPersonalFood, setNewPersonalFood] = useState({ name: "", calPer100g: "" });
@@ -487,6 +488,7 @@ export default function CalorieTrackerApp() {
             name: f.name,
             grams: f.grams,
             meal: f.meal,
+            course: f.course || "Main",
             calories: f.calories,
             protein: 0,
             carbs: 0,
@@ -602,6 +604,7 @@ export default function CalorieTrackerApp() {
             name: f.name,
             grams: f.grams,
             meal: f.meal,
+            course: f.course,
             calories: f.calories,
           }));
           const { error: insErr } = await supabase.from("plan_foods").insert(rows);
@@ -759,10 +762,10 @@ export default function CalorieTrackerApp() {
       return;
     }
 
-    const alreadyInMeal = foods.some((f) => f.name === match.name && f.meal === newFood.meal);
+    const alreadyInMeal = foods.some((f) => f.name === match.name && f.meal === newFood.meal && f.course === newFood.course);
 
     if (alreadyInMeal) {
-      setAddFoodError(`"${match.name}" is already added under ${newFood.meal}. Pick a different meal to add it again.`);
+      setAddFoodError(`"${match.name}" is already added under ${newFood.meal} / ${newFood.course}. Pick a different meal or course to add it again.`);
       return;
     }
 
@@ -771,6 +774,7 @@ export default function CalorieTrackerApp() {
       name: match.name,
       grams,
       meal: newFood.meal,
+      course: newFood.course,
       calories: match.calPer100g ? Math.round((match.calPer100g * grams) / 100) : 0,
       protein: 0,
       carbs: 0,
@@ -782,7 +786,7 @@ export default function CalorieTrackerApp() {
 
     if (ok) {
       setFoods(next);
-      setNewFood({ personalFoodId: "", grams: "", calories: "", meal: newFood.meal });
+      setNewFood({ personalFoodId: "", grams: "", calories: "", meal: newFood.meal, course: newFood.course });
     } else {
       setAddFoodError("Couldn't save this food. Please try again.");
     }
@@ -1359,6 +1363,19 @@ export default function CalorieTrackerApp() {
                   ))}
                 </div>
 
+                <label style={labelStyle}>Course</label>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+                  {COURSES.map((c) => (
+                    <button
+                      key={c}
+                      onClick={() => setNewFood({ ...newFood, course: c })}
+                      style={{ ...toggleStyle(newFood.course === c), fontSize: 11, padding: "6px 10px" }}
+                    >
+                      {c}
+                    </button>
+                  ))}
+                </div>
+
                 <button onClick={addFood} style={{ ...secondaryButtonStyle, width: "100%" }}>
                   <Plus size={14} strokeWidth={2.5} /> Add food
                 </button>
@@ -1407,19 +1424,41 @@ export default function CalorieTrackerApp() {
                           {mealTotalCal} kcal total
                         </span>
                       </div>
-                      {mealFoods.map((f) => (
-                        <div key={f.id} style={foodRowStyle}>
-                          <div>
-                            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
-                            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                              {f.grams}g · {f.calories} kcal
+                      {COURSES.map((courseName) => {
+                        const courseFoods = mealFoods.filter((f) => (f.course || "Main") === courseName);
+                        if (courseFoods.length === 0) return null;
+
+                        return (
+                          <div key={courseName} style={{ marginBottom: 8 }}>
+                            <div
+                              style={{
+                                fontFamily: "'Space Grotesk', sans-serif",
+                                fontSize: 10,
+                                fontWeight: 700,
+                                color: INK_SOFT,
+                                textTransform: "uppercase",
+                                letterSpacing: 0.5,
+                                padding: "2px 8px",
+                              }}
+                            >
+                              {courseName}
                             </div>
+                            {courseFoods.map((f) => (
+                              <div key={f.id} style={foodRowStyle}>
+                                <div>
+                                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
+                                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                                    {f.grams}g · {f.calories} kcal
+                                  </div>
+                                </div>
+                                <button onClick={() => removeFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
+                            ))}
                           </div>
-                          <button onClick={() => removeFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
-                            <Trash2 size={14} />
-                          </button>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   );
                 })}

@@ -1433,7 +1433,7 @@ export default function CalorieTrackerApp() {
                             <div
                               style={{
                                 fontFamily: "'Space Grotesk', sans-serif",
-                                fontSize: 10,
+                                fontSize: 12,
                                 fontWeight: 700,
                                 color: INK_SOFT,
                                 textTransform: "uppercase",

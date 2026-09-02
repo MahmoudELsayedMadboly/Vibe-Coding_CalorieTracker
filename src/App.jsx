@@ -766,7 +766,7 @@ export default function CalorieTrackerApp() {
       name: match.name,
       grams: match.typicalGrams,
       meal: newFood.meal,
-      calories: Math.round((match.calPer100g * match.typicalGrams) / 100),
+      calories: match.calPer100g ? Math.round((match.calPer100g * match.typicalGrams) / 100) : 0,
       protein: 0,
       carbs: 0,
       fat: 0,
@@ -787,16 +787,17 @@ export default function CalorieTrackerApp() {
   function addPersonalFood() {
     setPersonalFoodError(null);
 
-    if (!newPersonalFood.name || !newPersonalFood.calPer100g || !newPersonalFood.typicalGrams) {
-      setPersonalFoodError("Fill in the food name, calories per 100g, and quantity in grams.");
+    if (!newPersonalFood.name || !newPersonalFood.typicalGrams) {
+      setPersonalFoodError("Fill in the food name and quantity in grams.");
       return;
     }
 
-    const calPer100g = Number(newPersonalFood.calPer100g);
+    const hasCalories = newPersonalFood.calPer100g !== "" && newPersonalFood.calPer100g !== null && newPersonalFood.calPer100g !== undefined;
+    const calPer100g = hasCalories ? Number(newPersonalFood.calPer100g) : null;
     const typicalGrams = Number(newPersonalFood.typicalGrams);
 
-    if (!calPer100g || calPer100g <= 0) {
-      setPersonalFoodError("Calories per 100g must be a positive number.");
+    if (hasCalories && (!calPer100g || calPer100g <= 0)) {
+      setPersonalFoodError("Calories per 100g must be a positive number, or left blank.");
       return;
     }
 
@@ -1289,7 +1290,7 @@ export default function CalorieTrackerApp() {
                         ...newFood,
                         personalFoodId: id,
                         grams: match.typicalGrams,
-                        calories: Math.round((match.calPer100g * match.typicalGrams) / 100),
+                        calories: match.calPer100g ? Math.round((match.calPer100g * match.typicalGrams) / 100) : 0,
                       });
                     } else {
                       setNewFood({ ...newFood, personalFoodId: "", grams: "", calories: "" });
@@ -1428,7 +1429,7 @@ export default function CalorieTrackerApp() {
                 onChange={(e) => setNewPersonalFood({ ...newPersonalFood, name: e.target.value })}
                 style={inputStyle}
               />
-              <label style={labelStyle}>Calories per 100g</label>
+              <label style={labelStyle}>Calories per 100g (optional)</label>
               <input
                 type="number"
                 placeholder="Calories per 100g"
@@ -1460,7 +1461,7 @@ export default function CalorieTrackerApp() {
                     <div>
                       <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
                       <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                        {f.calPer100g} kcal / 100g · typical {f.typicalGrams}g
+                        {f.calPer100g ? `${f.calPer100g} kcal / 100g` : "No calories set"} · typical {f.typicalGrams}g
                       </div>
                     </div>
                     <button onClick={() => removePersonalFood(f.id)} style={iconButtonStyle} aria-label="Remove food">

@@ -562,7 +562,7 @@ export default function CalorieTrackerApp() {
             plan_override_fat: o ? o.fat : null,
             plan_date_from: dFrom || null,
             plan_date_to: dTo || null,
-            bmi: bmiResult ? Number(bmiResult.bmi.toFixed(1)) : null,
+            bmi_current: bmiResult ? Number(bmiResult.bmi.toFixed(1)) : null,
             bmi_category: bmiResult ? bmiResult.category : null,
             bmi_status: bmiResult ? bmiResult.status : null,
             bmi_percent_diff: bmiResult ? Number(bmiResult.percentDiff.toFixed(1)) : null,

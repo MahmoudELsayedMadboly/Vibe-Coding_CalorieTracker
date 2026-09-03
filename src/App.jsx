@@ -460,8 +460,6 @@ export default function CalorieTrackerApp() {
             : null;
           setPlanOverride(override);
           setSavedPlanOverride(override);
-          setPlanDateFrom(p.plan_date_from || "");
-          setPlanDateTo(p.plan_date_to || "");
 
           // If there's an unsaved draft from earlier in this browser session
           // (e.g. the page reloaded before the user hit Save), restore it
@@ -482,8 +480,10 @@ export default function CalorieTrackerApp() {
           }))
         );
 
+        const planFoodsRows = planFoodsRes.data || [];
+
         setFoods(
-          (planFoodsRes.data || []).map((f) => ({
+          planFoodsRows.map((f) => ({
             id: f.id,
             name: f.name,
             grams: f.grams,
@@ -495,6 +495,9 @@ export default function CalorieTrackerApp() {
             fat: 0,
           }))
         );
+
+        setPlanDateFrom((planFoodsRows[0] && planFoodsRows[0].plan_date_from) || "");
+        setPlanDateTo((planFoodsRows[0] && planFoodsRows[0].plan_date_to) || "");
 
         const logsByDate = {};
         (logsRes.data || []).forEach((row) => {
@@ -531,19 +534,15 @@ export default function CalorieTrackerApp() {
     setSaveError(null);
 
     try {
-      // Profile / goal / plan override / plan dates all live on the single profile row.
+      // Profile / goal / plan override all live on the single profile row.
       if (
         next.profile !== undefined ||
         next.goal !== undefined ||
-        next.planOverride !== undefined ||
-        next.planDateFrom !== undefined ||
-        next.planDateTo !== undefined
+        next.planOverride !== undefined
       ) {
         const p = next.profile ?? profile;
         const g = next.goal ?? goal;
         const o = next.planOverride !== undefined ? next.planOverride : planOverride;
-        const dFrom = next.planDateFrom !== undefined ? next.planDateFrom : planDateFrom;
-        const dTo = next.planDateTo !== undefined ? next.planDateTo : planDateTo;
         const bmiResult = computeBMI(p);
 
         const { error } = await supabase
@@ -560,8 +559,6 @@ export default function CalorieTrackerApp() {
             plan_override_protein: o ? o.protein : null,
             plan_override_carbs: o ? o.carbs : null,
             plan_override_fat: o ? o.fat : null,
-            plan_date_from: dFrom || null,
-            plan_date_to: dTo || null,
             bmi_current: bmiResult ? Number(bmiResult.bmi.toFixed(1)) : null,
             bmi_category: bmiResult ? bmiResult.category : null,
             bmi_status: bmiResult ? bmiResult.status : null,
@@ -571,6 +568,22 @@ export default function CalorieTrackerApp() {
           .eq("user_id", userId);
 
         if (error) throw error;
+      }
+
+      // Plan date range is shared across the whole plan, so it lives on every plan_foods row.
+      if (next.planDateFrom !== undefined || next.planDateTo !== undefined) {
+        const dFrom = next.planDateFrom !== undefined ? next.planDateFrom : planDateFrom;
+        const dTo = next.planDateTo !== undefined ? next.planDateTo : planDateTo;
+
+        const { error: dateErr } = await supabase
+          .from("plan_foods")
+          .update({
+            plan_date_from: dFrom || null,
+            plan_date_to: dTo || null,
+          })
+          .eq("user_id", userId);
+
+        if (dateErr) throw dateErr;
       }
 
       // Personal food database: simplest correct approach is full replace, scoped to this user only.
@@ -606,6 +619,8 @@ export default function CalorieTrackerApp() {
             meal: f.meal,
             course: f.course,
             calories: f.calories,
+            plan_date_from: (f.plan_date_from !== undefined ? f.plan_date_from : planDateFrom) || null,
+            plan_date_to: (f.plan_date_to !== undefined ? f.plan_date_to : planDateTo) || null,
           }));
           const { error: insErr } = await supabase.from("plan_foods").insert(rows);
           if (insErr) throw insErr;
@@ -779,6 +794,8 @@ export default function CalorieTrackerApp() {
       protein: 0,
       carbs: 0,
       fat: 0,
+      plan_date_from: planDateFrom,
+      plan_date_to: planDateTo,
     };
 
     const next = [...foods, food];

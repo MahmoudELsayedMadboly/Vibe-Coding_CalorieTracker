@@ -586,24 +586,6 @@ export default function CalorieTrackerApp() {
         if (dateErr) throw dateErr;
       }
 
-      // Personal food database: simplest correct approach is full replace, scoped to this user only.
-      if (next.personalFoods !== undefined) {
-        const list = next.personalFoods;
-        const { error: delErr } = await supabase.from("food_list").delete().eq("user_id", userId);
-        if (delErr) throw delErr;
-
-        if (list.length > 0) {
-          const rows = list.map((f) => ({
-            id: f.id,
-            user_id: userId,
-            name: f.name,
-            cal_per_100g: f.calPer100g,
-          }));
-          const { error: insErr } = await supabase.from("food_list").insert(rows);
-          if (insErr) throw insErr;
-        }
-      }
-
       // Configured meal plan ("Food materials" / "Create a plan"): full replace, scoped to this user only.
       if (next.foods !== undefined) {
         const list = next.foods;
@@ -849,11 +831,15 @@ export default function CalorieTrackerApp() {
       calPer100g,
     };
 
-    const next = [...personalFoods, entry];
-    const ok = await persist({ personalFoods: next });
+    const { error: insErr } = await supabase.from("food_list").insert({
+      id: entry.id,
+      user_id: session.user.id,
+      name: entry.name,
+      cal_per_100g: entry.calPer100g,
+    });
 
-    if (ok) {
-      setPersonalFoods(next);
+    if (!insErr) {
+      setPersonalFoods([...personalFoods, entry]);
       setNewPersonalFood({ name: "", calPer100g: "" });
     } else {
       setPersonalFoodError("Couldn't save this food. Please try again.");
@@ -861,11 +847,10 @@ export default function CalorieTrackerApp() {
   }
 
   async function removePersonalFood(id) {
-    const next = personalFoods.filter((f) => f.id !== id);
-    const ok = await persist({ personalFoods: next });
+    const { error: delErr } = await supabase.from("food_list").delete().eq("id", id).eq("user_id", session.user.id);
 
-    if (ok) {
-      setPersonalFoods(next);
+    if (!delErr) {
+      setPersonalFoods(personalFoods.filter((f) => f.id !== id));
     } else {
       setPersonalFoodError("Couldn't remove this food. Please try again.");
     }
@@ -1510,10 +1495,17 @@ export default function CalorieTrackerApp() {
               />
               <label style={labelStyle}>Calories per 100g (optional)</label>
               <input
-                type="number"
+                type="text"
+                inputMode="decimal"
                 placeholder="Calories per 100g"
                 value={newPersonalFood.calPer100g}
-                onChange={(e) => setNewPersonalFood({ ...newPersonalFood, calPer100g: e.target.value })}
+                onChange={(e) => {
+                  const raw = e.target.value.replace(/[^0-9.]/g, "");
+                  const firstDot = raw.indexOf(".");
+                  const sanitized =
+                    firstDot === -1 ? raw : raw.slice(0, firstDot + 1) + raw.slice(firstDot + 1).replace(/\./g, "");
+                  setNewPersonalFood({ ...newPersonalFood, calPer100g: sanitized });
+                }}
                 style={inputStyle}
               />
               <button onClick={addPersonalFood} style={{ ...secondaryButtonStyle, width: "100%" }}>

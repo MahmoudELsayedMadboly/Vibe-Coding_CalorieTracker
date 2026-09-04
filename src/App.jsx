@@ -560,7 +560,7 @@ export default function CalorieTrackerApp() {
             plan_override_carbs: o ? o.carbs : null,
             plan_override_fat: o ? o.fat : null,
             bmi_current: bmiResult ? Number(bmiResult.bmi.toFixed(1)) : null,
-            bmi_category: bmiResult ? bmiResult.category : null,
+            bmi_category_current: bmiResult ? bmiResult.category : null,
             bmi_status: bmiResult ? bmiResult.status : null,
             bmi_percent_diff: bmiResult ? Number(bmiResult.percentDiff.toFixed(1)) : null,
             updated_at: new Date().toISOString(),

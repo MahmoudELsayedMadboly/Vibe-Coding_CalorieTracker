@@ -1413,7 +1413,7 @@ export default function CalorieTrackerApp() {
                         <span
                           style={{
                             fontFamily: "'Space Grotesk', sans-serif",
-                            fontSize: 12,
+                            fontSize: 14,
                             fontWeight: 700,
                             color: TEAL,
                             textTransform: "uppercase",
@@ -1435,12 +1435,15 @@ export default function CalorieTrackerApp() {
                             <div
                               style={{
                                 fontFamily: "'Space Grotesk', sans-serif",
-                                fontSize: 12,
+                                fontSize: 11,
                                 fontWeight: 700,
-                                color: INK_SOFT,
+                                color: GREEN,
+                                background: GREEN_SOFT,
                                 textTransform: "uppercase",
                                 letterSpacing: 0.5,
                                 padding: "2px 8px",
+                                borderRadius: 4,
+                                display: "inline-block",
                               }}
                             >
                               {courseName}

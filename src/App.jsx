@@ -803,11 +803,21 @@ export default function CalorieTrackerApp() {
       plan_name: planName,
     };
 
-    const next = [...foods, food];
-    const ok = await persist({ foods: next });
+    const { error: insErr } = await supabase.from("plan_foods").insert({
+      id: food.id,
+      user_id: session.user.id,
+      name: food.name,
+      grams: food.grams,
+      meal: food.meal,
+      course: food.course,
+      calories: food.calories,
+      plan_name: food.plan_name || null,
+      plan_date_from: food.plan_date_from || null,
+      plan_date_to: food.plan_date_to || null,
+    });
 
-    if (ok) {
-      setFoods(next);
+    if (!insErr) {
+      setFoods([...foods, food]);
       setNewFood({ personalFoodId: "", grams: "", calories: "", meal: newFood.meal, course: newFood.course });
     } else {
       setAddFoodError("Couldn't save this food. Please try again.");
@@ -815,11 +825,10 @@ export default function CalorieTrackerApp() {
   }
 
   async function removeFood(id) {
-    const next = foods.filter((f) => f.id !== id);
-    const ok = await persist({ foods: next });
+    const { error: delErr } = await supabase.from("plan_foods").delete().eq("id", id).eq("user_id", session.user.id);
 
-    if (ok) {
-      setFoods(next);
+    if (!delErr) {
+      setFoods(foods.filter((f) => f.id !== id));
     } else {
       setAddFoodError("Couldn't remove this food. Please try again.");
     }
@@ -1332,7 +1341,7 @@ export default function CalorieTrackerApp() {
                 />
               </div>
 
-              <button onClick={saveSetup} style={{ ...primaryButtonStyle, marginTop: 8, width: "100%", background: setupSavedFlash ? GREEN : TEAL, border: `1px solid ${setupSavedFlash ? GREEN : TEAL}` }}>
+              <button onClick={saveSetup} style={{ ...primaryButtonStyle, marginTop: 8, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}>
                 {setupSavedFlash ? <Check size={14} strokeWidth={2.5} /> : <Save size={14} strokeWidth={2.5} />}
                 {setupSavedFlash ? "Configuration saved" : "Save configuration"}
               </button>
@@ -1350,8 +1359,20 @@ export default function CalorieTrackerApp() {
               <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 10 }}>
                 Define your plan
               </div>
-              <div style={{ marginBottom: 14, padding: "8px 10px", background: TEAL_SOFT, color: TEAL, borderRadius: 4, fontSize: 12, fontWeight: 600 }}>
-                This plan's daily target: {effectivePlan.calories} kcal
+              <div style={{ marginBottom: 14 }}>
+                <span
+                  style={{
+                    display: "inline-block",
+                    padding: "3px 8px",
+                    background: TEAL_SOFT,
+                    color: TEAL,
+                    borderRadius: 4,
+                    fontSize: 12,
+                    fontWeight: 700,
+                  }}
+                >
+                  This plan's daily target: {effectivePlan.calories} kcal
+                </span>
               </div>
               <div
                 style={{
@@ -1378,7 +1399,7 @@ export default function CalorieTrackerApp() {
                   setPlanName(val);
                   persist({ planName: val });
                 }}
-                style={inputStyle}
+                style={{ ...inputStyle, width: "50%" }}
               />
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 6 }}>
@@ -1484,7 +1505,7 @@ export default function CalorieTrackerApp() {
                   ))}
                 </div>
 
-                <button onClick={addFood} style={{ ...secondaryButtonStyle, width: "100%" }}>
+                <button onClick={addFood} style={{ ...secondaryButtonStyle, width: "auto", background: GREEN, border: `1px solid ${GREEN}`, color: "#FFFFFF" }}>
                   <Plus size={14} strokeWidth={2.5} /> Add food
                 </button>
 
@@ -1617,7 +1638,7 @@ export default function CalorieTrackerApp() {
                 }}
                 style={inputStyle}
               />
-              <button onClick={addPersonalFood} style={{ ...secondaryButtonStyle, width: "100%" }}>
+              <button onClick={addPersonalFood} style={{ ...secondaryButtonStyle, width: "auto", background: GREEN, border: `1px solid ${GREEN}`, color: "#FFFFFF" }}>
                 <Plus size={14} strokeWidth={2.5} /> Add to list
               </button>
               {personalFoodError && (

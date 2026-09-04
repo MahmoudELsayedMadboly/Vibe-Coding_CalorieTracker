@@ -65,15 +65,24 @@ function clearDraft(userId) {
   }
 }
 
+// Local calendar date (not UTC) — <input type="date"> works in the browser's
+// local timezone, so using toISOString() here can shift the date by a day
+// and desync it from the min/max the picker actually enforces.
+function localDateStr(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 function todayStr() {
-  const d = new Date();
-  return d.toISOString().slice(0, 10);
+  return localDateStr(new Date());
 }
 
 function threeDaysAgoStr() {
   const d = new Date();
   d.setDate(d.getDate() - 3);
-  return d.toISOString().slice(0, 10);
+  return localDateStr(d);
 }
 
 function computeBMI(profile) {
@@ -683,7 +692,11 @@ export default function CalorieTrackerApp() {
 
   const dayEntries = logs[selectedDate] || [];
 
-  const selectedEntryFood = personalFoods.find((f) => f.id === entryFoodId);
+  const uniquePlanFoodNames = useMemo(() => {
+    return Array.from(new Set(foods.map((f) => f.name)));
+  }, [foods]);
+
+  const selectedEntryFood = personalFoods.find((f) => f.name === entryFoodId);
   const entryCalories = entryFoodId
     ? (selectedEntryFood && selectedEntryFood.calPer100g
         ? Math.round((selectedEntryFood.calPer100g * (Number(entryGrams) || 0)) / 100)
@@ -951,7 +964,7 @@ export default function CalorieTrackerApp() {
     let entry;
 
     if (entryFoodId) {
-      const food = personalFoods.find((f) => f.id === entryFoodId);
+      const food = personalFoods.find((f) => f.name === entryFoodId);
       if (!food) return;
 
       entry = {
@@ -1717,11 +1730,11 @@ export default function CalorieTrackerApp() {
               value={entryFoodId}
               onChange={(e) => setEntryFoodId(e.target.value)}
               style={inputStyle}
-              disabled={personalFoods.length === 0}
+              disabled={uniquePlanFoodNames.length === 0}
             >
-              <option value="">{personalFoods.length === 0 ? "No foods configured yet" : "Select a food…"}</option>
-              {personalFoods.map((f) => (
-                <option key={f.id} value={f.id}>{f.name}</option>
+              <option value="">{uniquePlanFoodNames.length === 0 ? "No foods configured yet" : "Select a food…"}</option>
+              {uniquePlanFoodNames.map((name) => (
+                <option key={name} value={name}>{name}</option>
               ))}
             </select>
 
@@ -1736,15 +1749,19 @@ export default function CalorieTrackerApp() {
             <label style={labelStyle}>Grams</label>
             <input type="number" placeholder="Grams" value={entryGrams} onChange={(e) => setEntryGrams(e.target.value)} style={inputStyle} />
 
-            <label style={labelStyle}>Calories per 100 gram</label>
-            <input
-              type="text"
-              inputMode="numeric"
-              placeholder="Calories per 100 gram"
-              value={entryCalPer100g}
-              onChange={(e) => setEntryCalPer100g(e.target.value.replace(/[^0-9]/g, ""))}
-              style={inputStyle}
-            />
+            {customName && !entryFoodId && (
+              <>
+                <label style={labelStyle}>Calories per 100 gram</label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  placeholder="Calories per 100 gram"
+                  value={entryCalPer100g}
+                  onChange={(e) => setEntryCalPer100g(e.target.value.replace(/[^0-9]/g, ""))}
+                  style={inputStyle}
+                />
+              </>
+            )}
 
             <label style={labelStyle}>Calories per your entered grams</label>
             <input

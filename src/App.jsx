@@ -70,9 +70,9 @@ function todayStr() {
   return d.toISOString().slice(0, 10);
 }
 
-function sevenDaysAgoStr() {
+function threeDaysAgoStr() {
   const d = new Date();
-  d.setDate(d.getDate() - 7);
+  d.setDate(d.getDate() - 3);
   return d.toISOString().slice(0, 10);
 }
 
@@ -300,6 +300,7 @@ export default function CalorieTrackerApp() {
   const [entryFoodId, setEntryFoodId] = useState("");
   const [customName, setCustomName] = useState("");
   const [entryGrams, setEntryGrams] = useState("");
+  const [entryCalPer100g, setEntryCalPer100g] = useState("");
   const [entryError, setEntryError] = useState(null);
   const [savedPlanOverride, setSavedPlanOverride] = useState(null);
   const [planDateFrom, setPlanDateFrom] = useState("");
@@ -682,6 +683,15 @@ export default function CalorieTrackerApp() {
 
   const dayEntries = logs[selectedDate] || [];
 
+  const selectedEntryFood = personalFoods.find((f) => f.id === entryFoodId);
+  const entryCalories = entryFoodId
+    ? (selectedEntryFood && selectedEntryFood.calPer100g
+        ? Math.round((selectedEntryFood.calPer100g * (Number(entryGrams) || 0)) / 100)
+        : 0)
+    : (Number(entryCalPer100g)
+        ? Math.round((Number(entryCalPer100g) * (Number(entryGrams) || 0)) / 100)
+        : 0);
+
   const dayTotals = useMemo(() => {
     return dayEntries.reduce(
       (acc, e) => ({
@@ -941,28 +951,33 @@ export default function CalorieTrackerApp() {
     let entry;
 
     if (entryFoodId) {
-      const food = foods.find((f) => f.id === entryFoodId);
+      const food = personalFoods.find((f) => f.id === entryFoodId);
       if (!food) return;
-
-      const scale = food.grams > 0 ? grams / food.grams : 0;
 
       entry = {
         id: crypto.randomUUID(),
         name: food.name,
         meal: logMeal,
         grams,
-        calories: Math.round(food.calories * scale),
-        protein: Math.round(food.protein * scale),
-        carbs: Math.round(food.carbs * scale),
-        fat: Math.round(food.fat * scale),
+        calories: food.calPer100g ? Math.round((food.calPer100g * grams) / 100) : 0,
+        protein: 0,
+        carbs: 0,
+        fat: 0,
       };
     } else {
+      const calPer100g = Number(entryCalPer100g);
+
+      if (!entryCalPer100g || !calPer100g || calPer100g <= 0) {
+        setEntryError("Enter calories per 100 gram for this food.");
+        return;
+      }
+
       entry = {
         id: crypto.randomUUID(),
         name: customName,
         meal: logMeal,
         grams,
-        calories: 0,
+        calories: Math.round((calPer100g * grams) / 100),
         protein: 0,
         carbs: 0,
         fat: 0,
@@ -977,6 +992,7 @@ export default function CalorieTrackerApp() {
       setEntryFoodId("");
       setCustomName("");
       setEntryGrams("");
+      setEntryCalPer100g("");
     } else {
       setEntryError("Couldn't save this entry. Please try again.");
     }
@@ -1677,7 +1693,7 @@ export default function CalorieTrackerApp() {
             <input
               type="date"
               value={selectedDate}
-              min={sevenDaysAgoStr()}
+              min={threeDaysAgoStr()}
               max={todayStr()}
               onChange={(e) => setSelectedDate(e.target.value)}
               style={inputStyle}
@@ -1701,10 +1717,10 @@ export default function CalorieTrackerApp() {
               value={entryFoodId}
               onChange={(e) => setEntryFoodId(e.target.value)}
               style={inputStyle}
-              disabled={foods.length === 0}
+              disabled={personalFoods.length === 0}
             >
-              <option value="">{foods.length === 0 ? "No foods configured yet" : "Select a food…"}</option>
-              {foods.map((f) => (
+              <option value="">{personalFoods.length === 0 ? "No foods configured yet" : "Select a food…"}</option>
+              {personalFoods.map((f) => (
                 <option key={f.id} value={f.id}>{f.name}</option>
               ))}
             </select>
@@ -1720,7 +1736,25 @@ export default function CalorieTrackerApp() {
             <label style={labelStyle}>Grams</label>
             <input type="number" placeholder="Grams" value={entryGrams} onChange={(e) => setEntryGrams(e.target.value)} style={inputStyle} />
 
-            <button onClick={addEntry} style={{ ...secondaryButtonStyle, width: "100%" }}>
+            <label style={labelStyle}>Calories per 100 gram</label>
+            <input
+              type="text"
+              inputMode="numeric"
+              placeholder="Calories per 100 gram"
+              value={entryCalPer100g}
+              onChange={(e) => setEntryCalPer100g(e.target.value.replace(/[^0-9]/g, ""))}
+              style={inputStyle}
+            />
+
+            <label style={labelStyle}>Calories per your entered grams</label>
+            <input
+              type="number"
+              value={entryCalories}
+              readOnly
+              style={{ ...inputStyle, background: PAPER, color: INK_SOFT, cursor: "not-allowed" }}
+            />
+
+            <button onClick={addEntry} style={{ ...secondaryButtonStyle, width: "auto", background: GREEN, border: `1px solid ${GREEN}`, color: "#FFFFFF" }}>
               <Plus size={14} strokeWidth={2.5} /> Log this item
             </button>
             {entryError && (

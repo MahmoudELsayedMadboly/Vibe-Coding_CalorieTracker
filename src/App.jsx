@@ -304,12 +304,20 @@ export default function CalorieTrackerApp() {
   const [savedPlanOverride, setSavedPlanOverride] = useState(null);
   const [planDateFrom, setPlanDateFrom] = useState("");
   const [planDateTo, setPlanDateTo] = useState("");
+  const [planName, setPlanName] = useState("");
   const [tableFilterType, setTableFilterType] = useState("");
   const [tableFilterDateFrom, setTableFilterDateFrom] = useState("");
   const [tableFilterDateTo, setTableFilterDateTo] = useState("");
   const [tableFilterMeal, setTableFilterMeal] = useState("");
   const [tableFilterFood, setTableFilterFood] = useState("");
   const [tablePage, setTablePage] = useState(1);
+
+  const [ideaText, setIdeaText] = useState("");
+  const [ideaError, setIdeaError] = useState(null);
+  const [ideaFlash, setIdeaFlash] = useState(false);
+  const [bugText, setBugText] = useState("");
+  const [bugError, setBugError] = useState(null);
+  const [bugFlash, setBugFlash] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -498,6 +506,7 @@ export default function CalorieTrackerApp() {
 
         setPlanDateFrom((planFoodsRows[0] && planFoodsRows[0].plan_date_from) || "");
         setPlanDateTo((planFoodsRows[0] && planFoodsRows[0].plan_date_to) || "");
+        setPlanName((planFoodsRows[0] && planFoodsRows[0].plan_name) || "");
 
         const logsByDate = {};
         (logsRes.data || []).forEach((row) => {
@@ -586,6 +595,18 @@ export default function CalorieTrackerApp() {
         if (dateErr) throw dateErr;
       }
 
+      // Plan name is shared across the whole plan, so it lives on every plan_foods row.
+      if (next.planName !== undefined) {
+        const name = next.planName;
+
+        const { error: nameErr } = await supabase
+          .from("plan_foods")
+          .update({ plan_name: name || null })
+          .eq("user_id", userId);
+
+        if (nameErr) throw nameErr;
+      }
+
       // Configured meal plan ("Food materials" / "Create a plan"): full replace, scoped to this user only.
       if (next.foods !== undefined) {
         const list = next.foods;
@@ -603,6 +624,7 @@ export default function CalorieTrackerApp() {
             calories: f.calories,
             plan_date_from: (f.plan_date_from !== undefined ? f.plan_date_from : planDateFrom) || null,
             plan_date_to: (f.plan_date_to !== undefined ? f.plan_date_to : planDateTo) || null,
+            plan_name: (f.plan_name !== undefined ? f.plan_name : planName) || null,
           }));
           const { error: insErr } = await supabase.from("plan_foods").insert(rows);
           if (insErr) throw insErr;
@@ -778,6 +800,7 @@ export default function CalorieTrackerApp() {
       fat: 0,
       plan_date_from: planDateFrom,
       plan_date_to: planDateTo,
+      plan_name: planName,
     };
 
     const next = [...foods, food];
@@ -799,6 +822,36 @@ export default function CalorieTrackerApp() {
       setFoods(next);
     } else {
       setAddFoodError("Couldn't remove this food. Please try again.");
+    }
+  }
+
+  async function submitFeedback(kind) {
+    const isIdea = kind === "idea";
+    const text = (isIdea ? ideaText : bugText).trim();
+    const setError = isIdea ? setIdeaError : setBugError;
+    const setText = isIdea ? setIdeaText : setBugText;
+    const setFlash = isIdea ? setIdeaFlash : setBugFlash;
+
+    setError(null);
+
+    if (!text) {
+      setError(isIdea ? "Type your idea first." : "Describe the bug first.");
+      return;
+    }
+
+    const { error } = await supabase.from("feedback").insert({
+      id: crypto.randomUUID(),
+      user_id: session.user.id,
+      type: kind,
+      message: text,
+    });
+
+    if (!error) {
+      setText("");
+      setFlash(true);
+      setTimeout(() => setFlash(false), 2500);
+    } else {
+      setError("Couldn't submit. Please try again.");
     }
   }
 
@@ -1051,6 +1104,43 @@ export default function CalorieTrackerApp() {
         </div>
       </div>
 
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, padding: "10px 14px", background: PANEL, border: `1px solid ${GRID}`, borderRadius: 6, marginBottom: 20 }}>
+        <div style={{ flex: "1 1 240px", minWidth: 200 }}>
+          <label style={labelStyle}>Suggest a new idea</label>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input
+              type="text"
+              placeholder="Have an idea for the app?"
+              value={ideaText}
+              onChange={(e) => setIdeaText(e.target.value)}
+              style={{ ...smallInputStyle, flex: 1 }}
+            />
+            <button onClick={() => submitFeedback("idea")} style={{ ...secondaryButtonStyle, fontSize: 11, padding: "7px 10px" }}>
+              Send
+            </button>
+          </div>
+          {ideaFlash && <div style={{ marginTop: 4, fontSize: 11, color: GREEN }}>Thanks — got it!</div>}
+          {ideaError && <div style={{ marginTop: 4, fontSize: 11, color: RED }}>{ideaError}</div>}
+        </div>
+        <div style={{ flex: "1 1 240px", minWidth: 200 }}>
+          <label style={labelStyle}>Report a bug</label>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input
+              type="text"
+              placeholder="Found something broken?"
+              value={bugText}
+              onChange={(e) => setBugText(e.target.value)}
+              style={{ ...smallInputStyle, flex: 1 }}
+            />
+            <button onClick={() => submitFeedback("bug")} style={{ ...secondaryButtonStyle, fontSize: 11, padding: "7px 10px" }}>
+              Send
+            </button>
+          </div>
+          {bugFlash && <div style={{ marginTop: 4, fontSize: 11, color: GREEN }}>Thanks — got it!</div>}
+          {bugError && <div style={{ marginTop: 4, fontSize: 11, color: RED }}>{bugError}</div>}
+        </div>
+      </div>
+
       <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
         {[
           { id: "setup", label: "Configuration" },
@@ -1260,6 +1350,9 @@ export default function CalorieTrackerApp() {
               <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 10 }}>
                 Define your plan
               </div>
+              <div style={{ marginBottom: 14, padding: "8px 10px", background: TEAL_SOFT, color: TEAL, borderRadius: 4, fontSize: 12, fontWeight: 600 }}>
+                This plan's daily target: {effectivePlan.calories} kcal
+              </div>
               <div
                 style={{
                   fontSize: 12,
@@ -1274,6 +1367,19 @@ export default function CalorieTrackerApp() {
               >
                 Select a food from your list, then enter the grams — calories are calculated automatically from the calories per 100g you set in "Configure your food list".
               </div>
+
+              <label style={labelStyle}>Plan name</label>
+              <input
+                type="text"
+                placeholder="e.g. Cutting phase — September"
+                value={planName}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setPlanName(val);
+                  persist({ planName: val });
+                }}
+                style={inputStyle}
+              />
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 6 }}>
                 <div>

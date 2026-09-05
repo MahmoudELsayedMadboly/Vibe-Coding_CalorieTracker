@@ -18,6 +18,10 @@ const RED_SOFT = "#F5E0DC";
 
 const TOLERANCE = 0.05;
 
+const HISTORY_CHART_HEIGHT = 180;
+const HISTORY_COL_WIDTH = 28;
+const HISTORY_COL_GAP = 6;
+
 const ACTIVITY_LEVELS = [
   { id: "sedentary", label: "Sedentary", mult: 1.2 },
   { id: "light", label: "Lightly active", mult: 1.375 },
@@ -83,6 +87,30 @@ function threeDaysAgoStr() {
   const d = new Date();
   d.setDate(d.getDate() - 3);
   return localDateStr(d);
+}
+
+// Pure calendar-date arithmetic on "YYYY-MM-DD" strings, done in UTC so DST
+// shifts in the local timezone can't push the result onto the wrong day.
+function parseDateStr(s) {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
+}
+
+function addDaysStr(s, days) {
+  const d = parseDateStr(s);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function daysBetweenStr(a, b) {
+  return Math.round((parseDateStr(b) - parseDateStr(a)) / 86400000);
+}
+
+const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function shortDayLabel(s) {
+  const [, m, d] = s.split("-").map(Number);
+  return `${MONTH_ABBR[m - 1]} ${d}`;
 }
 
 function computeBMI(profile) {
@@ -315,6 +343,7 @@ export default function CalorieTrackerApp() {
   const [planDateFrom, setPlanDateFrom] = useState("");
   const [planDateTo, setPlanDateTo] = useState("");
   const [planName, setPlanName] = useState("");
+  const [comparisonDate, setComparisonDate] = useState(todayStr());
   const [tableFilterType, setTableFilterType] = useState("");
   const [tableFilterDateFrom, setTableFilterDateFrom] = useState("");
   const [tableFilterDateTo, setTableFilterDateTo] = useState("");
@@ -514,9 +543,16 @@ export default function CalorieTrackerApp() {
           }))
         );
 
-        setPlanDateFrom((planFoodsRows[0] && planFoodsRows[0].plan_date_from) || "");
-        setPlanDateTo((planFoodsRows[0] && planFoodsRows[0].plan_date_to) || "");
+        const loadedPlanDateFrom = (planFoodsRows[0] && planFoodsRows[0].plan_date_from) || "";
+        const loadedPlanDateTo = (planFoodsRows[0] && planFoodsRows[0].plan_date_to) || "";
+        setPlanDateFrom(loadedPlanDateFrom);
+        setPlanDateTo(loadedPlanDateTo);
         setPlanName((planFoodsRows[0] && planFoodsRows[0].plan_name) || "");
+
+        const today = todayStr();
+        const todayOutsidePlanRange =
+          loadedPlanDateFrom && loadedPlanDateTo && (today < loadedPlanDateFrom || today > loadedPlanDateTo);
+        setComparisonDate(todayOutsidePlanRange ? loadedPlanDateFrom : today);
 
         const logsByDate = {};
         (logsRes.data || []).forEach((row) => {
@@ -695,6 +731,53 @@ export default function CalorieTrackerApp() {
   const uniquePlanFoodNames = useMemo(() => {
     return Array.from(new Set(foods.map((f) => f.name)));
   }, [foods]);
+
+  // "Plan comparison" section — steps through every day in the plan's
+  // configured date range, comparing that day's logged entries against the
+  // plan (which applies identically to every day, it isn't day-specific).
+  const planTotalDays = useMemo(() => {
+    if (!planDateFrom || !planDateTo) return 1;
+    return Math.max(1, daysBetweenStr(planDateFrom, planDateTo) + 1);
+  }, [planDateFrom, planDateTo]);
+
+  const comparisonDayIndex = useMemo(() => {
+    if (!planDateFrom) return 1;
+    return Math.min(planTotalDays, Math.max(1, daysBetweenStr(planDateFrom, comparisonDate) + 1));
+  }, [planDateFrom, comparisonDate, planTotalDays]);
+
+  const actualEntriesForDay = useMemo(() => logs[comparisonDate] || [], [logs, comparisonDate]);
+
+  const dailyActualTotal = useMemo(
+    () => actualEntriesForDay.reduce((sum, e) => sum + (e.calories || 0), 0),
+    [actualEntriesForDay]
+  );
+
+  const dailyConfiguredTotal = useMemo(
+    () => foods.reduce((sum, f) => sum + (f.calories || 0), 0),
+    [foods]
+  );
+
+  const dailyStatus = statusFor(dailyActualTotal, dailyConfiguredTotal);
+
+  const mealComparisons = useMemo(() => {
+    return MEALS.map((mealName) => {
+      const mealConfiguredFoods = foods.filter((f) => f.meal === mealName);
+      const mealActualEntries = actualEntriesForDay.filter((e) => e.meal === mealName);
+      return { mealName, mealConfiguredFoods, mealActualEntries };
+    }).filter((m) => m.mealConfiguredFoods.length > 0 || m.mealActualEntries.length > 0);
+  }, [foods, actualEntriesForDay]);
+
+  function goToPrevComparisonDay() {
+    if (!planDateFrom) return;
+    const prev = addDaysStr(comparisonDate, -1);
+    if (prev >= planDateFrom) setComparisonDate(prev);
+  }
+
+  function goToNextComparisonDay() {
+    if (!planDateTo) return;
+    const next = addDaysStr(comparisonDate, 1);
+    if (next <= planDateTo) setComparisonDate(next);
+  }
 
   const selectedEntryFood = personalFoods.find((f) => f.name === entryFoodId);
   const entryCalories = entryFoodId
@@ -1023,7 +1106,28 @@ export default function CalorieTrackerApp() {
     }
   }
 
-  const historyDates = Object.keys(logs).sort().reverse().slice(0, 14);
+  const planExpired = !planDateFrom || !planDateTo || planDateTo < todayStr();
+
+  const historyDayDates = useMemo(() => {
+    if (planExpired) return [];
+    const count = daysBetweenStr(planDateFrom, planDateTo) + 1;
+    const dates = [];
+    for (let i = 0; i < count; i++) dates.push(addDaysStr(planDateFrom, i));
+    return dates;
+  }, [planExpired, planDateFrom, planDateTo]);
+
+  const historyDayData = useMemo(() => {
+    return historyDayDates.map((date) => {
+      const entries = logs[date] || [];
+      const actualTotal = entries.reduce((sum, e) => sum + (e.calories || 0), 0);
+      return { date, actualTotal, hasEntries: entries.length > 0 };
+    });
+  }, [historyDayDates, logs]);
+
+  const historyMaxScale = useMemo(() => {
+    const maxActual = historyDayData.reduce((max, d) => Math.max(max, d.actualTotal), 0);
+    return Math.max(effectivePlan.calories, maxActual, 1) * 1.1;
+  }, [historyDayData, effectivePlan.calories]);
 
   if (session === undefined) {
     return (
@@ -1698,6 +1802,7 @@ export default function CalorieTrackerApp() {
       )}
 
       {view === "log" && (
+        <>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
           <div style={panelStyle}>
             <SectionTitle>Add meal</SectionTitle>
@@ -1951,37 +2056,382 @@ export default function CalorieTrackerApp() {
             </div>
           </div>
         </div>
+
+        <div style={{ ...panelStyle, marginTop: 20 }}>
+          <SectionTitle>Plan comparison</SectionTitle>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+            <button
+              onClick={goToPrevComparisonDay}
+              disabled={!planDateFrom || comparisonDayIndex <= 1}
+              style={{
+                ...secondaryButtonStyle,
+                fontSize: 11,
+                padding: "5px 10px",
+                opacity: !planDateFrom || comparisonDayIndex <= 1 ? 0.5 : 1,
+                cursor: !planDateFrom || comparisonDayIndex <= 1 ? "not-allowed" : "pointer",
+              }}
+            >
+              Previous
+            </button>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                Day {comparisonDayIndex} of {planTotalDays}
+              </div>
+              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 700 }}>
+                {comparisonDate}
+              </div>
+            </div>
+            <button
+              onClick={goToNextComparisonDay}
+              disabled={!planDateTo || comparisonDayIndex >= planTotalDays}
+              style={{
+                ...secondaryButtonStyle,
+                fontSize: 11,
+                padding: "5px 10px",
+                opacity: !planDateTo || comparisonDayIndex >= planTotalDays ? 0.5 : 1,
+                cursor: !planDateTo || comparisonDayIndex >= planTotalDays ? "not-allowed" : "pointer",
+              }}
+            >
+              Next
+            </button>
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              padding: "16px 18px",
+              background: STATUS_META[dailyStatus].soft,
+              borderRadius: 6,
+              marginBottom: 20,
+            }}
+          >
+            <div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: STATUS_META[dailyStatus].color, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>
+                Daily total
+              </div>
+              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700 }}>
+                {dailyActualTotal}
+                <span style={{ fontSize: 15, fontWeight: 600, color: INK_SOFT }}> / {dailyConfiguredTotal} kcal</span>
+              </div>
+            </div>
+            <StatusBadge status={dailyStatus} />
+          </div>
+
+          {mealComparisons.length === 0 && (
+            <div style={{ fontSize: 12, color: INK_SOFT }}>No meals configured or logged for this day.</div>
+          )}
+
+          {mealComparisons.map(({ mealName, mealConfiguredFoods, mealActualEntries }) => {
+            const mealActualTotal = mealActualEntries.reduce((sum, e) => sum + (e.calories || 0), 0);
+            const mealConfiguredTotal = mealConfiguredFoods.reduce((sum, f) => sum + (f.calories || 0), 0);
+            const mealConfiguredNamesLower = new Set(mealConfiguredFoods.map((f) => f.name.trim().toLowerCase()));
+            const notInPlanEntries = mealActualEntries.filter(
+              (e) => !mealConfiguredNamesLower.has((e.name || "").trim().toLowerCase())
+            );
+
+            return (
+              <div key={mealName} style={{ marginBottom: 18 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "baseline",
+                    padding: "4px 8px",
+                    background: TEAL_SOFT,
+                    borderRadius: 4,
+                    marginBottom: 4,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontFamily: "'Space Grotesk', sans-serif",
+                      fontSize: 14,
+                      fontWeight: 700,
+                      color: TEAL,
+                      textTransform: "uppercase",
+                      letterSpacing: 0.5,
+                    }}
+                  >
+                    {mealName}
+                  </span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
+                    {mealActualTotal} / {mealConfiguredTotal} kcal
+                  </span>
+                </div>
+
+                {COURSES.map((courseName) => {
+                  const courseFoods = mealConfiguredFoods.filter((f) => (f.course || "Main") === courseName);
+                  if (courseFoods.length === 0) return null;
+
+                  const seenNames = new Set();
+                  const distinctFoodNames = [];
+                  courseFoods.forEach((f) => {
+                    const key = f.name.trim().toLowerCase();
+                    if (!seenNames.has(key)) {
+                      seenNames.add(key);
+                      distinctFoodNames.push(f.name);
+                    }
+                  });
+
+                  return (
+                    <div key={courseName} style={{ marginBottom: 8 }}>
+                      <div
+                        style={{
+                          fontFamily: "'Space Grotesk', sans-serif",
+                          fontSize: 11,
+                          fontWeight: 700,
+                          color: GREEN,
+                          background: GREEN_SOFT,
+                          textTransform: "uppercase",
+                          letterSpacing: 0.5,
+                          padding: "2px 8px",
+                          borderRadius: 4,
+                          display: "inline-block",
+                        }}
+                      >
+                        {courseName}
+                      </div>
+                      {distinctFoodNames.map((name) => {
+                        const nameLower = name.trim().toLowerCase();
+                        const matchingConfigured = courseFoods.filter((f) => f.name.trim().toLowerCase() === nameLower);
+                        const matchingActual = mealActualEntries.filter(
+                          (e) => (e.name || "").trim().toLowerCase() === nameLower
+                        );
+
+                        const configuredGrams = matchingConfigured.reduce((sum, f) => sum + (f.grams || 0), 0);
+                        const configuredCalories = matchingConfigured.reduce((sum, f) => sum + (f.calories || 0), 0);
+                        const actualGrams = matchingActual.reduce((sum, e) => sum + (e.grams || 0), 0);
+                        const actualCalories = matchingActual.reduce((sum, e) => sum + (e.calories || 0), 0);
+                        const foodStatus = statusFor(actualCalories, configuredCalories);
+
+                        return (
+                          <div key={name} style={foodRowStyle}>
+                            <div>
+                              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{name}</div>
+                              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                                {actualGrams} / {configuredGrams} g · {actualCalories} / {configuredCalories} kcal
+                              </div>
+                            </div>
+                            <StatusBadge status={foodStatus} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+
+                {notInPlanEntries.length > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    <div
+                      style={{
+                        fontFamily: "'Space Grotesk', sans-serif",
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: INK_SOFT,
+                        textTransform: "uppercase",
+                        letterSpacing: 0.5,
+                        marginBottom: 4,
+                      }}
+                    >
+                      Not in plan
+                    </div>
+                    {notInPlanEntries.map((e) => (
+                      <div key={e.id} style={foodRowStyle}>
+                        <div>
+                          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{e.name}</div>
+                          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                            {e.grams || 0} g · {e.calories || 0} kcal
+                          </div>
+                        </div>
+                        <span
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            padding: "3px 8px",
+                            borderRadius: 4,
+                            background: "#EEEEEC",
+                            color: INK_SOFT,
+                            fontFamily: "'IBM Plex Mono', monospace",
+                            fontSize: 10.5,
+                            fontWeight: 600,
+                            textTransform: "uppercase",
+                            letterSpacing: 0.4,
+                          }}
+                        >
+                          Not tracked
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        </>
       )}
 
       {view === "history" && (
         <div style={panelStyle}>
-          <SectionTitle>Last 14 logged days</SectionTitle>
-          {historyDates.length === 0 && <div style={{ fontSize: 12, color: INK_SOFT }}>No history yet — log a day to see it here.</div>}
-          {historyDates.map((date) => {
-            const entries = logs[date] || [];
-            const totals = entries.reduce(
-              (acc, e) => ({
-                calories: acc.calories + e.calories,
-                protein: acc.protein + e.protein,
-                carbs: acc.carbs + e.carbs,
-                fat: acc.fat + e.fat,
-              }),
-              { calories: 0, protein: 0, carbs: 0, fat: 0 }
-            );
-            const calStatus = statusFor(totals.calories, effectivePlan.calories);
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 4 }}>
+            Daily total vs configured target
+          </div>
 
-            return (
-              <div key={date} style={{ ...foodRowStyle, cursor: "pointer" }} onClick={() => { setSelectedDate(date); setView("log"); }}>
-                <div>
-                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{date}</div>
-                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                    {totals.calories} kcal · P{totals.protein} C{totals.carbs} F{totals.fat}
+          {planExpired ? (
+            <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 10 }}>No active plan configured.</div>
+          ) : (
+            <>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT, marginBottom: 20 }}>
+                dashed line = {effectivePlan.calories} kcal target
+              </div>
+
+              <div style={{ overflowX: "auto" }}>
+                <div style={{ minWidth: historyDayDates.length * (HISTORY_COL_WIDTH + HISTORY_COL_GAP), paddingTop: 20 }}>
+                  <div style={{ position: "relative", height: HISTORY_CHART_HEIGHT }}>
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: 0,
+                        right: 0,
+                        top: `${100 - (effectivePlan.calories / historyMaxScale) * 100}%`,
+                        borderTop: `2px dashed ${INK_SOFT}`,
+                      }}
+                    />
+                    <span
+                      style={{
+                        position: "absolute",
+                        top: `${100 - (effectivePlan.calories / historyMaxScale) * 100}%`,
+                        left: 0,
+                        transform: "translateY(-100%)",
+                        fontFamily: "'IBM Plex Mono', monospace",
+                        fontSize: 10,
+                        color: INK_SOFT,
+                        background: PANEL,
+                        padding: "0 4px 2px 0",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {effectivePlan.calories} kcal
+                    </span>
+                    <div style={{ display: "flex", alignItems: "flex-end", height: "100%", gap: HISTORY_COL_GAP }}>
+                      {historyDayData.map((d) => {
+                        const status = statusFor(d.actualTotal, effectivePlan.calories);
+                        const barPct = d.hasEntries ? Math.max((d.actualTotal / historyMaxScale) * 100, 2) : 0;
+
+                        return (
+                          <div
+                            key={d.date}
+                            style={{
+                              width: HISTORY_COL_WIDTH,
+                              flexShrink: 0,
+                              height: "100%",
+                              display: "flex",
+                              flexDirection: "column",
+                              justifyContent: "flex-end",
+                              alignItems: "center",
+                            }}
+                          >
+                            {d.hasEntries && (
+                              <div
+                                title={`${d.date}: ${d.actualTotal} kcal`}
+                                style={{
+                                  width: "70%",
+                                  height: `${barPct}%`,
+                                  background: STATUS_META[status].color,
+                                  borderRadius: "3px 3px 0 0",
+                                }}
+                              />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", gap: HISTORY_COL_GAP, marginTop: 6 }}>
+                    {historyDayData.map((d) => (
+                      <div
+                        key={d.date}
+                        style={{
+                          width: HISTORY_COL_WIDTH,
+                          flexShrink: 0,
+                          textAlign: "center",
+                          fontFamily: "'IBM Plex Mono', monospace",
+                          fontSize: 9.5,
+                          color: INK_SOFT,
+                        }}
+                      >
+                        {shortDayLabel(d.date)}
+                      </div>
+                    ))}
                   </div>
                 </div>
-                <StatusBadge status={calStatus} />
               </div>
-            );
-          })}
+
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 16, margin: "18px 0 22px" }}>
+                {["green", "red", "yellow"].map((s) => (
+                  <div key={s} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                    <span style={{ width: 10, height: 10, borderRadius: 2, background: STATUS_META[s].color, display: "inline-block" }} />
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT }}>{STATUS_META[s].label}</span>
+                  </div>
+                ))}
+                <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                  <span style={{ width: 14, borderTop: `2px dashed ${INK_SOFT}`, display: "inline-block" }} />
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT }}>Target</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: 2, border: `1px dashed ${GRID}`, display: "inline-block" }} />
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT }}>Not logged</span>
+                </div>
+              </div>
+
+              {historyDayData.map((d) => {
+                const status = statusFor(d.actualTotal, effectivePlan.calories);
+
+                return (
+                  <div
+                    key={d.date}
+                    style={{ ...foodRowStyle, cursor: "pointer" }}
+                    onClick={() => {
+                      setComparisonDate(d.date);
+                      setView("log");
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{d.date}</div>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                        {d.actualTotal} / {effectivePlan.calories} kcal
+                      </div>
+                    </div>
+                    {d.hasEntries ? (
+                      <StatusBadge status={status} />
+                    ) : (
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          padding: "3px 8px",
+                          borderRadius: 4,
+                          background: "#EEEEEC",
+                          color: INK_SOFT,
+                          fontFamily: "'IBM Plex Mono', monospace",
+                          fontSize: 10.5,
+                          fontWeight: 600,
+                          textTransform: "uppercase",
+                          letterSpacing: 0.4,
+                        }}
+                      >
+                        Not logged
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </>
+          )}
         </div>
       )}
     </div>

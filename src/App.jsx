@@ -772,7 +772,7 @@ export default function CalorieTrackerApp() {
   );
 
   async function saveSetup() {
-    const ok = await persist({ profile, goal, planOverride, foods });
+    const ok = await persist({ profile, goal, planOverride });
 
     if (ok) {
       setSavedPlanOverride(planOverride);

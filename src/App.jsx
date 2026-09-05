@@ -18,6 +18,10 @@ const RED_SOFT = "#F5E0DC";
 
 const TOLERANCE = 0.05;
 
+const HISTORY_CHART_HEIGHT = 180;
+const HISTORY_COL_WIDTH = 28;
+const HISTORY_COL_GAP = 6;
+
 const ACTIVITY_LEVELS = [
   { id: "sedentary", label: "Sedentary", mult: 1.2 },
   { id: "light", label: "Lightly active", mult: 1.375 },
@@ -100,6 +104,13 @@ function addDaysStr(s, days) {
 
 function daysBetweenStr(a, b) {
   return Math.round((parseDateStr(b) - parseDateStr(a)) / 86400000);
+}
+
+const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function shortDayLabel(s) {
+  const [, m, d] = s.split("-").map(Number);
+  return `${MONTH_ABBR[m - 1]} ${d}`;
 }
 
 function computeBMI(profile) {
@@ -1095,7 +1106,28 @@ export default function CalorieTrackerApp() {
     }
   }
 
-  const historyDates = Object.keys(logs).sort().reverse().slice(0, 14);
+  const planExpired = !planDateFrom || !planDateTo || planDateTo < todayStr();
+
+  const historyDayDates = useMemo(() => {
+    if (planExpired) return [];
+    const count = daysBetweenStr(planDateFrom, planDateTo) + 1;
+    const dates = [];
+    for (let i = 0; i < count; i++) dates.push(addDaysStr(planDateFrom, i));
+    return dates;
+  }, [planExpired, planDateFrom, planDateTo]);
+
+  const historyDayData = useMemo(() => {
+    return historyDayDates.map((date) => {
+      const entries = logs[date] || [];
+      const actualTotal = entries.reduce((sum, e) => sum + (e.calories || 0), 0);
+      return { date, actualTotal, hasEntries: entries.length > 0 };
+    });
+  }, [historyDayDates, logs]);
+
+  const historyMaxScale = useMemo(() => {
+    const maxActual = historyDayData.reduce((max, d) => Math.max(max, d.actualTotal), 0);
+    return Math.max(effectivePlan.calories, maxActual, 1) * 1.1;
+  }, [historyDayData, effectivePlan.calories]);
 
   if (session === undefined) {
     return (
@@ -2244,33 +2276,162 @@ export default function CalorieTrackerApp() {
 
       {view === "history" && (
         <div style={panelStyle}>
-          <SectionTitle>Last 14 logged days</SectionTitle>
-          {historyDates.length === 0 && <div style={{ fontSize: 12, color: INK_SOFT }}>No history yet — log a day to see it here.</div>}
-          {historyDates.map((date) => {
-            const entries = logs[date] || [];
-            const totals = entries.reduce(
-              (acc, e) => ({
-                calories: acc.calories + e.calories,
-                protein: acc.protein + e.protein,
-                carbs: acc.carbs + e.carbs,
-                fat: acc.fat + e.fat,
-              }),
-              { calories: 0, protein: 0, carbs: 0, fat: 0 }
-            );
-            const calStatus = statusFor(totals.calories, effectivePlan.calories);
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 4 }}>
+            Daily total vs configured target
+          </div>
 
-            return (
-              <div key={date} style={{ ...foodRowStyle, cursor: "pointer" }} onClick={() => { setSelectedDate(date); setView("log"); }}>
-                <div>
-                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{date}</div>
-                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                    {totals.calories} kcal · P{totals.protein} C{totals.carbs} F{totals.fat}
+          {planExpired ? (
+            <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 10 }}>No active plan configured.</div>
+          ) : (
+            <>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT, marginBottom: 20 }}>
+                dashed line = {effectivePlan.calories} kcal target
+              </div>
+
+              <div style={{ overflowX: "auto" }}>
+                <div style={{ minWidth: historyDayDates.length * (HISTORY_COL_WIDTH + HISTORY_COL_GAP), paddingTop: 20 }}>
+                  <div style={{ position: "relative", height: HISTORY_CHART_HEIGHT }}>
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: 0,
+                        right: 0,
+                        top: `${100 - (effectivePlan.calories / historyMaxScale) * 100}%`,
+                        borderTop: `2px dashed ${INK_SOFT}`,
+                      }}
+                    />
+                    <span
+                      style={{
+                        position: "absolute",
+                        top: `${100 - (effectivePlan.calories / historyMaxScale) * 100}%`,
+                        left: 0,
+                        transform: "translateY(-100%)",
+                        fontFamily: "'IBM Plex Mono', monospace",
+                        fontSize: 10,
+                        color: INK_SOFT,
+                        background: PANEL,
+                        padding: "0 4px 2px 0",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {effectivePlan.calories} kcal
+                    </span>
+                    <div style={{ display: "flex", alignItems: "flex-end", height: "100%", gap: HISTORY_COL_GAP }}>
+                      {historyDayData.map((d) => {
+                        const status = statusFor(d.actualTotal, effectivePlan.calories);
+                        const barPct = d.hasEntries ? Math.max((d.actualTotal / historyMaxScale) * 100, 2) : 0;
+
+                        return (
+                          <div
+                            key={d.date}
+                            style={{
+                              width: HISTORY_COL_WIDTH,
+                              flexShrink: 0,
+                              height: "100%",
+                              display: "flex",
+                              flexDirection: "column",
+                              justifyContent: "flex-end",
+                              alignItems: "center",
+                            }}
+                          >
+                            {d.hasEntries && (
+                              <div
+                                title={`${d.date}: ${d.actualTotal} kcal`}
+                                style={{
+                                  width: "70%",
+                                  height: `${barPct}%`,
+                                  background: STATUS_META[status].color,
+                                  borderRadius: "3px 3px 0 0",
+                                }}
+                              />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", gap: HISTORY_COL_GAP, marginTop: 6 }}>
+                    {historyDayData.map((d) => (
+                      <div
+                        key={d.date}
+                        style={{
+                          width: HISTORY_COL_WIDTH,
+                          flexShrink: 0,
+                          textAlign: "center",
+                          fontFamily: "'IBM Plex Mono', monospace",
+                          fontSize: 9.5,
+                          color: INK_SOFT,
+                        }}
+                      >
+                        {shortDayLabel(d.date)}
+                      </div>
+                    ))}
                   </div>
                 </div>
-                <StatusBadge status={calStatus} />
               </div>
-            );
-          })}
+
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 16, margin: "18px 0 22px" }}>
+                {["green", "red", "yellow"].map((s) => (
+                  <div key={s} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                    <span style={{ width: 10, height: 10, borderRadius: 2, background: STATUS_META[s].color, display: "inline-block" }} />
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT }}>{STATUS_META[s].label}</span>
+                  </div>
+                ))}
+                <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                  <span style={{ width: 14, borderTop: `2px dashed ${INK_SOFT}`, display: "inline-block" }} />
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT }}>Target</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: 2, border: `1px dashed ${GRID}`, display: "inline-block" }} />
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT }}>Not logged</span>
+                </div>
+              </div>
+
+              {historyDayData.map((d) => {
+                const status = statusFor(d.actualTotal, effectivePlan.calories);
+
+                return (
+                  <div
+                    key={d.date}
+                    style={{ ...foodRowStyle, cursor: "pointer" }}
+                    onClick={() => {
+                      setComparisonDate(d.date);
+                      setView("log");
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{d.date}</div>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                        {d.actualTotal} / {effectivePlan.calories} kcal
+                      </div>
+                    </div>
+                    {d.hasEntries ? (
+                      <StatusBadge status={status} />
+                    ) : (
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          padding: "3px 8px",
+                          borderRadius: 4,
+                          background: "#EEEEEC",
+                          color: INK_SOFT,
+                          fontFamily: "'IBM Plex Mono', monospace",
+                          fontSize: 10.5,
+                          fontWeight: 600,
+                          textTransform: "uppercase",
+                          letterSpacing: 0.4,
+                        }}
+                      >
+                        Not logged
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </>
+          )}
         </div>
       )}
     </div>

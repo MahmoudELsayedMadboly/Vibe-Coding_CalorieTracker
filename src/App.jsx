@@ -789,7 +789,7 @@ export default function CalorieTrackerApp() {
 
         loggedFoodRows.push({
           name: e.name,
-          course: matchingConfigured[0] ? matchingConfigured[0].course || "Main" : null,
+          matched: matchingConfigured.length > 0,
           actualGrams: matchingActual.reduce((sum, x) => sum + (x.grams || 0), 0),
           actualCalories: matchingActual.reduce((sum, x) => sum + (x.calories || 0), 0),
           configuredGrams: matchingConfigured.reduce((sum, f) => sum + (f.grams || 0), 0),
@@ -2158,17 +2158,6 @@ export default function CalorieTrackerApp() {
               </div>
 
               {mealComparisons.map(({ mealName, loggedFoodRows, mealActualTotal, mealConfiguredTotal }) => {
-                const matchedByCourse = {};
-                const notInPlanRows = [];
-                loggedFoodRows.forEach((row) => {
-                  if (row.course) {
-                    if (!matchedByCourse[row.course]) matchedByCourse[row.course] = [];
-                    matchedByCourse[row.course].push(row);
-                  } else {
-                    notInPlanRows.push(row);
-                  }
-                });
-
                 return (
                   <div key={mealName} style={{ marginBottom: 18 }}>
                     <div
@@ -2199,70 +2188,22 @@ export default function CalorieTrackerApp() {
                       </span>
                     </div>
 
-                    {COURSES.map((courseName) => {
-                      const courseRows = matchedByCourse[courseName];
-                      if (!courseRows || courseRows.length === 0) return null;
+                    {loggedFoodRows.map((row) => {
+                      const foodStatus = statusFor(row.actualCalories, row.configuredCalories);
 
                       return (
-                        <div key={courseName} style={{ marginBottom: 8 }}>
-                          <div
-                            style={{
-                              fontFamily: "'Space Grotesk', sans-serif",
-                              fontSize: 11,
-                              fontWeight: 700,
-                              color: GREEN,
-                              background: GREEN_SOFT,
-                              textTransform: "uppercase",
-                              letterSpacing: 0.5,
-                              padding: "2px 8px",
-                              borderRadius: 4,
-                              display: "inline-block",
-                            }}
-                          >
-                            {courseName}
-                          </div>
-                          {courseRows.map((row) => {
-                            const foodStatus = statusFor(row.actualCalories, row.configuredCalories);
-
-                            return (
-                              <div key={row.name} style={foodRowStyle}>
-                                <div>
-                                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{row.name}</div>
-                                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                                    {row.actualGrams} / {row.configuredGrams} g · {row.actualCalories} / {row.configuredCalories} kcal
-                                  </div>
-                                </div>
-                                <StatusBadge status={foodStatus} />
-                              </div>
-                            );
-                          })}
-                        </div>
-                      );
-                    })}
-
-                    {notInPlanRows.length > 0 && (
-                      <div style={{ marginTop: 8 }}>
-                        <div
-                          style={{
-                            fontFamily: "'Space Grotesk', sans-serif",
-                            fontSize: 11,
-                            fontWeight: 700,
-                            color: INK_SOFT,
-                            textTransform: "uppercase",
-                            letterSpacing: 0.5,
-                            marginBottom: 4,
-                          }}
-                        >
-                          Not in plan
-                        </div>
-                        {notInPlanRows.map((row) => (
-                          <div key={row.name} style={foodRowStyle}>
-                            <div>
-                              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{row.name}</div>
-                              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                                {row.actualGrams} g · {row.actualCalories} kcal
-                              </div>
+                        <div key={row.name} style={foodRowStyle}>
+                          <div>
+                            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{row.name}</div>
+                            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                              {row.matched
+                                ? `${row.actualGrams} / ${row.configuredGrams} g · ${row.actualCalories} / ${row.configuredCalories} kcal`
+                                : `${row.actualGrams} g · ${row.actualCalories} kcal`}
                             </div>
+                          </div>
+                          {row.matched ? (
+                            <StatusBadge status={foodStatus} />
+                          ) : (
                             <span
                               style={{
                                 display: "inline-flex",
@@ -2280,10 +2221,10 @@ export default function CalorieTrackerApp() {
                             >
                               Not tracked
                             </span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 );
               })}

@@ -783,9 +783,10 @@ export default function CalorieTrackerApp() {
         seenNames.add(key);
 
         const matchingActual = mealActualEntries.filter((x) => (x.name || "").trim().toLowerCase() === key);
-        const matchingConfigured = foods.filter(
-          (f) => f.meal === mealName && f.name.trim().toLowerCase() === key
-        );
+        // Configured target is summed across the whole plan regardless of
+        // which meal/course it's configured under — only the food name
+        // needs to match. Display grouping still follows where it was logged.
+        const matchingConfigured = foods.filter((f) => f.name.trim().toLowerCase() === key);
 
         loggedFoodRows.push({
           name: e.name,

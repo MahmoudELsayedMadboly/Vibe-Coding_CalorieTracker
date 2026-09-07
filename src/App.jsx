@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -87,6 +87,13 @@ function threeDaysAgoStr() {
   const d = new Date();
   d.setDate(d.getDate() - 3);
   return localDateStr(d);
+}
+
+function generateLinkCode() {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let code = "";
+  for (let i = 0; i < 8; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
 }
 
 // Pure calendar-date arithmetic on "YYYY-MM-DD" strings, done in UTC so DST
@@ -320,6 +327,9 @@ export default function CalorieTrackerApp() {
   const [setupSavedFlash, setSetupSavedFlash] = useState(false);
   const [view, setView] = useState("setup");
   const [configTab, setConfigTab] = useState("profile");
+  const [notificationSettings, setNotificationSettings] = useState(null);
+  const [thresholdPercentDraft, setThresholdPercentDraft] = useState("");
+  const telegramPollRef = useRef(null);
 
   const [profile, setProfile] = useState({ sex: "male", age: 30, weightKg: 75, heightCm: 175, activity: "moderate" });
   const [goal, setGoal] = useState({ type: "maintain", rate: "moderate" });
@@ -367,6 +377,19 @@ export default function CalorieTrackerApp() {
 
     return () => listener.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (telegramPollRef.current) clearInterval(telegramPollRef.current);
+    };
+  }, []);
+
+  // Keep the draft in sync with the last-saved value, but only when that
+  // saved value actually changes (initial load, or our own onBlur save) —
+  // never on every keystroke, which would fight the user's typing.
+  useEffect(() => {
+    setThresholdPercentDraft(notificationSettings?.threshold_percent ?? "");
+  }, [notificationSettings?.threshold_percent]);
 
   function passwordStrengthError(pw) {
     if (pw.length < 8) return "Password must be at least 8 characters.";
@@ -473,6 +496,25 @@ export default function CalorieTrackerApp() {
             profileRow = created;
           }
         }
+
+        let { data: notifRow, error: notifErr } = await supabase
+          .from("notification_settings")
+          .select("*")
+          .eq("user_id", userId)
+          .maybeSingle();
+        if (notifErr) throw notifErr;
+
+        if (!notifRow) {
+          const { data: createdNotif, error: createNotifErr } = await supabase
+            .from("notification_settings")
+            .upsert({ user_id: userId }, { onConflict: "user_id", ignoreDuplicates: false })
+            .select()
+            .single();
+          if (createNotifErr) throw createNotifErr;
+          notifRow = createdNotif;
+        }
+
+        setNotificationSettings(notifRow);
 
         const [personalFoodsRes, planFoodsRes, logsRes] = await Promise.all([
           supabase.from("food_list").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
@@ -651,6 +693,27 @@ export default function CalorieTrackerApp() {
           .eq("user_id", userId);
 
         if (nameErr) throw nameErr;
+      }
+
+      // Notification settings: single row per user_id, updated in place.
+      if (next.notificationSettings !== undefined) {
+        const n = next.notificationSettings;
+
+        const { error: notifErr } = await supabase
+          .from("notification_settings")
+          .update({
+            daily_summary_enabled: !!n.daily_summary_enabled,
+            daily_summary_time: n.daily_summary_time || null,
+            threshold_enabled: !!n.threshold_enabled,
+            threshold_percent:
+              n.threshold_percent === "" || n.threshold_percent === null || n.threshold_percent === undefined
+                ? null
+                : Number(n.threshold_percent),
+            link_code: n.link_code || null,
+          })
+          .eq("user_id", userId);
+
+        if (notifErr) throw notifErr;
       }
 
       // Configured meal plan ("Food materials" / "Create a plan"): full replace, scoped to this user only.
@@ -900,6 +963,130 @@ export default function CalorieTrackerApp() {
     }
   }
 
+  async function updateNotificationSettings(patch) {
+    if (!notificationSettings) return;
+    const next = { ...notificationSettings, ...patch };
+    const ok = await persist({ notificationSettings: next });
+    if (ok) setNotificationSettings(next);
+  }
+
+  async function connectTelegram() {
+    if (!notificationSettings) return;
+
+    let code = notificationSettings.link_code;
+
+    if (!code) {
+      code = generateLinkCode();
+      const next = { ...notificationSettings, link_code: code };
+      const ok = await persist({ notificationSettings: next });
+      if (!ok) return;
+      setNotificationSettings(next);
+    }
+
+    window.open(`https://t.me/Mmadboly_bot?start=${code}`, "_blank");
+
+    pollTelegramConnection();
+  }
+
+  // After the user is sent to Telegram to link their account, poll in the
+  // background so the "Connected" status flips on its own — without this,
+  // it only ever updated on the next full login. Doesn't touch `saving`,
+  // since a background poll shouldn't disable the rest of the form.
+  function pollTelegramConnection() {
+    if (!session || !session.user) return;
+    if (telegramPollRef.current) return;
+
+    const userId = session.user.id;
+    const intervalMs = 3000;
+    const maxAttempts = Math.ceil(120000 / intervalMs);
+    let attempts = 0;
+
+    telegramPollRef.current = setInterval(async () => {
+      attempts += 1;
+
+      const { data, error } = await supabase
+        .from("notification_settings")
+        .select("*")
+        .eq("user_id", userId)
+        .maybeSingle();
+
+      if (!error && data) {
+        setNotificationSettings(data);
+        if (data.target) {
+          clearInterval(telegramPollRef.current);
+          telegramPollRef.current = null;
+          return;
+        }
+      }
+
+      if (attempts >= maxAttempts) {
+        clearInterval(telegramPollRef.current);
+        telegramPollRef.current = null;
+      }
+    }, intervalMs);
+  }
+
+  async function checkTelegramConnection() {
+    if (!session || !session.user) return;
+
+    setSaving(true);
+    setSaveError(null);
+
+    try {
+      const { data, error } = await supabase
+        .from("notification_settings")
+        .select("*")
+        .eq("user_id", session.user.id)
+        .maybeSingle();
+      if (error) throw error;
+      setNotificationSettings(data);
+    } catch (err) {
+      console.error("Check connection error:", err);
+      setSaveError("Couldn't check connection: " + (err && err.message ? err.message : "unknown error"));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Best-effort background check, fired after a meal is logged — never
+  // surfaces errors or blocks the UI, since a missed notification isn't
+  // worth interrupting the logging flow over.
+  async function checkCalorieThreshold(logsAfter, userId, targetCalories) {
+    try {
+      const { data: notifRow, error } = await supabase
+        .from("notification_settings")
+        .select("threshold_enabled, threshold_percent, threshold_last_sent_date, target")
+        .eq("user_id", userId)
+        .maybeSingle();
+      if (error || !notifRow) return;
+      if (!notifRow.threshold_enabled || !notifRow.target) return;
+
+      const today = todayStr();
+      if (notifRow.threshold_last_sent_date === today) return;
+      if (!targetCalories) return;
+
+      const todayTotal = (logsAfter[today] || []).reduce((sum, e) => sum + (e.calories || 0), 0);
+      const pct = (todayTotal / targetCalories) * 100;
+      const thresholdPct = Number(notifRow.threshold_percent) || 0;
+
+      if (pct >= thresholdPct) {
+        await supabase.functions.invoke("send-notification", {
+          body: {
+            user_id: userId,
+            message: `⚠️ You've reached ${Math.round(thresholdPct)}% of your daily calorie target.`,
+          },
+        });
+
+        await supabase
+          .from("notification_settings")
+          .update({ threshold_last_sent_date: today })
+          .eq("user_id", userId);
+      }
+    } catch (err) {
+      console.error("Threshold notification check failed (non-critical):", err);
+    }
+  }
+
   async function addFood() {
     setAddFoodError(null);
 
@@ -1123,6 +1310,8 @@ export default function CalorieTrackerApp() {
       setCustomName("");
       setEntryGrams("");
       setEntryCalPer100g("");
+
+      checkCalorieThreshold(nextLogs, session.user.id, effectivePlan.calories);
     } else {
       setEntryError("Couldn't save this entry. Please try again.");
     }
@@ -1350,6 +1539,7 @@ export default function CalorieTrackerApp() {
               { id: "profile", label: "Profile & program" },
               { id: "foodListConfig", label: "Configure your food list" },
               { id: "foodMaterials", label: "Create a plan" },
+              { id: "notifications", label: "Notifications" },
             ].map((t) => (
               <button
                 key={t.id}
@@ -1830,6 +2020,127 @@ export default function CalorieTrackerApp() {
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {configTab === "notifications" && (
+            <div style={panelStyle}>
+              <SectionTitle>Notifications</SectionTitle>
+
+              {!notificationSettings ? (
+                <div style={{ fontSize: 12, color: INK_SOFT }}>Loading notification settings…</div>
+              ) : (
+                <>
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      gap: 12,
+                      padding: "12px 14px",
+                      background: notificationSettings.target ? GREEN_SOFT : "#EEEEEC",
+                      borderRadius: 4,
+                      marginBottom: 14,
+                    }}
+                  >
+                    <div>
+                      <div
+                        style={{
+                          fontFamily: "'Space Grotesk', sans-serif",
+                          fontSize: 13,
+                          fontWeight: 600,
+                          color: notificationSettings.target ? GREEN : INK_SOFT,
+                        }}
+                      >
+                        {notificationSettings.target ? "Telegram: Connected ✓" : "Telegram: Not connected"}
+                      </div>
+                      {!notificationSettings.target && (
+                        <div style={{ fontSize: 11.5, color: INK_SOFT, marginTop: 4, maxWidth: 320, lineHeight: 1.4 }}>
+                          Click below, then press Send in Telegram to connect your account.
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={checkTelegramConnection}
+                      style={{ ...secondaryButtonStyle, fontSize: 11, padding: "6px 10px", flexShrink: 0 }}
+                      disabled={saving}
+                    >
+                      Check connection
+                    </button>
+                  </div>
+
+                  {!notificationSettings.target && (
+                    <button
+                      onClick={connectTelegram}
+                      style={{ ...primaryButtonStyle, width: "auto", marginBottom: 20 }}
+                      disabled={saving}
+                    >
+                      Connect Telegram
+                    </button>
+                  )}
+
+                  <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16 }}>
+                    <label style={labelStyle}>Send me a daily summary</label>
+                    <button
+                      onClick={() =>
+                        updateNotificationSettings({ daily_summary_enabled: !notificationSettings.daily_summary_enabled })
+                      }
+                      style={{ ...toggleStyle(!!notificationSettings.daily_summary_enabled), marginBottom: 14 }}
+                      disabled={saving}
+                    >
+                      {notificationSettings.daily_summary_enabled ? "On" : "Off"}
+                    </button>
+
+                    {notificationSettings.daily_summary_enabled && (
+                      <>
+                        <label style={labelStyle}>At what time</label>
+                        <input
+                          type="time"
+                          value={notificationSettings.daily_summary_time || ""}
+                          onChange={(e) => updateNotificationSettings({ daily_summary_time: e.target.value })}
+                          style={inputStyle}
+                          disabled={saving}
+                        />
+                      </>
+                    )}
+
+                    <label style={labelStyle}>Warn me when I'm approaching my limit</label>
+                    <button
+                      onClick={() =>
+                        updateNotificationSettings({ threshold_enabled: !notificationSettings.threshold_enabled })
+                      }
+                      style={{ ...toggleStyle(!!notificationSettings.threshold_enabled), marginBottom: 14 }}
+                      disabled={saving}
+                    >
+                      {notificationSettings.threshold_enabled ? "On" : "Off"}
+                    </button>
+
+                    {notificationSettings.threshold_enabled && (
+                      <>
+                        <label style={labelStyle}>Warn me at this % of my daily target</label>
+                        <input
+                          type="number"
+                          value={thresholdPercentDraft}
+                          onChange={(e) => setThresholdPercentDraft(e.target.value)}
+                          onBlur={() => {
+                            if (thresholdPercentDraft !== (notificationSettings.threshold_percent ?? "")) {
+                              updateNotificationSettings({ threshold_percent: thresholdPercentDraft });
+                            }
+                          }}
+                          style={inputStyle}
+                          disabled={saving}
+                        />
+                      </>
+                    )}
+                  </div>
+
+                  {saveError && (
+                    <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                      {saveError}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
         </div>

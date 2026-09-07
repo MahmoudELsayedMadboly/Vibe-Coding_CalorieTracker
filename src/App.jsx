@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -328,6 +328,8 @@ export default function CalorieTrackerApp() {
   const [view, setView] = useState("setup");
   const [configTab, setConfigTab] = useState("profile");
   const [notificationSettings, setNotificationSettings] = useState(null);
+  const [thresholdPercentDraft, setThresholdPercentDraft] = useState("");
+  const telegramPollRef = useRef(null);
 
   const [profile, setProfile] = useState({ sex: "male", age: 30, weightKg: 75, heightCm: 175, activity: "moderate" });
   const [goal, setGoal] = useState({ type: "maintain", rate: "moderate" });
@@ -375,6 +377,19 @@ export default function CalorieTrackerApp() {
 
     return () => listener.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (telegramPollRef.current) clearInterval(telegramPollRef.current);
+    };
+  }, []);
+
+  // Keep the draft in sync with the last-saved value, but only when that
+  // saved value actually changes (initial load, or our own onBlur save) —
+  // never on every keystroke, which would fight the user's typing.
+  useEffect(() => {
+    setThresholdPercentDraft(notificationSettings?.threshold_percent ?? "");
+  }, [notificationSettings?.threshold_percent]);
 
   function passwordStrengthError(pw) {
     if (pw.length < 8) return "Password must be at least 8 characters.";
@@ -969,6 +984,46 @@ export default function CalorieTrackerApp() {
     }
 
     window.open(`https://t.me/Mmadboly_bot?start=${code}`, "_blank");
+
+    pollTelegramConnection();
+  }
+
+  // After the user is sent to Telegram to link their account, poll in the
+  // background so the "Connected" status flips on its own — without this,
+  // it only ever updated on the next full login. Doesn't touch `saving`,
+  // since a background poll shouldn't disable the rest of the form.
+  function pollTelegramConnection() {
+    if (!session || !session.user) return;
+    if (telegramPollRef.current) return;
+
+    const userId = session.user.id;
+    const intervalMs = 3000;
+    const maxAttempts = Math.ceil(120000 / intervalMs);
+    let attempts = 0;
+
+    telegramPollRef.current = setInterval(async () => {
+      attempts += 1;
+
+      const { data, error } = await supabase
+        .from("notification_settings")
+        .select("*")
+        .eq("user_id", userId)
+        .maybeSingle();
+
+      if (!error && data) {
+        setNotificationSettings(data);
+        if (data.target) {
+          clearInterval(telegramPollRef.current);
+          telegramPollRef.current = null;
+          return;
+        }
+      }
+
+      if (attempts >= maxAttempts) {
+        clearInterval(telegramPollRef.current);
+        telegramPollRef.current = null;
+      }
+    }, intervalMs);
   }
 
   async function checkTelegramConnection() {
@@ -2065,8 +2120,13 @@ export default function CalorieTrackerApp() {
                         <label style={labelStyle}>Warn me at this % of my daily target</label>
                         <input
                           type="number"
-                          value={notificationSettings.threshold_percent ?? ""}
-                          onChange={(e) => updateNotificationSettings({ threshold_percent: e.target.value })}
+                          value={thresholdPercentDraft}
+                          onChange={(e) => setThresholdPercentDraft(e.target.value)}
+                          onBlur={() => {
+                            if (thresholdPercentDraft !== (notificationSettings.threshold_percent ?? "")) {
+                              updateNotificationSettings({ threshold_percent: thresholdPercentDraft });
+                            }
+                          }}
                           style={inputStyle}
                           disabled={saving}
                         />

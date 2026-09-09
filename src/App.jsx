@@ -1051,7 +1051,7 @@ export default function CalorieTrackerApp() {
   // Best-effort background check, fired after a meal is logged — never
   // surfaces errors or blocks the UI, since a missed notification isn't
   // worth interrupting the logging flow over.
-  async function checkCalorieThreshold(logsAfter, userId, targetCalories) {
+  async function checkCalorieThreshold(logsAfter, userId, targetCalories, entryDate) {
     try {
       const { data: notifRow, error } = await supabase
         .from("notification_settings")
@@ -1065,15 +1065,19 @@ export default function CalorieTrackerApp() {
       if (notifRow.threshold_last_sent_date === today) return;
       if (!targetCalories) return;
 
-      const todayTotal = (logsAfter[today] || []).reduce((sum, e) => sum + (e.calories || 0), 0);
+      const todayTotal = (logsAfter[entryDate] || []).reduce((sum, e) => sum + (e.calories || 0), 0);
       const pct = (todayTotal / targetCalories) * 100;
       const thresholdPct = Number(notifRow.threshold_percent) || 0;
 
+      console.log("[checkCalorieThreshold] entryDate:", entryDate, "todayTotal:", todayTotal, "targetCalories:", targetCalories, "pct:", pct, "thresholdPct:", thresholdPct);
+
       if (pct >= thresholdPct) {
+        console.log("[checkCalorieThreshold] threshold reached, sending notification");
         await supabase.functions.invoke("send-notification", {
           body: {
             user_id: userId,
             message: `⚠️ You've reached ${Math.round(thresholdPct)}% of your daily calorie target.`,
+            type: "threshold",
           },
         });
 
@@ -1081,6 +1085,8 @@ export default function CalorieTrackerApp() {
           .from("notification_settings")
           .update({ threshold_last_sent_date: today })
           .eq("user_id", userId);
+      } else {
+        console.log("[checkCalorieThreshold] threshold not reached, skipping notification");
       }
     } catch (err) {
       console.error("Threshold notification check failed (non-critical):", err);
@@ -1311,7 +1317,7 @@ export default function CalorieTrackerApp() {
       setEntryGrams("");
       setEntryCalPer100g("");
 
-      checkCalorieThreshold(nextLogs, session.user.id, effectivePlan.calories);
+      checkCalorieThreshold(nextLogs, session.user.id, effectivePlan.calories, selectedDate);
     } else {
       setEntryError("Couldn't save this entry. Please try again.");
     }

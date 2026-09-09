@@ -1074,6 +1074,7 @@ export default function CalorieTrackerApp() {
           body: {
             user_id: userId,
             message: `⚠️ You've reached ${Math.round(thresholdPct)}% of your daily calorie target.`,
+            type: "threshold",
           },
         });
 

@@ -1076,7 +1076,7 @@ export default function CalorieTrackerApp() {
         await supabase.functions.invoke("send-notification", {
           body: {
             user_id: userId,
-            message: `⚠️ You've reached ${Math.round(thresholdPct)}% of your daily calorie target.`,
+            message: `⚠️ Attention please! You've reached ${Math.round(thresholdPct)}% of your daily calorie target.`,
             type: "threshold",
           },
         });

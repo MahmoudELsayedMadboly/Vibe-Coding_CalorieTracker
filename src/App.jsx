@@ -348,9 +348,22 @@ export default function CalorieTrackerApp() {
   const [clients, setClients] = useState([]);
   const [clientsLoading, setClientsLoading] = useState(false);
   const [clientsError, setClientsError] = useState(null);
+  const [clientsView, setClientsView] = useState("grid");
+  const [addClientName, setAddClientName] = useState("");
   const [addClientEmail, setAddClientEmail] = useState("");
+  const [addClientPhone, setAddClientPhone] = useState("");
+  const [addClientPlanTypeId, setAddClientPlanTypeId] = useState("");
+  const [addClientDateFrom, setAddClientDateFrom] = useState("");
+  const [addClientDateTo, setAddClientDateTo] = useState("");
   const [addClientBusy, setAddClientBusy] = useState(false);
   const [addClientMessage, setAddClientMessage] = useState(null);
+
+  const [planTypes, setPlanTypes] = useState([]);
+  const [planTypesLoading, setPlanTypesLoading] = useState(false);
+  const [planTypesError, setPlanTypesError] = useState(null);
+  const [newPlanTypeName, setNewPlanTypeName] = useState("");
+  const [addPlanTypeBusy, setAddPlanTypeBusy] = useState(false);
+  const [addPlanTypeError, setAddPlanTypeError] = useState(null);
 
   const [profile, setProfile] = useState({ sex: "male", age: 30, weightKg: 75, heightCm: 175, activity: "moderate" });
   const [goal, setGoal] = useState({ type: "maintain", rate: "moderate" });
@@ -1248,22 +1261,61 @@ export default function CalorieTrackerApp() {
         return;
       }
 
-      const { data: infos, error: infoErr } = await supabase
-        .from("user_info")
-        .select("user_id, email")
-        .in("user_id", clientIds);
-      if (infoErr) throw infoErr;
+      const [infosRes, profilesRes] = await Promise.all([
+        supabase.from("user_info").select("id, name, verified").in("id", clientIds),
+        supabase.from("client_profile").select("client_id, date_from, date_to").in("client_id", clientIds),
+      ]);
+      if (infosRes.error) throw infosRes.error;
+      if (profilesRes.error) throw profilesRes.error;
 
-      const emailByClientId = {};
-      (infos || []).forEach((row) => {
-        emailByClientId[row.user_id] = row.email;
+      const infoById = {};
+      (infosRes.data || []).forEach((row) => {
+        infoById[row.id] = row;
       });
 
-      setClients(clientIds.map((id) => ({ id, email: emailByClientId[id] || "(email unavailable)" })));
+      const profileByClientId = {};
+      (profilesRes.data || []).forEach((row) => {
+        profileByClientId[row.client_id] = row;
+      });
+
+      setClients(
+        clientIds.map((id) => {
+          const info = infoById[id] || {};
+          const clientProfile = profileByClientId[id] || {};
+          return {
+            id,
+            name: info.name || "(name unavailable)",
+            verified: !!info.verified,
+            dateFrom: clientProfile.date_from || null,
+            dateTo: clientProfile.date_to || null,
+          };
+        })
+      );
     } catch (err) {
       setClientsError(err && err.message ? err.message : "Couldn't load your clients.");
     } finally {
       setClientsLoading(false);
+    }
+  }
+
+  async function loadPlanTypes() {
+    if (!session) return;
+
+    setPlanTypesLoading(true);
+    setPlanTypesError(null);
+
+    try {
+      const { data, error } = await supabase
+        .from("coach_plan_types")
+        .select("*")
+        .eq("coach_id", session.user.id)
+        .order("created_at", { ascending: true });
+      if (error) throw error;
+      setPlanTypes(data || []);
+    } catch (err) {
+      setPlanTypesError(err && err.message ? err.message : "Couldn't load your plan types.");
+    } finally {
+      setPlanTypesLoading(false);
     }
   }
 
@@ -1274,10 +1326,29 @@ export default function CalorieTrackerApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roleId]);
 
+  useEffect(() => {
+    if (roleId === 2 && view === "clients" && clientsView === "grid") {
+      loadClients();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, clientsView, session]);
+
+  useEffect(() => {
+    if (roleId === 2 && (view === "clients" || view === "plans")) {
+      loadPlanTypes();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, session]);
+
   async function submitAddClient() {
     setAddClientMessage(null);
+    const name = addClientName.trim();
     const email = addClientEmail.trim();
 
+    if (!name) {
+      setAddClientMessage({ type: "error", text: "Enter the client's name." });
+      return;
+    }
     if (!email) {
       setAddClientMessage({ type: "error", text: describeAddClientError("email_required") });
       return;
@@ -1286,12 +1357,27 @@ export default function CalorieTrackerApp() {
     setAddClientBusy(true);
 
     try {
-      const { data, error } = await supabase.functions.invoke("create-client", { body: { email } });
+      const { data, error } = await supabase.functions.invoke("create-client", {
+        body: {
+          email,
+          name,
+          phone: addClientPhone.trim() || null,
+          plan_type_id: addClientPlanTypeId || null,
+          date_from: addClientDateFrom || null,
+          date_to: addClientDateTo || null,
+        },
+      });
       if (error) throw error;
 
       if (data && data.ok) {
-        setAddClientMessage({ type: "success", text: `Invite sent to ${email}` });
+        setAddClientMessage({ type: "success", text: `Client added — invite sent to ${email}` });
+        setAddClientName("");
         setAddClientEmail("");
+        setAddClientPhone("");
+        setAddClientPlanTypeId("");
+        setAddClientDateFrom("");
+        setAddClientDateTo("");
+        setClientsView("grid");
         loadClients();
       } else {
         setAddClientMessage({ type: "error", text: describeAddClientError(data && data.reason) });
@@ -1300,6 +1386,40 @@ export default function CalorieTrackerApp() {
       setAddClientMessage({ type: "error", text: "Couldn't send the invite. Please try again." });
     } finally {
       setAddClientBusy(false);
+    }
+  }
+
+  async function submitAddPlanType() {
+    setAddPlanTypeError(null);
+    const name = newPlanTypeName.trim();
+
+    if (!name) {
+      setAddPlanTypeError("Enter a plan type name.");
+      return;
+    }
+
+    setAddPlanTypeBusy(true);
+
+    try {
+      const { error } = await supabase.from("coach_plan_types").insert({ coach_id: session.user.id, name });
+      if (error) throw error;
+      setNewPlanTypeName("");
+      loadPlanTypes();
+    } catch (err) {
+      setAddPlanTypeError(err && err.message ? err.message : "Couldn't add plan type. Please try again.");
+    } finally {
+      setAddPlanTypeBusy(false);
+    }
+  }
+
+  async function deletePlanType(id) {
+    setPlanTypesError(null);
+    try {
+      const { error } = await supabase.from("coach_plan_types").delete().eq("id", id).eq("coach_id", session.user.id);
+      if (error) throw error;
+      loadPlanTypes();
+    } catch (err) {
+      setPlanTypesError(err && err.message ? err.message : "Couldn't delete plan type.");
     }
   }
 
@@ -2941,16 +3061,253 @@ export default function CalorieTrackerApp() {
             )}
 
             {view === "clients" && (
-              <div style={panelStyle}>
-                <SectionTitle>Clients</SectionTitle>
-                <div style={{ fontSize: 12.5, color: INK_SOFT }}>Clients screen — coming soon.</div>
+              <div>
+                {addClientMessage && (
+                  <div
+                    style={{
+                      marginBottom: 16,
+                      padding: "10px 12px",
+                      borderRadius: 4,
+                      fontSize: 12.5,
+                      background: addClientMessage.type === "success" ? GREEN_SOFT : RED_SOFT,
+                      color: addClientMessage.type === "success" ? GREEN : RED,
+                    }}
+                  >
+                    {addClientMessage.text}
+                  </div>
+                )}
+
+                {clientsView === "grid" ? (
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                      <SectionTitle>Clients</SectionTitle>
+                      {clients.length > 0 && (
+                        <button
+                          onClick={() => {
+                            setAddClientMessage(null);
+                            setClientsView("add");
+                          }}
+                          style={primaryButtonStyle}
+                        >
+                          + Add client
+                        </button>
+                      )}
+                    </div>
+
+                    {clientsLoading ? (
+                      <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
+                    ) : clientsError ? (
+                      <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                        {clientsError}
+                      </div>
+                    ) : clients.length === 0 ? (
+                      <div style={{ ...panelStyle, textAlign: "center" }}>
+                        <div style={{ fontSize: 13, color: INK_SOFT, marginBottom: 16 }}>
+                          There are no clients added yet
+                        </div>
+                        <button
+                          onClick={() => {
+                            setAddClientMessage(null);
+                            setClientsView("add");
+                          }}
+                          style={primaryButtonStyle}
+                        >
+                          + Add client
+                        </button>
+                      </div>
+                    ) : (
+                      <div style={{ ...panelStyle, padding: 0, overflowX: "auto" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                          <thead>
+                            <tr>
+                              <th style={thStyle}>Client name</th>
+                              <th style={thStyle}>Plan from</th>
+                              <th style={thStyle}>Plan to</th>
+                              <th style={thStyle}>Status</th>
+                              <th style={thStyle}></th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {clients.map((c) => (
+                              <tr key={c.id} style={{ borderTop: `1px solid ${GRID}` }}>
+                                <td style={tdStyle}>{c.name}</td>
+                                <td style={tdStyle}>{c.dateFrom || "—"}</td>
+                                <td style={tdStyle}>{c.dateTo || "—"}</td>
+                                <td style={tdStyle}>
+                                  <span
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      padding: "3px 8px",
+                                      borderRadius: 4,
+                                      background: c.verified ? GREEN_SOFT : AMBER_SOFT,
+                                      color: c.verified ? GREEN : AMBER,
+                                      fontFamily: "'Space Grotesk', sans-serif",
+                                      fontSize: 10.5,
+                                      fontWeight: 700,
+                                      textTransform: "uppercase",
+                                      letterSpacing: 0.4,
+                                    }}
+                                  >
+                                    {c.verified ? "Active" : "Invited"}
+                                  </span>
+                                </td>
+                                <td style={tdStyle}>
+                                  <button style={secondaryButtonStyle} disabled>
+                                    View details
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div style={panelStyle}>
+                    <SectionTitle>Add a client</SectionTitle>
+
+                    <label style={labelStyle}>Client name</label>
+                    <input
+                      type="text"
+                      placeholder="Jane Doe"
+                      value={addClientName}
+                      onChange={(e) => setAddClientName(e.target.value)}
+                      style={inputStyle}
+                      disabled={addClientBusy}
+                    />
+
+                    <label style={labelStyle}>Email</label>
+                    <input
+                      type="email"
+                      placeholder="client@example.com"
+                      value={addClientEmail}
+                      onChange={(e) => setAddClientEmail(e.target.value)}
+                      style={inputStyle}
+                      disabled={addClientBusy}
+                    />
+
+                    <label style={labelStyle}>Plan type (optional)</label>
+                    <select
+                      value={addClientPlanTypeId}
+                      onChange={(e) => setAddClientPlanTypeId(e.target.value)}
+                      style={inputStyle}
+                      disabled={addClientBusy}
+                    >
+                      <option value="">No plan type</option>
+                      {planTypes.map((pt) => (
+                        <option key={pt.id} value={pt.id}>
+                          {pt.name}
+                        </option>
+                      ))}
+                    </select>
+
+                    <div style={{ display: "flex", gap: 12 }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={labelStyle}>Plan from (optional)</label>
+                        <input
+                          type="date"
+                          value={addClientDateFrom}
+                          onChange={(e) => setAddClientDateFrom(e.target.value)}
+                          style={inputStyle}
+                          disabled={addClientBusy}
+                        />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label style={labelStyle}>Plan to (optional)</label>
+                        <input
+                          type="date"
+                          value={addClientDateTo}
+                          onChange={(e) => setAddClientDateTo(e.target.value)}
+                          style={inputStyle}
+                          disabled={addClientBusy}
+                        />
+                      </div>
+                    </div>
+
+                    <label style={labelStyle}>Phone number (optional)</label>
+                    <input
+                      type="tel"
+                      placeholder="+1 555 123 4567"
+                      value={addClientPhone}
+                      onChange={(e) => setAddClientPhone(e.target.value)}
+                      style={inputStyle}
+                      disabled={addClientBusy}
+                    />
+
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <button onClick={submitAddClient} style={primaryButtonStyle} disabled={addClientBusy}>
+                        {addClientBusy ? "Saving…" : "Save"}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setAddClientMessage(null);
+                          setClientsView("grid");
+                        }}
+                        style={secondaryButtonStyle}
+                        disabled={addClientBusy}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
             {view === "plans" && (
-              <div style={panelStyle}>
-                <SectionTitle>Plans</SectionTitle>
-                <div style={{ fontSize: 12.5, color: INK_SOFT }}>Plans screen — coming soon.</div>
+              <div style={{ display: "grid", gap: 20 }}>
+                <div style={panelStyle}>
+                  <SectionTitle>Plan types</SectionTitle>
+
+                  {planTypesLoading ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>Loading plan types…</div>
+                  ) : planTypesError ? (
+                    <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                      {planTypesError}
+                    </div>
+                  ) : planTypes.length === 0 ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>You haven't defined any plan types yet.</div>
+                  ) : (
+                    <div>
+                      {planTypes.map((pt) => (
+                        <div key={pt.id} style={foodRowStyle}>
+                          <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>
+                            {pt.name}
+                          </span>
+                          <button onClick={() => deletePlanType(pt.id)} style={iconButtonStyle} aria-label={`Delete ${pt.name}`}>
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div style={panelStyle}>
+                  <SectionTitle>Add plan type</SectionTitle>
+
+                  <label style={labelStyle}>Plan type name</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Fat loss - 12 weeks"
+                    value={newPlanTypeName}
+                    onChange={(e) => setNewPlanTypeName(e.target.value)}
+                    style={inputStyle}
+                    disabled={addPlanTypeBusy}
+                  />
+
+                  <button onClick={submitAddPlanType} style={primaryButtonStyle} disabled={addPlanTypeBusy}>
+                    {addPlanTypeBusy ? "Adding…" : "Add plan type"}
+                  </button>
+
+                  {addPlanTypeError && (
+                    <div style={{ marginTop: 12, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                      {addPlanTypeError}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 

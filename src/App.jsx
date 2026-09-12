@@ -225,6 +225,19 @@ function computePlan(profile, goal) {
   };
 }
 
+function describeAddClientError(reason) {
+  switch (reason) {
+    case "not_a_coach":
+      return "Your account isn't set up as a coach, so you can't add clients.";
+    case "invite_failed":
+      return "The invite couldn't be sent. Please try again.";
+    case "email_required":
+      return "Enter an email address.";
+    default:
+      return reason ? `Couldn't add client: ${reason}` : "Couldn't add client. Please try again.";
+  }
+}
+
 function statusFor(actual, target) {
   if (target <= 0) return "green";
 
@@ -330,6 +343,14 @@ export default function CalorieTrackerApp() {
   const [notificationSettings, setNotificationSettings] = useState(null);
   const [thresholdPercentDraft, setThresholdPercentDraft] = useState("");
   const telegramPollRef = useRef(null);
+  const [roleId, setRoleId] = useState(null);
+
+  const [clients, setClients] = useState([]);
+  const [clientsLoading, setClientsLoading] = useState(false);
+  const [clientsError, setClientsError] = useState(null);
+  const [addClientEmail, setAddClientEmail] = useState("");
+  const [addClientBusy, setAddClientBusy] = useState(false);
+  const [addClientMessage, setAddClientMessage] = useState(null);
 
   const [profile, setProfile] = useState({ sex: "male", age: 30, weightKg: 75, heightCm: 175, activity: "moderate" });
   const [goal, setGoal] = useState({ type: "maintain", rate: "moderate" });
@@ -536,6 +557,7 @@ export default function CalorieTrackerApp() {
             heightCm: p.height_cm ?? 175,
             activity: p.activity || "moderate",
           });
+          setRoleId(p.role_id ?? null);
           setGoal({ type: p.goal_type || "maintain", rate: p.goal_rate || "moderate" });
 
           const hasOverride = p.plan_override_calories !== null && p.plan_override_calories !== undefined;
@@ -1198,6 +1220,82 @@ export default function CalorieTrackerApp() {
     }
   }
 
+  async function loadClients() {
+    if (!session) return;
+
+    setClientsLoading(true);
+    setClientsError(null);
+
+    try {
+      const { data: links, error: linksErr } = await supabase
+        .from("coach_clients")
+        .select("client_id")
+        .eq("coach_id", session.user.id)
+        .eq("status", "active");
+      if (linksErr) throw linksErr;
+
+      const clientIds = (links || []).map((l) => l.client_id);
+
+      if (clientIds.length === 0) {
+        setClients([]);
+        return;
+      }
+
+      const { data: infos, error: infoErr } = await supabase
+        .from("user_info")
+        .select("user_id, email")
+        .in("user_id", clientIds);
+      if (infoErr) throw infoErr;
+
+      const emailByClientId = {};
+      (infos || []).forEach((row) => {
+        emailByClientId[row.user_id] = row.email;
+      });
+
+      setClients(clientIds.map((id) => ({ id, email: emailByClientId[id] || "(email unavailable)" })));
+    } catch (err) {
+      setClientsError(err && err.message ? err.message : "Couldn't load your clients.");
+    } finally {
+      setClientsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (view === "clients" && roleId === 2) {
+      loadClients();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, session]);
+
+  async function submitAddClient() {
+    setAddClientMessage(null);
+    const email = addClientEmail.trim();
+
+    if (!email) {
+      setAddClientMessage({ type: "error", text: describeAddClientError("email_required") });
+      return;
+    }
+
+    setAddClientBusy(true);
+
+    try {
+      const { data, error } = await supabase.functions.invoke("create-client", { body: { email } });
+      if (error) throw error;
+
+      if (data && data.ok) {
+        setAddClientMessage({ type: "success", text: `Invite sent to ${email}` });
+        setAddClientEmail("");
+        loadClients();
+      } else {
+        setAddClientMessage({ type: "error", text: describeAddClientError(data && data.reason) });
+      }
+    } catch (err) {
+      setAddClientMessage({ type: "error", text: "Couldn't send the invite. Please try again." });
+    } finally {
+      setAddClientBusy(false);
+    }
+  }
+
   async function addPersonalFood() {
     setPersonalFoodError(null);
 
@@ -1463,6 +1561,7 @@ export default function CalorieTrackerApp() {
             {view === "setup" && "Configuration"}
             {view === "log" && "Daily log"}
             {view === "history" && "History"}
+            {view === "clients" && "Clients"}
           </h1>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
@@ -1517,6 +1616,7 @@ export default function CalorieTrackerApp() {
           { id: "setup", label: "Configuration" },
           { id: "log", label: "Daily log" },
           { id: "history", label: "History" },
+          ...(roleId === 2 ? [{ id: "clients", label: "Clients" }] : []),
         ].map((t) => (
           <button
             key={t.id}
@@ -2710,6 +2810,65 @@ export default function CalorieTrackerApp() {
               })}
             </>
           )}
+        </div>
+      )}
+
+      {view === "clients" && roleId === 2 && (
+        <div style={{ display: "grid", gap: 20 }}>
+          <div style={panelStyle}>
+            <SectionTitle>Your clients</SectionTitle>
+
+            {clientsLoading ? (
+              <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
+            ) : clientsError ? (
+              <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                {clientsError}
+              </div>
+            ) : clients.length === 0 ? (
+              <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any active clients yet.</div>
+            ) : (
+              <div>
+                {clients.map((c) => (
+                  <div key={c.id} style={foodRowStyle}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: INK }}>{c.email}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={panelStyle}>
+            <SectionTitle>Add a client</SectionTitle>
+
+            <label style={labelStyle}>Client email</label>
+            <input
+              type="email"
+              placeholder="client@example.com"
+              value={addClientEmail}
+              onChange={(e) => setAddClientEmail(e.target.value)}
+              style={inputStyle}
+              disabled={addClientBusy}
+            />
+
+            <button onClick={submitAddClient} style={primaryButtonStyle} disabled={addClientBusy}>
+              {addClientBusy ? "Sending…" : "Add client"}
+            </button>
+
+            {addClientMessage && (
+              <div
+                style={{
+                  marginTop: 12,
+                  padding: "8px 10px",
+                  background: addClientMessage.type === "success" ? GREEN_SOFT : RED_SOFT,
+                  color: addClientMessage.type === "success" ? GREEN : RED,
+                  borderRadius: 4,
+                  fontSize: 12,
+                }}
+              >
+                {addClientMessage.text}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

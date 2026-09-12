@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save } from "lucide-react";
+import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const INK = "#1B2430";
@@ -542,10 +542,6 @@ export default function CalorieTrackerApp() {
           .select("role_id")
           .eq("id", userId)
           .maybeSingle();
-        console.log("[DEBUG role_id] userInfoErr:", userInfoErr);
-        console.log("[DEBUG role_id] userInfoRow:", userInfoRow);
-        console.log("[DEBUG role_id] profileRow truthy:", !!profileRow);
-        console.log("[DEBUG role_id] value to be passed to setRoleId:", userInfoRow?.role_id ?? null);
         if (userInfoErr) throw userInfoErr;
 
         const [personalFoodsRes, planFoodsRes, logsRes] = await Promise.all([
@@ -1272,11 +1268,11 @@ export default function CalorieTrackerApp() {
   }
 
   useEffect(() => {
-    if (view === "clients" && roleId === 2) {
-      loadClients();
+    if (roleId === 2) {
+      setView("home");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, roleId, session]);
+  }, [roleId]);
 
   async function submitAddClient() {
     setAddClientMessage(null);
@@ -1572,7 +1568,10 @@ export default function CalorieTrackerApp() {
             {view === "setup" && "Configuration"}
             {view === "log" && "Daily log"}
             {view === "history" && "History"}
+            {view === "home" && "Home"}
             {view === "clients" && "Clients"}
+            {view === "plans" && "Plans"}
+            {view === "notifications" && "Notifications"}
           </h1>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
@@ -1622,12 +1621,13 @@ export default function CalorieTrackerApp() {
         </div>
       </div>
 
+      {roleId !== 2 && (
+      <>
       <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
         {[
           { id: "setup", label: "Configuration" },
           { id: "log", label: "Daily log" },
           { id: "history", label: "History" },
-          ...(roleId === 2 ? [{ id: "clients", label: "Clients" }] : []),
         ].map((t) => (
           <button
             key={t.id}
@@ -2823,60 +2823,141 @@ export default function CalorieTrackerApp() {
           )}
         </div>
       )}
+      </>
+      )}
 
-      {view === "clients" && roleId === 2 && (
-        <div style={{ display: "grid", gap: 20 }}>
-          <div style={panelStyle}>
-            <SectionTitle>Your clients</SectionTitle>
-
-            {clientsLoading ? (
-              <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
-            ) : clientsError ? (
-              <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                {clientsError}
-              </div>
-            ) : clients.length === 0 ? (
-              <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any active clients yet.</div>
-            ) : (
-              <div>
-                {clients.map((c) => (
-                  <div key={c.id} style={foodRowStyle}>
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: INK }}>{c.email}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div style={panelStyle}>
-            <SectionTitle>Add a client</SectionTitle>
-
-            <label style={labelStyle}>Client email</label>
-            <input
-              type="email"
-              placeholder="client@example.com"
-              value={addClientEmail}
-              onChange={(e) => setAddClientEmail(e.target.value)}
-              style={inputStyle}
-              disabled={addClientBusy}
-            />
-
-            <button onClick={submitAddClient} style={primaryButtonStyle} disabled={addClientBusy}>
-              {addClientBusy ? "Sending…" : "Add client"}
-            </button>
-
-            {addClientMessage && (
-              <div
+      {roleId === 2 && (
+        <div style={{ display: "flex", gap: 24, alignItems: "flex-start" }}>
+          <div style={{ width: 200, flexShrink: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+            {[
+              { id: "home", label: "Home", icon: Home },
+              { id: "clients", label: "Clients", icon: Users },
+              { id: "plans", label: "Plans", icon: ClipboardList },
+              { id: "notifications", label: "Notifications", icon: Bell },
+            ].map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setView(t.id)}
                 style={{
-                  marginTop: 12,
-                  padding: "8px 10px",
-                  background: addClientMessage.type === "success" ? GREEN_SOFT : RED_SOFT,
-                  color: addClientMessage.type === "success" ? GREEN : RED,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "9px 12px",
                   borderRadius: 4,
-                  fontSize: 12,
+                  border: `1px solid ${view === t.id ? TEAL : GRID}`,
+                  background: view === t.id ? TEAL_SOFT : PANEL,
+                  color: view === t.id ? TEAL : INK_SOFT,
+                  fontFamily: "'Space Grotesk', sans-serif",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  textAlign: "left",
                 }}
               >
-                {addClientMessage.text}
+                <t.icon size={16} />
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {view === "home" && (
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+                  <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: 0 }}>
+                    Home
+                  </h2>
+                  <button
+                    onClick={() => setView("notifications")}
+                    aria-label="Notifications"
+                    style={{ ...iconButtonStyle, border: `1px solid ${GRID}`, borderRadius: 4, background: PANEL, padding: 8 }}
+                  >
+                    <Bell size={16} />
+                  </button>
+                </div>
+
+                <div style={panelStyle}>
+                  <SectionTitle>Your clients</SectionTitle>
+
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 36, fontWeight: 600, color: INK, marginBottom: 12 }}>
+                    12
+                  </div>
+
+                  <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+                    <span
+                      style={{
+                        padding: "4px 10px",
+                        borderRadius: 999,
+                        background: GREEN_SOFT,
+                        color: GREEN,
+                        fontFamily: "'Space Grotesk', sans-serif",
+                        fontSize: 12,
+                        fontWeight: 700,
+                      }}
+                    >
+                      9 Active
+                    </span>
+                    <span
+                      style={{
+                        padding: "4px 10px",
+                        borderRadius: 999,
+                        background: AMBER_SOFT,
+                        color: AMBER,
+                        fontFamily: "'Space Grotesk', sans-serif",
+                        fontSize: 12,
+                        fontWeight: 700,
+                      }}
+                    >
+                      3 Invited
+                    </span>
+                  </div>
+
+                  <button
+                    onClick={() => setView("clients")}
+                    style={{
+                      border: "none",
+                      background: "transparent",
+                      color: TEAL,
+                      fontFamily: "'Space Grotesk', sans-serif",
+                      fontSize: 13,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      padding: 0,
+                    }}
+                  >
+                    View all clients →
+                  </button>
+                </div>
+
+                <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+                  <button onClick={() => setView("clients")} style={primaryButtonStyle}>
+                    + Add a client
+                  </button>
+                  <button onClick={() => setView("plans")} style={secondaryButtonStyle}>
+                    Manage plans
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {view === "clients" && (
+              <div style={panelStyle}>
+                <SectionTitle>Clients</SectionTitle>
+                <div style={{ fontSize: 12.5, color: INK_SOFT }}>Clients screen — coming soon.</div>
+              </div>
+            )}
+
+            {view === "plans" && (
+              <div style={panelStyle}>
+                <SectionTitle>Plans</SectionTitle>
+                <div style={{ fontSize: 12.5, color: INK_SOFT }}>Plans screen — coming soon.</div>
+              </div>
+            )}
+
+            {view === "notifications" && (
+              <div style={panelStyle}>
+                <SectionTitle>Notifications</SectionTitle>
+                <div style={{ fontSize: 12.5, color: INK_SOFT }}>Notifications screen — coming soon.</div>
               </div>
             )}
           </div>

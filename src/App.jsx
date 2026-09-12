@@ -542,6 +542,10 @@ export default function CalorieTrackerApp() {
           .select("role_id")
           .eq("id", userId)
           .maybeSingle();
+        console.log("[DEBUG role_id] userInfoErr:", userInfoErr);
+        console.log("[DEBUG role_id] userInfoRow:", userInfoRow);
+        console.log("[DEBUG role_id] profileRow truthy:", !!profileRow);
+        console.log("[DEBUG role_id] value to be passed to setRoleId:", userInfoRow?.role_id ?? null);
         if (userInfoErr) throw userInfoErr;
 
         const [personalFoodsRes, planFoodsRes, logsRes] = await Promise.all([

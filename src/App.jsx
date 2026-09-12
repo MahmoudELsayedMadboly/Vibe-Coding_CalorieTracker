@@ -540,7 +540,7 @@ export default function CalorieTrackerApp() {
         const { data: userInfoRow, error: userInfoErr } = await supabase
           .from("user_info")
           .select("role_id")
-          .eq("user_id", userId)
+          .eq("id", userId)
           .maybeSingle();
         if (userInfoErr) throw userInfoErr;
 

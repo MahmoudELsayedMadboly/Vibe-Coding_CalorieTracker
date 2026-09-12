@@ -537,6 +537,13 @@ export default function CalorieTrackerApp() {
 
         setNotificationSettings(notifRow);
 
+        const { data: userInfoRow, error: userInfoErr } = await supabase
+          .from("user_info")
+          .select("role_id")
+          .eq("id", userId)
+          .maybeSingle();
+        if (userInfoErr) throw userInfoErr;
+
         const [personalFoodsRes, planFoodsRes, logsRes] = await Promise.all([
           supabase.from("food_list").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
           supabase.from("plan_foods").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
@@ -557,7 +564,7 @@ export default function CalorieTrackerApp() {
             heightCm: p.height_cm ?? 175,
             activity: p.activity || "moderate",
           });
-          setRoleId(p.role_id ?? null);
+          setRoleId(userInfoRow?.role_id ?? null);
           setGoal({ type: p.goal_type || "maintain", rate: p.goal_rate || "moderate" });
 
           const hasOverride = p.plan_override_calories !== null && p.plan_override_calories !== undefined;

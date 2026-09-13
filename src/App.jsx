@@ -433,7 +433,6 @@ export default function CalorieTrackerApp() {
   const [globalFoods, setGlobalFoods] = useState([]);
   const [globalFoodsLoading, setGlobalFoodsLoading] = useState(false);
   const [globalFoodsError, setGlobalFoodsError] = useState(null);
-  const [globalFoodActionError, setGlobalFoodActionError] = useState(null);
 
   const [planBuilderClientId, setPlanBuilderClientId] = useState(null);
   const [clientPlanFoods, setClientPlanFoods] = useState([]);
@@ -1744,28 +1743,6 @@ export default function CalorieTrackerApp() {
     }
   }
 
-  async function addGlobalFoodToMyList(food) {
-    setGlobalFoodActionError(null);
-
-    const alreadyInList = personalFoods.some((f) => f.name.trim().toLowerCase() === food.name.trim().toLowerCase());
-    if (alreadyInList) return;
-
-    const entry = { id: crypto.randomUUID(), name: food.name, calPer100g: food.calPer100g };
-
-    const { error } = await supabase.from("food_list").insert({
-      id: entry.id,
-      user_id: session.user.id,
-      name: entry.name,
-      cal_per_100g: entry.calPer100g,
-    });
-
-    if (!error) {
-      setPersonalFoods([...personalFoods, entry]);
-    } else {
-      setGlobalFoodActionError("Couldn't add this food. Please try again.");
-    }
-  }
-
   async function loadClientPlan(clientId) {
     setClientPlanLoading(true);
     setClientPlanError(null);
@@ -2139,8 +2116,8 @@ export default function CalorieTrackerApp() {
   );
 
   const combinedFoodList = [
-    ...personalFoods.map((f) => ({ key: `p_${f.id}`, name: f.name, calPer100g: f.calPer100g })),
-    ...globalFoods.map((f) => ({ key: `g_${f.id}`, name: f.name, calPer100g: f.calPer100g })),
+    ...personalFoods.map((f) => ({ key: `p_${f.id}`, id: f.id, name: f.name, calPer100g: f.calPer100g, own: true })),
+    ...globalFoods.map((f) => ({ key: `g_${f.id}`, id: f.id, name: f.name, calPer100g: f.calPer100g, own: false })),
   ].sort((a, b) => a.name.localeCompare(b.name));
 
   return (
@@ -4193,82 +4170,35 @@ export default function CalorieTrackerApp() {
                     </div>
 
                     <div style={panelStyle}>
-                      <SectionTitle>Your food list</SectionTitle>
+                      <SectionTitle>Food list</SectionTitle>
+                      {globalFoodsError && (
+                        <div style={{ marginBottom: 10, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                          {globalFoodsError}
+                        </div>
+                      )}
                       <div style={{ maxHeight: 340, overflowY: "auto" }}>
-                        {personalFoods.length === 0 && <div style={{ fontSize: 12, color: INK_SOFT }}>No foods in your list yet.</div>}
-                        {personalFoods.map((f) => (
-                          <div key={f.id} style={foodRowStyle}>
+                        {combinedFoodList.length === 0 && !globalFoodsLoading && (
+                          <div style={{ fontSize: 12, color: INK_SOFT }}>No foods yet.</div>
+                        )}
+                        {combinedFoodList.map((f) => (
+                          <div key={f.key} style={foodRowStyle}>
                             <div>
                               <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
                               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
                                 {f.calPer100g ? `${f.calPer100g} kcal / 100g` : "No calories set"}
                               </div>
                             </div>
-                            <button onClick={() => removePersonalFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
-                              <Trash2 size={14} />
-                            </button>
+                            {f.own && (
+                              <button onClick={() => removePersonalFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
+                                <Trash2 size={14} />
+                              </button>
+                            )}
                           </div>
                         ))}
+                        {globalFoodsLoading && (
+                          <div style={{ fontSize: 12, color: INK_SOFT, paddingTop: 8 }}>Loading global food list…</div>
+                        )}
                       </div>
-                    </div>
-
-                    <div style={panelStyle}>
-                      <SectionTitle>Browse global food list</SectionTitle>
-                      <div
-                        style={{
-                          fontSize: 12,
-                          color: INK_SOFT,
-                          lineHeight: 1.5,
-                          background: "#EEEEEC",
-                          border: `1px solid ${GRID}`,
-                          borderRadius: 4,
-                          padding: "10px 12px",
-                          marginBottom: 14,
-                        }}
-                      >
-                        Foods shared across all coaches. Add any of these to your own list to reuse them when building plans.
-                      </div>
-
-                      {globalFoodActionError && (
-                        <div style={{ marginBottom: 10, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                          {globalFoodActionError}
-                        </div>
-                      )}
-
-                      {globalFoodsLoading ? (
-                        <div style={{ fontSize: 12, color: INK_SOFT }}>Loading global food list…</div>
-                      ) : globalFoodsError ? (
-                        <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                          {globalFoodsError}
-                        </div>
-                      ) : globalFoods.length === 0 ? (
-                        <div style={{ fontSize: 12, color: INK_SOFT }}>No foods in the global list yet.</div>
-                      ) : (
-                        <div style={{ maxHeight: 340, overflowY: "auto" }}>
-                          {globalFoods.map((f) => {
-                            const alreadyInList = personalFoods.some(
-                              (pf) => pf.name.trim().toLowerCase() === f.name.trim().toLowerCase()
-                            );
-                            return (
-                              <div key={f.id} style={foodRowStyle}>
-                                <div>
-                                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
-                                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                                    {f.calPer100g ? `${f.calPer100g} kcal / 100g` : "No calories set"}
-                                  </div>
-                                </div>
-                                {alreadyInList ? (
-                                  <span style={{ fontSize: 11.5, color: INK_SOFT, fontStyle: "italic" }}>Already in your list</span>
-                                ) : (
-                                  <button onClick={() => addGlobalFoodToMyList(f)} style={secondaryButtonStyle}>
-                                    Add to my list
-                                  </button>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
                     </div>
                   </div>
                 )}

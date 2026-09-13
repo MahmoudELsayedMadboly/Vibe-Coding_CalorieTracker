@@ -1263,7 +1263,7 @@ export default function CalorieTrackerApp() {
 
       const [infosRes, profilesRes] = await Promise.all([
         supabase.from("user_info").select("id, name, verified").in("id", clientIds),
-        supabase.from("client_profile").select("client_id, date_from, date_to").in("client_id", clientIds),
+        supabase.from("client_profile").select("user_id, date_from, date_to").in("user_id", clientIds),
       ]);
       if (infosRes.error) throw infosRes.error;
       if (profilesRes.error) throw profilesRes.error;
@@ -1275,7 +1275,7 @@ export default function CalorieTrackerApp() {
 
       const profileByClientId = {};
       (profilesRes.data || []).forEach((row) => {
-        profileByClientId[row.client_id] = row;
+        profileByClientId[row.user_id] = row;
       });
 
       setClients(
@@ -1327,7 +1327,7 @@ export default function CalorieTrackerApp() {
   }, [roleId]);
 
   useEffect(() => {
-    if (roleId === 2 && view === "clients" && clientsView === "grid") {
+    if (roleId === 2 && (view === "home" || (view === "clients" && clientsView === "grid"))) {
       loadClients();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1670,6 +1670,10 @@ export default function CalorieTrackerApp() {
       </div>
     );
   }
+
+  const totalClientsCount = clients.length;
+  const activeClientsCount = clients.filter((c) => c.verified).length;
+  const invitedClientsCount = totalClientsCount - activeClientsCount;
 
   return (
     <div style={{ fontFamily: "'Inter', sans-serif", background: PAPER, color: INK, padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
@@ -3000,7 +3004,7 @@ export default function CalorieTrackerApp() {
                   <SectionTitle>Your clients</SectionTitle>
 
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 36, fontWeight: 600, color: INK, marginBottom: 12 }}>
-                    12
+                    {totalClientsCount}
                   </div>
 
                   <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
@@ -3015,7 +3019,7 @@ export default function CalorieTrackerApp() {
                         fontWeight: 700,
                       }}
                     >
-                      9 Active
+                      {activeClientsCount} Active
                     </span>
                     <span
                       style={{
@@ -3028,7 +3032,7 @@ export default function CalorieTrackerApp() {
                         fontWeight: 700,
                       }}
                     >
-                      3 Invited
+                      {invitedClientsCount} Invited
                     </span>
                   </div>
 

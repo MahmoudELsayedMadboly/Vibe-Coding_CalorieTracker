@@ -259,6 +259,25 @@ const COUNTRY_DIAL_CODES = [
   { label: "Australia", code: "+61" },
 ];
 
+function splitPhoneByDialCode(phone) {
+  if (!phone) return { code: "+20", number: "" };
+  const byLongestCode = [...COUNTRY_DIAL_CODES].sort((a, b) => b.code.length - a.code.length);
+  const match = byLongestCode.find((c) => phone.startsWith(c.code));
+  if (!match) return { code: "+20", number: phone.replace(/\D/g, "") };
+  return { code: match.code, number: phone.slice(match.code.length) };
+}
+
+function clientStatusMeta(client) {
+  if (!client) return { label: "Invited", color: AMBER, soft: AMBER_SOFT };
+  if (client.coachStatus === "inactive") {
+    return { label: "Deactivated", color: INK_SOFT, soft: GRID };
+  }
+  if (client.firstLoginAt) {
+    return { label: "Active", color: GREEN, soft: GREEN_SOFT };
+  }
+  return { label: "Invited", color: AMBER, soft: AMBER_SOFT };
+}
+
 function describeAddClientError(reason) {
   switch (reason) {
     case "not_a_coach":
@@ -395,6 +414,13 @@ export default function CalorieTrackerApp() {
   const [addClientBusy, setAddClientBusy] = useState(false);
   const [addClientMessage, setAddClientMessage] = useState(null);
   const [createdClientCredentials, setCreatedClientCredentials] = useState(null);
+  const [editingClientId, setEditingClientId] = useState(null);
+
+  const [clientDetail, setClientDetail] = useState(null);
+  const [clientDetailLoading, setClientDetailLoading] = useState(false);
+  const [clientDetailError, setClientDetailError] = useState(null);
+  const [clientDetailBusy, setClientDetailBusy] = useState(false);
+  const [clientDetailFlash, setClientDetailFlash] = useState(null);
 
   const [planTypes, setPlanTypes] = useState([]);
   const [planTypesLoading, setPlanTypesLoading] = useState(false);
@@ -1380,11 +1406,201 @@ export default function CalorieTrackerApp() {
   }, [view, roleId, clientsView, session]);
 
   useEffect(() => {
-    if (roleId === 2 && (view === "clients" || view === "plans")) {
+    if (roleId === 2 && (view === "clients" || view === "plans" || view === "client-detail")) {
       loadPlanTypes();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, roleId, session]);
+
+  useEffect(() => {
+    if (roleId === 2 && view === "client-detail" && selectedClientId) {
+      loadClientDetail(selectedClientId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, selectedClientId, session]);
+
+  async function loadClientDetail(clientId) {
+    if (!session || !clientId) return;
+
+    setClientDetailLoading(true);
+    setClientDetailError(null);
+
+    try {
+      const [infoRes, profileRes, linkRes] = await Promise.all([
+        supabase.from("user_info").select("id, name, email, first_login_at").eq("id", clientId).maybeSingle(),
+        supabase.from("client_profile").select("user_id, date_from, date_to, phone, plan_type_id").eq("user_id", clientId).maybeSingle(),
+        supabase.from("coach_clients").select("status").eq("coach_id", session.user.id).eq("client_id", clientId).maybeSingle(),
+      ]);
+      if (infoRes.error) throw infoRes.error;
+      if (profileRes.error) throw profileRes.error;
+      if (linkRes.error) throw linkRes.error;
+
+      const info = infoRes.data || {};
+      const clientProfile = profileRes.data || {};
+      const link = linkRes.data || {};
+
+      let planTypeName = null;
+      if (clientProfile.plan_type_id) {
+        const cached = planTypes.find((pt) => pt.id === clientProfile.plan_type_id);
+        if (cached) {
+          planTypeName = cached.name;
+        } else {
+          const { data: ptRow, error: ptErr } = await supabase
+            .from("coach_plan_types")
+            .select("name")
+            .eq("id", clientProfile.plan_type_id)
+            .maybeSingle();
+          if (ptErr) throw ptErr;
+          planTypeName = ptRow ? ptRow.name : null;
+        }
+      }
+
+      setClientDetail({
+        id: clientId,
+        name: info.name || "(name unavailable)",
+        email: info.email || null,
+        phone: clientProfile.phone || null,
+        dateFrom: clientProfile.date_from || null,
+        dateTo: clientProfile.date_to || null,
+        planTypeId: clientProfile.plan_type_id || null,
+        planTypeName,
+        firstLoginAt: info.first_login_at || null,
+        coachStatus: link.status || "active",
+      });
+    } catch (err) {
+      setClientDetailError(err && err.message ? err.message : "Couldn't load this client.");
+    } finally {
+      setClientDetailLoading(false);
+    }
+  }
+
+  function startAddClient() {
+    setAddClientName("");
+    setAddClientEmail("");
+    setAddClientPhoneCountryCode("+20");
+    setAddClientPhoneNumber("");
+    setAddClientPlanTypeId("");
+    setAddClientDateFrom("");
+    setAddClientDateTo("");
+    setAddClientMessage(null);
+    setCreatedClientCredentials(null);
+    setEditingClientId(null);
+    setClientsView("add");
+  }
+
+  function startEditClient(client) {
+    const { code, number } = splitPhoneByDialCode(client.phone);
+    setAddClientName(client.name || "");
+    setAddClientEmail(client.email || "");
+    setAddClientPhoneCountryCode(code);
+    setAddClientPhoneNumber(number);
+    setAddClientPlanTypeId(client.planTypeId || "");
+    setAddClientDateFrom(client.dateFrom || "");
+    setAddClientDateTo(client.dateTo || "");
+    setAddClientMessage(null);
+    setCreatedClientCredentials(null);
+    setEditingClientId(client.id);
+    setClientsView("add");
+    setView("clients");
+  }
+
+  async function submitEditClient() {
+    setAddClientMessage(null);
+    const clientId = editingClientId;
+    const name = addClientName.trim();
+    const email = addClientEmail.trim();
+
+    if (!name) {
+      setAddClientMessage({ type: "error", text: "Enter the client's name." });
+      return;
+    }
+    if (!email) {
+      setAddClientMessage({ type: "error", text: describeAddClientError("email_required") });
+      return;
+    }
+
+    setAddClientBusy(true);
+
+    const phoneNumber = addClientPhoneNumber.trim();
+    const combinedPhone = phoneNumber ? `${addClientPhoneCountryCode}${phoneNumber}` : null;
+
+    try {
+      const { data, error } = await supabase.functions.invoke("edit-client", {
+        body: {
+          client_id: clientId,
+          email,
+          name,
+          phone: combinedPhone,
+          plan_type_id: addClientPlanTypeId || null,
+          date_from: addClientDateFrom || null,
+          date_to: addClientDateTo || null,
+        },
+      });
+      if (error) throw error;
+
+      if (data && data.ok) {
+        setEditingClientId(null);
+        setClientsView("grid");
+        setView("client-detail");
+        setSelectedClientId(clientId);
+        setClientDetailFlash("Client details updated.");
+        setTimeout(() => setClientDetailFlash(null), 2500);
+        loadClientDetail(clientId);
+        loadClients();
+      } else {
+        setAddClientMessage({ type: "error", text: describeAddClientError(data && data.reason) });
+      }
+    } catch (err) {
+      setAddClientMessage({ type: "error", text: "Couldn't update the client. Please try again." });
+    } finally {
+      setAddClientBusy(false);
+    }
+  }
+
+  async function removeClient(clientId, name) {
+    const confirmed = window.confirm(`Are you sure? This permanently deletes ${name} and all their data.`);
+    if (!confirmed) return;
+
+    setClientDetailBusy(true);
+    setClientDetailError(null);
+
+    try {
+      const { error } = await supabase.from("user_info").delete().eq("id", clientId);
+      if (error) throw error;
+
+      setSelectedClientId(null);
+      setClientDetail(null);
+      setView("clients");
+      setClientsView("grid");
+      loadClients();
+    } catch (err) {
+      setClientDetailError(err && err.message ? err.message : "Couldn't remove this client. Please try again.");
+    } finally {
+      setClientDetailBusy(false);
+    }
+  }
+
+  async function toggleClientStatus(client) {
+    const nextStatus = client.coachStatus === "inactive" ? "active" : "inactive";
+
+    setClientDetailBusy(true);
+    setClientDetailError(null);
+
+    try {
+      const { error } = await supabase
+        .from("coach_clients")
+        .update({ status: nextStatus })
+        .eq("coach_id", session.user.id)
+        .eq("client_id", client.id);
+      if (error) throw error;
+
+      loadClientDetail(client.id);
+    } catch (err) {
+      setClientDetailError(err && err.message ? err.message : "Couldn't update this client's status. Please try again.");
+    } finally {
+      setClientDetailBusy(false);
+    }
+  }
 
   async function submitAddClient() {
     setAddClientMessage(null);
@@ -3191,13 +3407,7 @@ export default function CalorieTrackerApp() {
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
                       <SectionTitle>Clients</SectionTitle>
                       {clients.length > 0 && (
-                        <button
-                          onClick={() => {
-                            setAddClientMessage(null);
-                            setClientsView("add");
-                          }}
-                          style={primaryButtonStyle}
-                        >
+                        <button onClick={startAddClient} style={primaryButtonStyle}>
                           + Add client
                         </button>
                       )}
@@ -3214,13 +3424,7 @@ export default function CalorieTrackerApp() {
                         <div style={{ fontSize: 13, color: INK_SOFT, marginBottom: 16 }}>
                           There are no clients added yet
                         </div>
-                        <button
-                          onClick={() => {
-                            setAddClientMessage(null);
-                            setClientsView("add");
-                          }}
-                          style={primaryButtonStyle}
-                        >
+                        <button onClick={startAddClient} style={primaryButtonStyle}>
                           + Add client
                         </button>
                       </div>
@@ -3303,7 +3507,7 @@ export default function CalorieTrackerApp() {
                   </div>
                 ) : (
                   <div style={panelStyle}>
-                    <SectionTitle>Add a client</SectionTitle>
+                    <SectionTitle>{editingClientId ? "Edit client" : "Add a client"}</SectionTitle>
 
                     <label style={labelStyle}>Client name</label>
                     <input
@@ -3388,13 +3592,22 @@ export default function CalorieTrackerApp() {
                     </div>
 
                     <div style={{ display: "flex", gap: 10 }}>
-                      <button onClick={submitAddClient} style={primaryButtonStyle} disabled={addClientBusy}>
+                      <button
+                        onClick={editingClientId ? submitEditClient : submitAddClient}
+                        style={primaryButtonStyle}
+                        disabled={addClientBusy}
+                      >
                         {addClientBusy ? "Saving…" : "Save"}
                       </button>
                       <button
                         onClick={() => {
                           setAddClientMessage(null);
-                          setClientsView("grid");
+                          if (editingClientId) {
+                            setEditingClientId(null);
+                            setView("client-detail");
+                          } else {
+                            setClientsView("grid");
+                          }
                         }}
                         style={secondaryButtonStyle}
                         disabled={addClientBusy}
@@ -3470,11 +3683,91 @@ export default function CalorieTrackerApp() {
             )}
 
             {view === "client-detail" && (
-              <div style={panelStyle}>
-                <SectionTitle>Client details</SectionTitle>
-                <div style={{ fontSize: 12.5, color: INK_SOFT }}>
-                  Client details for {(clients.find((c) => c.id === selectedClientId) || {}).name || "this client"} — coming soon.
-                </div>
+              <div style={{ display: "grid", gap: 16 }}>
+                {clientDetailFlash && (
+                  <div style={{ padding: "10px 12px", borderRadius: 4, fontSize: 12.5, background: GREEN_SOFT, color: GREEN }}>
+                    {clientDetailFlash}
+                  </div>
+                )}
+
+                {clientDetailError && (
+                  <div style={{ padding: "10px 12px", borderRadius: 4, fontSize: 12.5, background: RED_SOFT, color: RED }}>
+                    {clientDetailError}
+                  </div>
+                )}
+
+                {clientDetailLoading ? (
+                  <div style={{ fontSize: 12, color: INK_SOFT }}>Loading client…</div>
+                ) : clientDetail ? (
+                  <div style={panelStyle}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
+                      <SectionTitle>{clientDetail.name}</SectionTitle>
+                      {(() => {
+                        const meta = clientStatusMeta(clientDetail);
+                        return (
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              padding: "3px 10px",
+                              borderRadius: 4,
+                              background: meta.soft,
+                              color: meta.color,
+                              fontFamily: "'Space Grotesk', sans-serif",
+                              fontSize: 10.5,
+                              fontWeight: 700,
+                              textTransform: "uppercase",
+                              letterSpacing: 0.4,
+                            }}
+                          >
+                            {meta.label}
+                          </span>
+                        );
+                      })()}
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 20 }}>
+                      <div>
+                        <div style={labelStyle}>Email</div>
+                        <div style={{ fontSize: 13 }}>{clientDetail.email || "—"}</div>
+                      </div>
+                      <div>
+                        <div style={labelStyle}>Phone</div>
+                        <div style={{ fontSize: 13 }}>{clientDetail.phone || "—"}</div>
+                      </div>
+                      <div>
+                        <div style={labelStyle}>Plan type</div>
+                        <div style={{ fontSize: 13 }}>{clientDetail.planTypeName || "—"}</div>
+                      </div>
+                      <div>
+                        <div style={labelStyle}>Plan from</div>
+                        <div style={{ fontSize: 13 }}>{clientDetail.dateFrom || "—"}</div>
+                      </div>
+                      <div>
+                        <div style={labelStyle}>Plan to</div>
+                        <div style={{ fontSize: 13 }}>{clientDetail.dateTo || "—"}</div>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <button onClick={() => startEditClient(clientDetail)} style={secondaryButtonStyle} disabled={clientDetailBusy}>
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => removeClient(clientDetail.id, clientDetail.name)}
+                        style={{ ...secondaryButtonStyle, border: `1px solid ${RED}`, color: RED }}
+                        disabled={clientDetailBusy}
+                      >
+                        Remove
+                      </button>
+                      <button onClick={() => toggleClientStatus(clientDetail)} style={secondaryButtonStyle} disabled={clientDetailBusy}>
+                        {clientDetail.coachStatus === "inactive" ? "Reactivate" : "Deactivate"}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  !clientDetailError && <div style={{ fontSize: 12, color: INK_SOFT }}>Client not found.</div>
+                )}
               </div>
             )}
           </div>

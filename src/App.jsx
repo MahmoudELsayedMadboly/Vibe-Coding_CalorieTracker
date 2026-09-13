@@ -696,7 +696,7 @@ export default function CalorieTrackerApp() {
         if (userInfoRow && !userInfoRow.first_login_at) {
           const { error: firstLoginErr } = await supabase
             .from("user_info")
-            .update({ first_login_at: new Date().toISOString() })
+            .update({ first_login_at: new Date().toISOString(), verified: true })
             .eq("id", userId);
           if (firstLoginErr) console.error("Couldn't set first_login_at:", firstLoginErr);
         }

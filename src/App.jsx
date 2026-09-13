@@ -225,6 +225,40 @@ function computePlan(profile, goal) {
   };
 }
 
+const COUNTRY_DIAL_CODES = [
+  { label: "Egypt", code: "+20" },
+  { label: "Saudi Arabia", code: "+966" },
+  { label: "UAE", code: "+971" },
+  { label: "Kuwait", code: "+965" },
+  { label: "Qatar", code: "+974" },
+  { label: "Bahrain", code: "+973" },
+  { label: "Oman", code: "+968" },
+  { label: "Jordan", code: "+962" },
+  { label: "Lebanon", code: "+961" },
+  { label: "Iraq", code: "+964" },
+  { label: "Syria", code: "+963" },
+  { label: "Yemen", code: "+967" },
+  { label: "Libya", code: "+218" },
+  { label: "Tunisia", code: "+216" },
+  { label: "Algeria", code: "+213" },
+  { label: "Morocco", code: "+212" },
+  { label: "Sudan", code: "+249" },
+  { label: "Palestine", code: "+970" },
+  { label: "United States/Canada", code: "+1" },
+  { label: "United Kingdom", code: "+44" },
+  { label: "Germany", code: "+49" },
+  { label: "France", code: "+33" },
+  { label: "Italy", code: "+39" },
+  { label: "Spain", code: "+34" },
+  { label: "Turkey", code: "+90" },
+  { label: "India", code: "+91" },
+  { label: "Pakistan", code: "+92" },
+  { label: "China", code: "+86" },
+  { label: "Russia", code: "+7" },
+  { label: "Brazil", code: "+55" },
+  { label: "Australia", code: "+61" },
+];
+
 function describeAddClientError(reason) {
   switch (reason) {
     case "not_a_coach":
@@ -349,14 +383,18 @@ export default function CalorieTrackerApp() {
   const [clientsLoading, setClientsLoading] = useState(false);
   const [clientsError, setClientsError] = useState(null);
   const [clientsView, setClientsView] = useState("grid");
+  const [clientsPage, setClientsPage] = useState(1);
+  const [selectedClientId, setSelectedClientId] = useState(null);
   const [addClientName, setAddClientName] = useState("");
   const [addClientEmail, setAddClientEmail] = useState("");
-  const [addClientPhone, setAddClientPhone] = useState("");
+  const [addClientPhoneCountryCode, setAddClientPhoneCountryCode] = useState("+20");
+  const [addClientPhoneNumber, setAddClientPhoneNumber] = useState("");
   const [addClientPlanTypeId, setAddClientPlanTypeId] = useState("");
   const [addClientDateFrom, setAddClientDateFrom] = useState("");
   const [addClientDateTo, setAddClientDateTo] = useState("");
   const [addClientBusy, setAddClientBusy] = useState(false);
   const [addClientMessage, setAddClientMessage] = useState(null);
+  const [createdClientCredentials, setCreatedClientCredentials] = useState(null);
 
   const [planTypes, setPlanTypes] = useState([]);
   const [planTypesLoading, setPlanTypesLoading] = useState(false);
@@ -552,7 +590,7 @@ export default function CalorieTrackerApp() {
 
         const { data: userInfoRow, error: userInfoErr } = await supabase
           .from("user_info")
-          .select("role_id")
+          .select("role_id, first_login_at")
           .eq("id", userId)
           .maybeSingle();
         if (userInfoErr) throw userInfoErr;
@@ -654,6 +692,14 @@ export default function CalorieTrackerApp() {
           logsByDate[row.log_date].push(entry);
         });
         setLogs(logsByDate);
+
+        if (userInfoRow && !userInfoRow.first_login_at) {
+          const { error: firstLoginErr } = await supabase
+            .from("user_info")
+            .update({ first_login_at: new Date().toISOString() })
+            .eq("id", userId);
+          if (firstLoginErr) console.error("Couldn't set first_login_at:", firstLoginErr);
+        }
       } catch (err) {
         console.error("Load error:", err);
         setSaveError("Couldn't load your data: " + (err && err.message ? err.message : "unknown error"));
@@ -1262,7 +1308,7 @@ export default function CalorieTrackerApp() {
       }
 
       const [infosRes, profilesRes] = await Promise.all([
-        supabase.from("user_info").select("id, name, verified").in("id", clientIds),
+        supabase.from("user_info").select("id, name, first_login_at").in("id", clientIds),
         supabase.from("client_profile").select("user_id, date_from, date_to").in("user_id", clientIds),
       ]);
       if (infosRes.error) throw infosRes.error;
@@ -1285,7 +1331,7 @@ export default function CalorieTrackerApp() {
           return {
             id,
             name: info.name || "(name unavailable)",
-            verified: !!info.verified,
+            active: !!info.first_login_at,
             dateFrom: clientProfile.date_from || null,
             dateTo: clientProfile.date_to || null,
           };
@@ -1356,12 +1402,15 @@ export default function CalorieTrackerApp() {
 
     setAddClientBusy(true);
 
+    const phoneNumber = addClientPhoneNumber.trim();
+    const combinedPhone = phoneNumber ? `${addClientPhoneCountryCode}${phoneNumber}` : null;
+
     try {
       const { data, error } = await supabase.functions.invoke("create-client", {
         body: {
           email,
           name,
-          phone: addClientPhone.trim() || null,
+          phone: combinedPhone,
           plan_type_id: addClientPlanTypeId || null,
           date_from: addClientDateFrom || null,
           date_to: addClientDateTo || null,
@@ -1370,10 +1419,14 @@ export default function CalorieTrackerApp() {
       if (error) throw error;
 
       if (data && data.ok) {
-        setAddClientMessage({ type: "success", text: `Client added — invite sent to ${email}` });
+        setCreatedClientCredentials({
+          email: data.email || email,
+          tempPassword: data.temp_password,
+        });
         setAddClientName("");
         setAddClientEmail("");
-        setAddClientPhone("");
+        setAddClientPhoneCountryCode("+20");
+        setAddClientPhoneNumber("");
         setAddClientPlanTypeId("");
         setAddClientDateFrom("");
         setAddClientDateTo("");
@@ -1672,8 +1725,16 @@ export default function CalorieTrackerApp() {
   }
 
   const totalClientsCount = clients.length;
-  const activeClientsCount = clients.filter((c) => c.verified).length;
+  const activeClientsCount = clients.filter((c) => c.active).length;
   const invitedClientsCount = totalClientsCount - activeClientsCount;
+
+  const CLIENTS_PAGE_SIZE = 10;
+  const totalClientsPages = Math.max(1, Math.ceil(clients.length / CLIENTS_PAGE_SIZE));
+  const clampedClientsPage = Math.min(clientsPage, totalClientsPages);
+  const pagedClients = clients.slice(
+    (clampedClientsPage - 1) * CLIENTS_PAGE_SIZE,
+    clampedClientsPage * CLIENTS_PAGE_SIZE
+  );
 
   return (
     <div style={{ fontFamily: "'Inter', sans-serif", background: PAPER, color: INK, padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
@@ -1696,6 +1757,7 @@ export default function CalorieTrackerApp() {
             {view === "clients" && "Clients"}
             {view === "plans" && "Plans"}
             {view === "notifications" && "Notifications"}
+            {view === "client-detail" && "Client details"}
           </h1>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
@@ -3066,6 +3128,49 @@ export default function CalorieTrackerApp() {
 
             {view === "clients" && (
               <div>
+                {createdClientCredentials && (
+                  <div
+                    style={{
+                      position: "fixed",
+                      inset: 0,
+                      background: "rgba(27, 36, 48, 0.5)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      padding: 20,
+                      zIndex: 1000,
+                    }}
+                  >
+                    <div style={{ ...panelStyle, maxWidth: 420, width: "100%" }}>
+                      <SectionTitle>Client created</SectionTitle>
+                      <div style={{ fontSize: 13, marginBottom: 12 }}>
+                        Client created — share these login details with them:
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: "'IBM Plex Mono', monospace",
+                          fontSize: 13,
+                          background: PAPER,
+                          border: `1px solid ${GRID}`,
+                          borderRadius: 4,
+                          padding: "10px 12px",
+                          marginBottom: 10,
+                          lineHeight: 1.8,
+                        }}
+                      >
+                        <div>Email: {createdClientCredentials.email}</div>
+                        <div>Temp password: {createdClientCredentials.tempPassword}</div>
+                      </div>
+                      <div style={{ fontSize: 11.5, color: INK_SOFT, marginBottom: 16 }}>
+                        They'll need to change this password after logging in.
+                      </div>
+                      <button onClick={() => setCreatedClientCredentials(null)} style={primaryButtonStyle}>
+                        Done
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {addClientMessage && (
                   <div
                     style={{
@@ -3120,52 +3225,80 @@ export default function CalorieTrackerApp() {
                         </button>
                       </div>
                     ) : (
-                      <div style={{ ...panelStyle, padding: 0, overflowX: "auto" }}>
-                        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                          <thead>
-                            <tr>
-                              <th style={thStyle}>Client name</th>
-                              <th style={thStyle}>Plan from</th>
-                              <th style={thStyle}>Plan to</th>
-                              <th style={thStyle}>Status</th>
-                              <th style={thStyle}></th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {clients.map((c) => (
-                              <tr key={c.id} style={{ borderTop: `1px solid ${GRID}` }}>
-                                <td style={tdStyle}>{c.name}</td>
-                                <td style={tdStyle}>{c.dateFrom || "—"}</td>
-                                <td style={tdStyle}>{c.dateTo || "—"}</td>
-                                <td style={tdStyle}>
-                                  <span
-                                    style={{
-                                      display: "inline-flex",
-                                      alignItems: "center",
-                                      padding: "3px 8px",
-                                      borderRadius: 4,
-                                      background: c.verified ? GREEN_SOFT : AMBER_SOFT,
-                                      color: c.verified ? GREEN : AMBER,
-                                      fontFamily: "'Space Grotesk', sans-serif",
-                                      fontSize: 10.5,
-                                      fontWeight: 700,
-                                      textTransform: "uppercase",
-                                      letterSpacing: 0.4,
-                                    }}
-                                  >
-                                    {c.verified ? "Active" : "Invited"}
-                                  </span>
-                                </td>
-                                <td style={tdStyle}>
-                                  <button style={secondaryButtonStyle} disabled>
-                                    View details
-                                  </button>
-                                </td>
+                      <>
+                        <div style={{ ...panelStyle, padding: 0, overflowX: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                            <thead>
+                              <tr>
+                                <th style={thStyle}>Client name</th>
+                                <th style={thStyle}>Plan from</th>
+                                <th style={thStyle}>Plan to</th>
+                                <th style={thStyle}>Status</th>
+                                <th style={thStyle}></th>
                               </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
+                            </thead>
+                            <tbody>
+                              {pagedClients.map((c) => (
+                                <tr key={c.id} style={{ borderTop: `1px solid ${GRID}` }}>
+                                  <td style={tdStyle}>{c.name}</td>
+                                  <td style={tdStyle}>{c.dateFrom || "—"}</td>
+                                  <td style={tdStyle}>{c.dateTo || "—"}</td>
+                                  <td style={tdStyle}>
+                                    <span
+                                      style={{
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        padding: "3px 8px",
+                                        borderRadius: 4,
+                                        background: c.active ? GREEN_SOFT : AMBER_SOFT,
+                                        color: c.active ? GREEN : AMBER,
+                                        fontFamily: "'Space Grotesk', sans-serif",
+                                        fontSize: 10.5,
+                                        fontWeight: 700,
+                                        textTransform: "uppercase",
+                                        letterSpacing: 0.4,
+                                      }}
+                                    >
+                                      {c.active ? "Active" : "Invited"}
+                                    </span>
+                                  </td>
+                                  <td style={tdStyle}>
+                                    <button
+                                      onClick={() => {
+                                        setSelectedClientId(c.id);
+                                        setView("client-detail");
+                                      }}
+                                      style={secondaryButtonStyle}
+                                    >
+                                      View details
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10 }}>
+                          <button
+                            onClick={() => setClientsPage((p) => Math.max(1, p - 1))}
+                            disabled={clampedClientsPage <= 1}
+                            style={{ ...secondaryButtonStyle, fontSize: 11, padding: "5px 10px", opacity: clampedClientsPage <= 1 ? 0.5 : 1, cursor: clampedClientsPage <= 1 ? "not-allowed" : "pointer" }}
+                          >
+                            Previous
+                          </button>
+                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                            Page {clampedClientsPage} of {totalClientsPages}
+                          </span>
+                          <button
+                            onClick={() => setClientsPage((p) => Math.min(totalClientsPages, p + 1))}
+                            disabled={clampedClientsPage >= totalClientsPages}
+                            style={{ ...secondaryButtonStyle, fontSize: 11, padding: "5px 10px", opacity: clampedClientsPage >= totalClientsPages ? 0.5 : 1, cursor: clampedClientsPage >= totalClientsPages ? "not-allowed" : "pointer" }}
+                          >
+                            Next
+                          </button>
+                        </div>
+                      </>
                     )}
                   </div>
                 ) : (
@@ -3231,14 +3364,28 @@ export default function CalorieTrackerApp() {
                     </div>
 
                     <label style={labelStyle}>Phone number (optional)</label>
-                    <input
-                      type="tel"
-                      placeholder="+1 555 123 4567"
-                      value={addClientPhone}
-                      onChange={(e) => setAddClientPhone(e.target.value)}
-                      style={inputStyle}
-                      disabled={addClientBusy}
-                    />
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <select
+                        value={addClientPhoneCountryCode}
+                        onChange={(e) => setAddClientPhoneCountryCode(e.target.value)}
+                        style={{ ...inputStyle, flex: "0 0 auto", width: 200 }}
+                        disabled={addClientBusy}
+                      >
+                        {COUNTRY_DIAL_CODES.map((c) => (
+                          <option key={c.label} value={c.code}>
+                            {c.label} ({c.code})
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="tel"
+                        placeholder="1012345678"
+                        value={addClientPhoneNumber}
+                        onChange={(e) => setAddClientPhoneNumber(e.target.value.replace(/\D/g, ""))}
+                        style={{ ...inputStyle, flex: 1 }}
+                        disabled={addClientBusy}
+                      />
+                    </div>
 
                     <div style={{ display: "flex", gap: 10 }}>
                       <button onClick={submitAddClient} style={primaryButtonStyle} disabled={addClientBusy}>
@@ -3319,6 +3466,15 @@ export default function CalorieTrackerApp() {
               <div style={panelStyle}>
                 <SectionTitle>Notifications</SectionTitle>
                 <div style={{ fontSize: 12.5, color: INK_SOFT }}>Notifications screen — coming soon.</div>
+              </div>
+            )}
+
+            {view === "client-detail" && (
+              <div style={panelStyle}>
+                <SectionTitle>Client details</SectionTitle>
+                <div style={{ fontSize: 12.5, color: INK_SOFT }}>
+                  Client details for {(clients.find((c) => c.id === selectedClientId) || {}).name || "this client"} — coming soon.
+                </div>
               </div>
             )}
           </div>

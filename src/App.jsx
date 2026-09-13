@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell } from "lucide-react";
+import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const INK = "#1B2430";
@@ -340,6 +340,7 @@ export default function CalorieTrackerApp() {
   const [setupSavedFlash, setSetupSavedFlash] = useState(false);
   const [view, setView] = useState("setup");
   const [configTab, setConfigTab] = useState("profile");
+  const [adminTab, setAdminTab] = useState("planTypes");
   const [notificationSettings, setNotificationSettings] = useState(null);
   const [thresholdPercentDraft, setThresholdPercentDraft] = useState("");
   const telegramPollRef = useRef(null);
@@ -1334,7 +1335,7 @@ export default function CalorieTrackerApp() {
   }, [view, roleId, clientsView, session]);
 
   useEffect(() => {
-    if (roleId === 2 && (view === "clients" || view === "plans")) {
+    if (roleId === 2 && (view === "clients" || view === "administration")) {
       loadPlanTypes();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1695,6 +1696,8 @@ export default function CalorieTrackerApp() {
             {view === "home" && "Home"}
             {view === "clients" && "Clients"}
             {view === "plans" && "Plans"}
+            {view === "administration" && "Administration"}
+            {view === "chat" && "Chat"}
             {view === "notifications" && "Notifications"}
           </h1>
         </div>
@@ -2957,6 +2960,8 @@ export default function CalorieTrackerApp() {
               { id: "home", label: "Home", icon: Home },
               { id: "clients", label: "Clients", icon: Users },
               { id: "plans", label: "Plans", icon: ClipboardList },
+              { id: "administration", label: "Administration", icon: Settings },
+              { id: "chat", label: "Chat", icon: MessageSquare },
               { id: "notifications", label: "Notifications", icon: Bell },
             ].map((t) => (
               <button
@@ -3261,57 +3266,97 @@ export default function CalorieTrackerApp() {
             )}
 
             {view === "plans" && (
-              <div style={{ display: "grid", gap: 20 }}>
-                <div style={panelStyle}>
-                  <SectionTitle>Plan types</SectionTitle>
+              <div style={panelStyle}>
+                <SectionTitle>Plans</SectionTitle>
+                <div style={{ fontSize: 12.5, color: INK_SOFT }}>Plan management — coming soon.</div>
+              </div>
+            )}
 
-                  {planTypesLoading ? (
-                    <div style={{ fontSize: 12, color: INK_SOFT }}>Loading plan types…</div>
-                  ) : planTypesError ? (
-                    <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                      {planTypesError}
-                    </div>
-                  ) : planTypes.length === 0 ? (
-                    <div style={{ fontSize: 12, color: INK_SOFT }}>You haven't defined any plan types yet.</div>
-                  ) : (
-                    <div>
-                      {planTypes.map((pt) => (
-                        <div key={pt.id} style={foodRowStyle}>
-                          <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>
-                            {pt.name}
-                          </span>
-                          <button onClick={() => deletePlanType(pt.id)} style={iconButtonStyle} aria-label={`Delete ${pt.name}`}>
-                            <Trash2 size={15} />
-                          </button>
+            {view === "administration" && (
+              <div>
+                <div style={{ display: "flex", gap: 4, marginBottom: 20, borderBottom: `1px solid ${GRID}`, paddingBottom: 12 }}>
+                  {[{ id: "planTypes", label: "Plan types" }].map((t) => (
+                    <button
+                      key={t.id}
+                      onClick={() => setAdminTab(t.id)}
+                      style={{
+                        padding: "7px 14px",
+                        borderRadius: 4,
+                        border: `1px solid ${adminTab === t.id ? TEAL : GRID}`,
+                        background: adminTab === t.id ? TEAL_SOFT : PANEL,
+                        color: adminTab === t.id ? TEAL : INK_SOFT,
+                        fontFamily: "'Space Grotesk', sans-serif",
+                        fontSize: 12.5,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+
+                {adminTab === "planTypes" && (
+                  <div style={{ display: "grid", gap: 20 }}>
+                    <div style={panelStyle}>
+                      <SectionTitle>Plan types</SectionTitle>
+
+                      {planTypesLoading ? (
+                        <div style={{ fontSize: 12, color: INK_SOFT }}>Loading plan types…</div>
+                      ) : planTypesError ? (
+                        <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                          {planTypesError}
                         </div>
-                      ))}
+                      ) : planTypes.length === 0 ? (
+                        <div style={{ fontSize: 12, color: INK_SOFT }}>You haven't defined any plan types yet.</div>
+                      ) : (
+                        <div>
+                          {planTypes.map((pt) => (
+                            <div key={pt.id} style={foodRowStyle}>
+                              <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>
+                                {pt.name}
+                              </span>
+                              <button onClick={() => deletePlanType(pt.id)} style={iconButtonStyle} aria-label={`Delete ${pt.name}`}>
+                                <Trash2 size={15} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
 
-                <div style={panelStyle}>
-                  <SectionTitle>Add plan type</SectionTitle>
+                    <div style={panelStyle}>
+                      <SectionTitle>Add plan type</SectionTitle>
 
-                  <label style={labelStyle}>Plan type name</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Fat loss - 12 weeks"
-                    value={newPlanTypeName}
-                    onChange={(e) => setNewPlanTypeName(e.target.value)}
-                    style={inputStyle}
-                    disabled={addPlanTypeBusy}
-                  />
+                      <label style={labelStyle}>Plan type name</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Fat loss - 12 weeks"
+                        value={newPlanTypeName}
+                        onChange={(e) => setNewPlanTypeName(e.target.value)}
+                        style={inputStyle}
+                        disabled={addPlanTypeBusy}
+                      />
 
-                  <button onClick={submitAddPlanType} style={primaryButtonStyle} disabled={addPlanTypeBusy}>
-                    {addPlanTypeBusy ? "Adding…" : "Add plan type"}
-                  </button>
+                      <button onClick={submitAddPlanType} style={primaryButtonStyle} disabled={addPlanTypeBusy}>
+                        {addPlanTypeBusy ? "Adding…" : "Add plan type"}
+                      </button>
 
-                  {addPlanTypeError && (
-                    <div style={{ marginTop: 12, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                      {addPlanTypeError}
+                      {addPlanTypeError && (
+                        <div style={{ marginTop: 12, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                          {addPlanTypeError}
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {view === "chat" && (
+              <div style={panelStyle}>
+                <SectionTitle>Chat</SectionTitle>
+                <div style={{ fontSize: 12.5, color: INK_SOFT }}>Chat — coming soon.</div>
               </div>
             )}
 

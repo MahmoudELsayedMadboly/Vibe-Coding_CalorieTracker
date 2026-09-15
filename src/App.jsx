@@ -1488,8 +1488,8 @@ export default function CalorieTrackerApp() {
 
     try {
       const [infoRes, profileRes, linkRes] = await Promise.all([
-        supabase.from("user_info").select("id, name, email, first_login_at").eq("id", clientId).maybeSingle(),
-        supabase.from("client_profile").select("user_id, date_from, date_to, phone, plan_type_id").eq("user_id", clientId).maybeSingle(),
+        supabase.from("user_info").select("id, name, email, phone, first_login_at").eq("id", clientId).maybeSingle(),
+        supabase.from("client_profile").select("user_id, date_from, date_to, plan_type_id").eq("user_id", clientId).maybeSingle(),
         supabase.from("coach_clients").select("status").eq("coach_id", session.user.id).eq("client_id", clientId).maybeSingle(),
       ]);
       if (infoRes.error) throw infoRes.error;
@@ -1520,7 +1520,7 @@ export default function CalorieTrackerApp() {
         id: clientId,
         name: info.name || "(name unavailable)",
         email: info.email || null,
-        phone: clientProfile.phone || null,
+        phone: info.phone || null,
         dateFrom: clientProfile.date_from || null,
         dateTo: clientProfile.date_to || null,
         planTypeId: clientProfile.plan_type_id || null,

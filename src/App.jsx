@@ -1468,7 +1468,7 @@ export default function CalorieTrackerApp() {
 
   useEffect(() => {
     if (roleId === 2 && view === "plans" && plansView === "list") {
-      loadClientPlanSummaries(clients.map((c) => c.id));
+      loadClientPlanSummaries(clients.filter((c) => c.active).map((c) => c.id));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, roleId, plansView, clients, session]);
@@ -2316,6 +2316,8 @@ export default function CalorieTrackerApp() {
     (clampedClientsPage - 1) * CLIENTS_PAGE_SIZE,
     clampedClientsPage * CLIENTS_PAGE_SIZE
   );
+
+  const activePlanClients = clients.filter((c) => c.active);
 
   return (
     <div style={{ fontFamily: "'Inter', sans-serif", background: PAPER, color: INK, padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
@@ -4049,7 +4051,7 @@ export default function CalorieTrackerApp() {
                       <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
                         {clientsError}
                       </div>
-                    ) : clients.length === 0 ? (
+                    ) : activePlanClients.length === 0 ? (
                       <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any active clients yet.</div>
                     ) : (
                       <div style={{ padding: 0, overflowX: "auto" }}>
@@ -4062,7 +4064,7 @@ export default function CalorieTrackerApp() {
                             </tr>
                           </thead>
                           <tbody>
-                            {clients.map((c) => {
+                            {activePlanClients.map((c) => {
                               const mealsConfigured = clientPlanSummaries[c.id] || 0;
                               const hasPlan = mealsConfigured > 0;
                               return (

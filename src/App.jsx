@@ -430,6 +430,20 @@ export default function CalorieTrackerApp() {
   const [addPlanTypeBusy, setAddPlanTypeBusy] = useState(false);
   const [addPlanTypeError, setAddPlanTypeError] = useState(null);
 
+  const [globalFoods, setGlobalFoods] = useState([]);
+  const [globalFoodsLoading, setGlobalFoodsLoading] = useState(false);
+  const [globalFoodsError, setGlobalFoodsError] = useState(null);
+
+  const [planBuilderClientId, setPlanBuilderClientId] = useState(null);
+  const [clientPlanFoods, setClientPlanFoods] = useState([]);
+  const [clientPlanLoading, setClientPlanLoading] = useState(false);
+  const [clientPlanError, setClientPlanError] = useState(null);
+  const [clientPlanName, setClientPlanName] = useState("");
+  const [clientPlanDateFrom, setClientPlanDateFrom] = useState("");
+  const [clientPlanDateTo, setClientPlanDateTo] = useState("");
+  const [newClientPlanFood, setNewClientPlanFood] = useState({ foodKey: "", grams: "", calories: "", meal: "Breakfast", course: "Main" });
+  const [clientPlanAddError, setClientPlanAddError] = useState(null);
+
   const [profile, setProfile] = useState({ sex: "male", age: 30, weightKg: 75, heightCm: 175, activity: "moderate" });
   const [goal, setGoal] = useState({ type: "maintain", rate: "moderate" });
   const [planOverride, setPlanOverride] = useState(null);
@@ -1400,7 +1414,7 @@ export default function CalorieTrackerApp() {
   }, [roleId]);
 
   useEffect(() => {
-    if (roleId === 2 && (view === "home" || (view === "clients" && clientsView === "grid"))) {
+    if (roleId === 2 && (view === "home" || (view === "clients" && clientsView === "grid") || view === "plans")) {
       loadClients();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1412,6 +1426,20 @@ export default function CalorieTrackerApp() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, roleId, session]);
+
+  useEffect(() => {
+    if (roleId === 2 && (view === "plans" || (view === "administration" && adminTab === "foodList"))) {
+      loadGlobalFoods();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, adminTab, session]);
+
+  useEffect(() => {
+    if (roleId === 2 && view === "plans" && planBuilderClientId) {
+      loadClientPlan(planBuilderClientId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, planBuilderClientId, session]);
 
   useEffect(() => {
     if (roleId === 2 && view === "client-detail" && selectedClientId) {
@@ -1693,6 +1721,140 @@ export default function CalorieTrackerApp() {
     }
   }
 
+  async function loadGlobalFoods() {
+    setGlobalFoodsLoading(true);
+    setGlobalFoodsError(null);
+
+    try {
+      const { data, error } = await supabase.from("global_food_list").select("*").order("name", { ascending: true });
+      if (error) throw error;
+
+      setGlobalFoods(
+        (data || []).map((f) => ({
+          id: f.id,
+          name: f.name,
+          calPer100g: f.cal_per_100g,
+        }))
+      );
+    } catch (err) {
+      setGlobalFoodsError(err && err.message ? err.message : "Couldn't load the global food list.");
+    } finally {
+      setGlobalFoodsLoading(false);
+    }
+  }
+
+  async function loadClientPlan(clientId) {
+    setClientPlanLoading(true);
+    setClientPlanError(null);
+    setClientPlanAddError(null);
+    setNewClientPlanFood({ foodKey: "", grams: "", calories: "", meal: "Breakfast", course: "Main" });
+
+    try {
+      const { data, error } = await supabase
+        .from("plan_foods")
+        .select("*")
+        .eq("user_id", clientId)
+        .order("created_at", { ascending: true });
+      if (error) throw error;
+
+      const rows = data || [];
+
+      setClientPlanFoods(
+        rows.map((f) => ({
+          id: f.id,
+          name: f.name,
+          grams: f.grams,
+          meal: f.meal,
+          course: f.course || "Main",
+          calories: f.calories,
+        }))
+      );
+      setClientPlanName((rows[0] && rows[0].plan_name) || "");
+      setClientPlanDateFrom((rows[0] && rows[0].plan_date_from) || "");
+      setClientPlanDateTo((rows[0] && rows[0].plan_date_to) || "");
+    } catch (err) {
+      setClientPlanError(err && err.message ? err.message : "Couldn't load this client's plan.");
+    } finally {
+      setClientPlanLoading(false);
+    }
+  }
+
+  async function updateClientPlanField(column, value) {
+    if (!planBuilderClientId) return;
+    await supabase.from("plan_foods").update({ [column]: value || null }).eq("user_id", planBuilderClientId);
+  }
+
+  async function addClientPlanFood() {
+    setClientPlanAddError(null);
+
+    if (!newClientPlanFood.foodKey) {
+      setClientPlanAddError("Select a food from the list first.");
+      return;
+    }
+
+    const match = combinedFoodList.find((f) => f.key === newClientPlanFood.foodKey);
+
+    if (!match) {
+      setClientPlanAddError("That food is no longer available. Please pick another.");
+      return;
+    }
+
+    const grams = Number(newClientPlanFood.grams);
+
+    if (!grams || grams <= 0) {
+      setClientPlanAddError("Enter a gram amount.");
+      return;
+    }
+
+    const alreadyInMeal = clientPlanFoods.some(
+      (f) => f.name === match.name && f.meal === newClientPlanFood.meal && f.course === newClientPlanFood.course
+    );
+
+    if (alreadyInMeal) {
+      setClientPlanAddError(`"${match.name}" is already added under ${newClientPlanFood.meal} / ${newClientPlanFood.course}. Pick a different meal or course to add it again.`);
+      return;
+    }
+
+    const food = {
+      id: crypto.randomUUID(),
+      name: match.name,
+      grams,
+      meal: newClientPlanFood.meal,
+      course: newClientPlanFood.course,
+      calories: match.calPer100g ? Math.round((match.calPer100g * grams) / 100) : 0,
+    };
+
+    const { error: insErr } = await supabase.from("plan_foods").insert({
+      id: food.id,
+      user_id: planBuilderClientId,
+      name: food.name,
+      grams: food.grams,
+      meal: food.meal,
+      course: food.course,
+      calories: food.calories,
+      plan_name: clientPlanName || null,
+      plan_date_from: clientPlanDateFrom || null,
+      plan_date_to: clientPlanDateTo || null,
+    });
+
+    if (!insErr) {
+      setClientPlanFoods([...clientPlanFoods, food]);
+      setNewClientPlanFood({ foodKey: "", grams: "", calories: "", meal: newClientPlanFood.meal, course: newClientPlanFood.course });
+    } else {
+      setClientPlanAddError("Couldn't save this food. Please try again.");
+    }
+  }
+
+  async function removeClientPlanFood(id) {
+    const { error: delErr } = await supabase.from("plan_foods").delete().eq("id", id).eq("user_id", planBuilderClientId);
+
+    if (!delErr) {
+      setClientPlanFoods(clientPlanFoods.filter((f) => f.id !== id));
+    } else {
+      setClientPlanAddError("Couldn't remove this food. Please try again.");
+    }
+  }
+
   async function addPersonalFood() {
     setPersonalFoodError(null);
 
@@ -1952,6 +2114,11 @@ export default function CalorieTrackerApp() {
     (clampedClientsPage - 1) * CLIENTS_PAGE_SIZE,
     clampedClientsPage * CLIENTS_PAGE_SIZE
   );
+
+  const combinedFoodList = [
+    ...personalFoods.map((f) => ({ key: `p_${f.id}`, id: f.id, name: f.name, calPer100g: f.calPer100g, own: true })),
+    ...globalFoods.map((f) => ({ key: `g_${f.id}`, id: f.id, name: f.name, calPer100g: f.calPer100g, own: false })),
+  ].sort((a, b) => a.name.localeCompare(b.name));
 
   return (
     <div style={{ fontFamily: "'Inter', sans-serif", background: PAPER, color: INK, padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
@@ -3626,16 +3793,270 @@ export default function CalorieTrackerApp() {
             )}
 
             {view === "plans" && (
-              <div style={panelStyle}>
-                <SectionTitle>Plans</SectionTitle>
-                <div style={{ fontSize: 12.5, color: INK_SOFT }}>Plan management — coming soon.</div>
+              <div style={{ display: "grid", gap: 20 }}>
+                <div style={panelStyle}>
+                  <SectionTitle>Select a client</SectionTitle>
+
+                  {clientsLoading ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
+                  ) : clientsError ? (
+                    <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                      {clientsError}
+                    </div>
+                  ) : clients.length === 0 ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any active clients yet.</div>
+                  ) : (
+                    <select
+                      value={planBuilderClientId || ""}
+                      onChange={(e) => setPlanBuilderClientId(e.target.value || null)}
+                      style={{ ...inputStyle, marginBottom: 0 }}
+                    >
+                      <option value="">Select a client…</option>
+                      {clients.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+
+                {planBuilderClientId && (
+                  <div style={panelStyle}>
+                    <SectionTitle>
+                      {(clients.find((c) => c.id === planBuilderClientId) || {}).name || "Client"}'s plan
+                    </SectionTitle>
+
+                    {clientPlanLoading ? (
+                      <div style={{ fontSize: 12, color: INK_SOFT }}>Loading plan…</div>
+                    ) : clientPlanError ? (
+                      <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                        {clientPlanError}
+                      </div>
+                    ) : (
+                      <>
+                        <label style={labelStyle}>Plan name</label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Cutting phase — September"
+                          value={clientPlanName}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setClientPlanName(val);
+                            updateClientPlanField("plan_name", val);
+                          }}
+                          style={{ ...inputStyle, width: "50%" }}
+                        />
+
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 6 }}>
+                          <div>
+                            <label style={labelStyle}>Date from</label>
+                            <input
+                              type="date"
+                              value={clientPlanDateFrom}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setClientPlanDateFrom(val);
+                                if (!clientPlanDateTo || val <= clientPlanDateTo) updateClientPlanField("plan_date_from", val);
+                              }}
+                              style={{ ...inputStyle, marginBottom: 0 }}
+                            />
+                          </div>
+                          <div>
+                            <label style={labelStyle}>Date to</label>
+                            <input
+                              type="date"
+                              value={clientPlanDateTo}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setClientPlanDateTo(val);
+                                if (!clientPlanDateFrom || val >= clientPlanDateFrom) updateClientPlanField("plan_date_to", val);
+                              }}
+                              style={{ ...inputStyle, marginBottom: 0 }}
+                            />
+                          </div>
+                        </div>
+                        {clientPlanDateFrom && clientPlanDateTo && clientPlanDateTo < clientPlanDateFrom ? (
+                          <div style={{ marginBottom: 16, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                            "Date to" can't be earlier than "Date from". Please enter a valid date range.
+                          </div>
+                        ) : (
+                          <div style={{ marginBottom: 16 }} />
+                        )}
+
+                        <div style={{ marginBottom: 14 }}>
+                          <label style={labelStyle}>Food name</label>
+                          <select
+                            value={newClientPlanFood.foodKey}
+                            onChange={(e) => {
+                              const key = e.target.value;
+                              setNewClientPlanFood({ ...newClientPlanFood, foodKey: key, grams: "", calories: 0 });
+                            }}
+                            style={inputStyle}
+                            disabled={combinedFoodList.length === 0}
+                          >
+                            <option value="">{combinedFoodList.length === 0 ? "No foods available yet" : "Select a food…"}</option>
+                            {combinedFoodList.map((f) => (
+                              <option key={f.key} value={f.key}>
+                                {f.name}
+                              </option>
+                            ))}
+                          </select>
+
+                          <label style={labelStyle}>Grams</label>
+                          <input
+                            type="number"
+                            placeholder="Grams"
+                            value={newClientPlanFood.grams}
+                            onChange={(e) => {
+                              const grams = e.target.value;
+                              const match = combinedFoodList.find((f) => f.key === newClientPlanFood.foodKey);
+                              const numGrams = Number(grams) || 0;
+                              const calories = match && match.calPer100g ? Math.round((match.calPer100g * numGrams) / 100) : 0;
+                              setNewClientPlanFood({ ...newClientPlanFood, grams, calories });
+                            }}
+                            style={inputStyle}
+                          />
+
+                          <label style={labelStyle}>Calories</label>
+                          <input
+                            type="number"
+                            placeholder="Calories"
+                            value={newClientPlanFood.calories}
+                            readOnly
+                            style={{ ...inputStyle, background: PAPER, color: INK_SOFT, cursor: "not-allowed" }}
+                          />
+
+                          <label style={labelStyle}>Meal</label>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+                            {MEALS.map((m) => (
+                              <button
+                                key={m}
+                                onClick={() => setNewClientPlanFood({ ...newClientPlanFood, meal: m })}
+                                style={{ ...toggleStyle(newClientPlanFood.meal === m), fontSize: 11, padding: "6px 10px" }}
+                              >
+                                {m}
+                              </button>
+                            ))}
+                          </div>
+
+                          <label style={labelStyle}>Course</label>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+                            {COURSES.map((c) => (
+                              <button
+                                key={c}
+                                onClick={() => setNewClientPlanFood({ ...newClientPlanFood, course: c })}
+                                style={{ ...toggleStyle(newClientPlanFood.course === c), fontSize: 11, padding: "6px 10px" }}
+                              >
+                                {c}
+                              </button>
+                            ))}
+                          </div>
+
+                          <button
+                            onClick={addClientPlanFood}
+                            style={{ ...secondaryButtonStyle, width: "auto", background: GREEN, border: `1px solid ${GREEN}`, color: "#FFFFFF" }}
+                          >
+                            <Plus size={14} strokeWidth={2.5} /> Add food
+                          </button>
+
+                          {clientPlanAddError && (
+                            <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                              {clientPlanAddError}
+                            </div>
+                          )}
+                        </div>
+
+                        <div style={{ maxHeight: 340, overflowY: "auto" }}>
+                          {clientPlanFoods.length === 0 && <div style={{ fontSize: 12, color: INK_SOFT }}>No foods added to this plan yet.</div>}
+                          {MEALS.map((mealName) => {
+                            const mealFoods = clientPlanFoods.filter((f) => f.meal === mealName);
+                            if (mealFoods.length === 0) return null;
+
+                            const mealTotalCal = mealFoods.reduce((sum, f) => sum + f.calories, 0);
+
+                            return (
+                              <div key={mealName} style={{ marginBottom: 16 }}>
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "baseline",
+                                    padding: "4px 8px",
+                                    background: TEAL_SOFT,
+                                    borderRadius: 4,
+                                    marginBottom: 4,
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      fontFamily: "'Space Grotesk', sans-serif",
+                                      fontSize: 14,
+                                      fontWeight: 700,
+                                      color: TEAL,
+                                      textTransform: "uppercase",
+                                      letterSpacing: 0.5,
+                                    }}
+                                  >
+                                    {mealName}
+                                  </span>
+                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
+                                    {mealTotalCal} kcal total
+                                  </span>
+                                </div>
+                                {COURSES.map((courseName) => {
+                                  const courseFoods = mealFoods.filter((f) => (f.course || "Main") === courseName);
+                                  if (courseFoods.length === 0) return null;
+
+                                  return (
+                                    <div key={courseName} style={{ marginBottom: 8 }}>
+                                      <div
+                                        style={{
+                                          fontFamily: "'Space Grotesk', sans-serif",
+                                          fontSize: 11,
+                                          fontWeight: 700,
+                                          color: GREEN,
+                                          background: GREEN_SOFT,
+                                          textTransform: "uppercase",
+                                          letterSpacing: 0.5,
+                                          padding: "2px 8px",
+                                          borderRadius: 4,
+                                          display: "inline-block",
+                                        }}
+                                      >
+                                        {courseName}
+                                      </div>
+                                      {courseFoods.map((f) => (
+                                        <div key={f.id} style={foodRowStyle}>
+                                          <div>
+                                            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
+                                            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                                              {f.grams}g · {f.calories} kcal
+                                            </div>
+                                          </div>
+                                          <button onClick={() => removeClientPlanFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
+                                            <Trash2 size={14} />
+                                          </button>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
             {view === "administration" && (
               <div>
                 <div style={{ display: "flex", gap: 4, marginBottom: 20, borderBottom: `1px solid ${GRID}`, paddingBottom: 12 }}>
-                  {[{ id: "planTypes", label: "Plan types" }].map((t) => (
+                  {[{ id: "planTypes", label: "Plan types" }, { id: "foodList", label: "Food list" }].map((t) => (
                     <button
                       key={t.id}
                       onClick={() => setAdminTab(t.id)}
@@ -3707,6 +4128,77 @@ export default function CalorieTrackerApp() {
                           {addPlanTypeError}
                         </div>
                       )}
+                    </div>
+                  </div>
+                )}
+
+                {adminTab === "foodList" && (
+                  <div style={{ display: "grid", gap: 20 }}>
+                    <div style={panelStyle}>
+                      <SectionTitle>Add a food</SectionTitle>
+
+                      <label style={labelStyle}>Food name</label>
+                      <input
+                        placeholder="Food name"
+                        value={newPersonalFood.name}
+                        onChange={(e) => setNewPersonalFood({ ...newPersonalFood, name: e.target.value })}
+                        style={inputStyle}
+                      />
+                      <label style={labelStyle}>Calories per 100g (optional)</label>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="Calories per 100g"
+                        value={newPersonalFood.calPer100g}
+                        onChange={(e) => {
+                          const raw = e.target.value.replace(/[^0-9.]/g, "");
+                          const firstDot = raw.indexOf(".");
+                          const sanitized =
+                            firstDot === -1 ? raw : raw.slice(0, firstDot + 1) + raw.slice(firstDot + 1).replace(/\./g, "");
+                          setNewPersonalFood({ ...newPersonalFood, calPer100g: sanitized });
+                        }}
+                        style={inputStyle}
+                      />
+                      <button onClick={addPersonalFood} style={{ ...secondaryButtonStyle, width: "auto", background: GREEN, border: `1px solid ${GREEN}`, color: "#FFFFFF" }}>
+                        <Plus size={14} strokeWidth={2.5} /> Add to list
+                      </button>
+                      {personalFoodError && (
+                        <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                          {personalFoodError}
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={panelStyle}>
+                      <SectionTitle>Food list</SectionTitle>
+                      {globalFoodsError && (
+                        <div style={{ marginBottom: 10, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                          {globalFoodsError}
+                        </div>
+                      )}
+                      <div style={{ maxHeight: 340, overflowY: "auto" }}>
+                        {combinedFoodList.length === 0 && !globalFoodsLoading && (
+                          <div style={{ fontSize: 12, color: INK_SOFT }}>No foods yet.</div>
+                        )}
+                        {combinedFoodList.map((f) => (
+                          <div key={f.key} style={foodRowStyle}>
+                            <div>
+                              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
+                              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                                {f.calPer100g ? `${f.calPer100g} kcal / 100g` : "No calories set"}
+                              </div>
+                            </div>
+                            {f.own && (
+                              <button onClick={() => removePersonalFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
+                                <Trash2 size={14} />
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                        {globalFoodsLoading && (
+                          <div style={{ fontSize: 12, color: INK_SOFT, paddingTop: 8 }}>Loading global food list…</div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}

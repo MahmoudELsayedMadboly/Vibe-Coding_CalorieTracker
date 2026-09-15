@@ -443,6 +443,13 @@ export default function CalorieTrackerApp() {
   const [editFoodError, setEditFoodError] = useState(null);
   const [editFoodBusy, setEditFoodBusy] = useState(false);
 
+  const [plansView, setPlansView] = useState("list");
+  const [clientPlanSummaries, setClientPlanSummaries] = useState({});
+  const [clientPlanSummariesLoading, setClientPlanSummariesLoading] = useState(false);
+  const [planActionClientId, setPlanActionClientId] = useState(null);
+  const [planOverrideBusy, setPlanOverrideBusy] = useState(false);
+  const [planOverrideError, setPlanOverrideError] = useState(null);
+
   const [planBuilderClientId, setPlanBuilderClientId] = useState(null);
   const [clientPlanFoods, setClientPlanFoods] = useState([]);
   const [clientPlanLoading, setClientPlanLoading] = useState(false);
@@ -1451,6 +1458,22 @@ export default function CalorieTrackerApp() {
   }, [view, roleId, planBuilderClientId, session]);
 
   useEffect(() => {
+    if (view === "plans") {
+      setPlansView("list");
+      setPlanBuilderClientId(null);
+      setPlanActionClientId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
+
+  useEffect(() => {
+    if (roleId === 2 && view === "plans" && plansView === "list") {
+      loadClientPlanSummaries(clients.map((c) => c.id));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, plansView, clients, session]);
+
+  useEffect(() => {
     if (roleId === 2 && view === "client-detail" && selectedClientId) {
       loadClientDetail(selectedClientId);
     }
@@ -1786,6 +1809,83 @@ export default function CalorieTrackerApp() {
     } finally {
       setClientPlanLoading(false);
     }
+  }
+
+  async function loadClientPlanSummaries(clientIds) {
+    if (!clientIds || clientIds.length === 0) {
+      setClientPlanSummaries({});
+      return;
+    }
+
+    setClientPlanSummariesLoading(true);
+
+    try {
+      const { data, error } = await supabase.from("plan_foods").select("user_id, meal").in("user_id", clientIds);
+      if (error) throw error;
+
+      const mealsByClient = {};
+      (data || []).forEach((row) => {
+        if (!mealsByClient[row.user_id]) mealsByClient[row.user_id] = new Set();
+        mealsByClient[row.user_id].add(row.meal);
+      });
+
+      const summaries = {};
+      Object.keys(mealsByClient).forEach((id) => {
+        summaries[id] = mealsByClient[id].size;
+      });
+
+      setClientPlanSummaries(summaries);
+    } catch (err) {
+      // Plan status is a convenience indicator on the client list; a failure here
+      // shouldn't block the coach from opening a client's plan.
+    } finally {
+      setClientPlanSummariesLoading(false);
+    }
+  }
+
+  function openClientPlan(clientId) {
+    if ((clientPlanSummaries[clientId] || 0) > 0) {
+      setPlanActionClientId(clientId);
+      setPlanOverrideError(null);
+    } else {
+      setPlanBuilderClientId(clientId);
+      setPlansView("builder");
+    }
+  }
+
+  function closePlanActionPopup() {
+    setPlanActionClientId(null);
+    setPlanOverrideError(null);
+  }
+
+  function editClientPlan(clientId) {
+    setPlanBuilderClientId(clientId);
+    setPlansView("builder");
+    setPlanActionClientId(null);
+  }
+
+  async function overrideClientPlan(clientId) {
+    setPlanOverrideError(null);
+    setPlanOverrideBusy(true);
+
+    try {
+      const { error } = await supabase.from("plan_foods").delete().eq("user_id", clientId);
+      if (error) throw error;
+
+      setClientPlanSummaries((prev) => ({ ...prev, [clientId]: 0 }));
+      setPlanBuilderClientId(clientId);
+      setPlansView("builder");
+      setPlanActionClientId(null);
+    } catch (err) {
+      setPlanOverrideError(err && err.message ? err.message : "Couldn't clear the existing plan. Please try again.");
+    } finally {
+      setPlanOverrideBusy(false);
+    }
+  }
+
+  function backToClientsList() {
+    setPlansView("list");
+    setPlanBuilderClientId(null);
   }
 
   async function updateClientPlanField(column, value) {
@@ -3891,35 +3991,129 @@ export default function CalorieTrackerApp() {
 
             {view === "plans" && (
               <div style={{ display: "grid", gap: 20 }}>
-                <div style={panelStyle}>
-                  <SectionTitle>Select a client</SectionTitle>
-
-                  {clientsLoading ? (
-                    <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
-                  ) : clientsError ? (
-                    <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                      {clientsError}
+                {planActionClientId && (
+                  <div
+                    style={{
+                      position: "fixed",
+                      inset: 0,
+                      background: "rgba(27, 36, 48, 0.5)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      padding: 20,
+                      zIndex: 1000,
+                    }}
+                  >
+                    <div style={{ ...panelStyle, maxWidth: 380, width: "100%" }}>
+                      <SectionTitle>
+                        {(clients.find((c) => c.id === planActionClientId) || {}).name || "This client"} already has a plan
+                      </SectionTitle>
+                      <div style={{ fontSize: 13, color: INK_SOFT, marginBottom: 16, lineHeight: 1.5 }}>
+                        Start a fresh plan, or edit the one they already have?
+                      </div>
+                      {planOverrideError && (
+                        <div style={{ marginBottom: 12, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                          {planOverrideError}
+                        </div>
+                      )}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                        <button
+                          onClick={() => editClientPlan(planActionClientId)}
+                          style={primaryButtonStyle}
+                          disabled={planOverrideBusy}
+                        >
+                          Edit existing plan
+                        </button>
+                        <button
+                          onClick={() => overrideClientPlan(planActionClientId)}
+                          style={{ ...secondaryButtonStyle, border: `1px solid ${RED}`, color: RED }}
+                          disabled={planOverrideBusy}
+                        >
+                          {planOverrideBusy ? "Clearing…" : "Override (start fresh)"}
+                        </button>
+                        <button onClick={closePlanActionPopup} style={secondaryButtonStyle} disabled={planOverrideBusy}>
+                          Cancel
+                        </button>
+                      </div>
                     </div>
-                  ) : clients.length === 0 ? (
-                    <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any active clients yet.</div>
-                  ) : (
-                    <select
-                      value={planBuilderClientId || ""}
-                      onChange={(e) => setPlanBuilderClientId(e.target.value || null)}
-                      style={{ ...inputStyle, marginBottom: 0 }}
-                    >
-                      <option value="">Select a client…</option>
-                      {clients.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </div>
+                  </div>
+                )}
 
-                {planBuilderClientId && (
+                {plansView === "list" ? (
                   <div style={panelStyle}>
+                    <SectionTitle>Clients</SectionTitle>
+
+                    {clientsLoading ? (
+                      <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
+                    ) : clientsError ? (
+                      <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                        {clientsError}
+                      </div>
+                    ) : clients.length === 0 ? (
+                      <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any active clients yet.</div>
+                    ) : (
+                      <div style={{ padding: 0, overflowX: "auto" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                          <thead>
+                            <tr>
+                              <th style={thStyle}>Client name</th>
+                              <th style={thStyle}>Plan status</th>
+                              <th style={thStyle}></th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {clients.map((c) => {
+                              const mealsConfigured = clientPlanSummaries[c.id] || 0;
+                              const hasPlan = mealsConfigured > 0;
+                              return (
+                                <tr
+                                  key={c.id}
+                                  style={{
+                                    borderTop: `1px solid ${GRID}`,
+                                    cursor: clientPlanSummariesLoading ? "default" : "pointer",
+                                    opacity: clientPlanSummariesLoading ? 0.6 : 1,
+                                  }}
+                                  onClick={() => !clientPlanSummariesLoading && openClientPlan(c.id)}
+                                >
+                                  <td style={tdStyle}>{c.name}</td>
+                                  <td style={tdStyle}>
+                                    {hasPlan ? (
+                                      <span style={{ color: GREEN, fontWeight: 600 }}>
+                                        On: {mealsConfigured} meal{mealsConfigured === 1 ? "" : "s"} configured
+                                      </span>
+                                    ) : (
+                                      <span style={{ color: INK_SOFT }}>No plan yet</span>
+                                    )}
+                                  </td>
+                                  <td style={tdStyle}>
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); openClientPlan(c.id); }}
+                                      style={secondaryButtonStyle}
+                                      disabled={clientPlanSummariesLoading}
+                                    >
+                                      {hasPlan ? "Manage plan" : "Build plan"}
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                        {clientPlanSummariesLoading && (
+                          <div style={{ fontSize: 12, color: INK_SOFT, padding: "8px 10px" }}>Loading plan status…</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div style={panelStyle}>
+                    <button
+                      onClick={backToClientsList}
+                      style={{ ...secondaryButtonStyle, width: "auto", marginBottom: 14 }}
+                    >
+                      ← Back to clients
+                    </button>
+
                     <SectionTitle>
                       {(clients.find((c) => c.id === planBuilderClientId) || {}).name || "Client"}'s plan
                     </SectionTitle>

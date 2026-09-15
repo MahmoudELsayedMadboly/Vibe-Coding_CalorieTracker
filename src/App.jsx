@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare } from "lucide-react";
+import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const INK = "#1B2430";
@@ -433,6 +433,15 @@ export default function CalorieTrackerApp() {
   const [globalFoods, setGlobalFoods] = useState([]);
   const [globalFoodsLoading, setGlobalFoodsLoading] = useState(false);
   const [globalFoodsError, setGlobalFoodsError] = useState(null);
+  const [selectedGlobalFoodIds, setSelectedGlobalFoodIds] = useState([]);
+  const [transferBusy, setTransferBusy] = useState(false);
+  const [transferError, setTransferError] = useState(null);
+
+  const [editingFoodId, setEditingFoodId] = useState(null);
+  const [editFoodName, setEditFoodName] = useState("");
+  const [editFoodCalPer100g, setEditFoodCalPer100g] = useState("");
+  const [editFoodError, setEditFoodError] = useState(null);
+  const [editFoodBusy, setEditFoodBusy] = useState(false);
 
   const [planBuilderClientId, setPlanBuilderClientId] = useState(null);
   const [clientPlanFoods, setClientPlanFoods] = useState([]);
@@ -1428,7 +1437,7 @@ export default function CalorieTrackerApp() {
   }, [view, roleId, session]);
 
   useEffect(() => {
-    if (roleId === 2 && (view === "plans" || (view === "administration" && adminTab === "foodList"))) {
+    if (roleId === 2 && view === "administration" && adminTab === "foodList") {
       loadGlobalFoods();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1792,7 +1801,7 @@ export default function CalorieTrackerApp() {
       return;
     }
 
-    const match = combinedFoodList.find((f) => f.key === newClientPlanFood.foodKey);
+    const match = personalFoods.find((f) => f.id === newClientPlanFood.foodKey);
 
     if (!match) {
       setClientPlanAddError("That food is no longer available. Please pick another.");
@@ -1906,6 +1915,99 @@ export default function CalorieTrackerApp() {
       setPersonalFoods(personalFoods.filter((f) => f.id !== id));
     } else {
       setPersonalFoodError("Couldn't remove this food. Please try again.");
+    }
+  }
+
+  function toggleGlobalFoodSelection(id) {
+    setSelectedGlobalFoodIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+  }
+
+  async function transferSelectedGlobalFoods() {
+    setTransferError(null);
+
+    const selected = globalFoods.filter((f) => selectedGlobalFoodIds.includes(f.id));
+    if (selected.length === 0) return;
+
+    setTransferBusy(true);
+
+    try {
+      const ownNames = new Set(personalFoods.map((f) => f.name.trim().toLowerCase()));
+      const toInsert = selected.filter((f) => !ownNames.has(f.name.trim().toLowerCase()));
+
+      if (toInsert.length > 0) {
+        const { error } = await supabase.from("food_list").insert(
+          toInsert.map((f) => ({
+            id: crypto.randomUUID(),
+            user_id: session.user.id,
+            name: f.name,
+            cal_per_100g: f.calPer100g,
+          }))
+        );
+        if (error) throw error;
+      }
+
+      setSelectedGlobalFoodIds([]);
+
+      const { data, error: reloadErr } = await supabase
+        .from("food_list")
+        .select("*")
+        .eq("user_id", session.user.id)
+        .order("created_at", { ascending: true });
+      if (reloadErr) throw reloadErr;
+
+      setPersonalFoods((data || []).map((f) => ({ id: f.id, name: f.name, calPer100g: f.cal_per_100g })));
+    } catch (err) {
+      setTransferError(err && err.message ? err.message : "Couldn't transfer the selected foods. Please try again.");
+    } finally {
+      setTransferBusy(false);
+    }
+  }
+
+  function startEditFood(food) {
+    setEditingFoodId(food.id);
+    setEditFoodName(food.name);
+    setEditFoodCalPer100g(food.calPer100g ? String(food.calPer100g) : "");
+    setEditFoodError(null);
+  }
+
+  function cancelEditFood() {
+    setEditingFoodId(null);
+    setEditFoodError(null);
+  }
+
+  async function saveEditFood() {
+    setEditFoodError(null);
+
+    const name = editFoodName.trim();
+    if (!name) {
+      setEditFoodError("Fill in the food name.");
+      return;
+    }
+
+    const hasCalories = editFoodCalPer100g !== "" && editFoodCalPer100g !== null && editFoodCalPer100g !== undefined;
+    const calPer100g = hasCalories ? Number(editFoodCalPer100g) : null;
+
+    if (hasCalories && (!calPer100g || calPer100g <= 0)) {
+      setEditFoodError("Calories per 100g must be a positive number, or left blank.");
+      return;
+    }
+
+    setEditFoodBusy(true);
+
+    try {
+      const { error } = await supabase
+        .from("food_list")
+        .update({ name, cal_per_100g: calPer100g })
+        .eq("id", editingFoodId)
+        .eq("user_id", session.user.id);
+      if (error) throw error;
+
+      setPersonalFoods(personalFoods.map((f) => (f.id === editingFoodId ? { ...f, name, calPer100g } : f)));
+      setEditingFoodId(null);
+    } catch (err) {
+      setEditFoodError(err && err.message ? err.message : "Couldn't save changes. Please try again.");
+    } finally {
+      setEditFoodBusy(false);
     }
   }
 
@@ -2114,11 +2216,6 @@ export default function CalorieTrackerApp() {
     (clampedClientsPage - 1) * CLIENTS_PAGE_SIZE,
     clampedClientsPage * CLIENTS_PAGE_SIZE
   );
-
-  const combinedFoodList = [
-    ...personalFoods.map((f) => ({ key: `p_${f.id}`, id: f.id, name: f.name, calPer100g: f.calPer100g, own: true })),
-    ...globalFoods.map((f) => ({ key: `g_${f.id}`, id: f.id, name: f.name, calPer100g: f.calPer100g, own: false })),
-  ].sort((a, b) => a.name.localeCompare(b.name));
 
   return (
     <div style={{ fontFamily: "'Inter', sans-serif", background: PAPER, color: INK, padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
@@ -3893,11 +3990,11 @@ export default function CalorieTrackerApp() {
                               setNewClientPlanFood({ ...newClientPlanFood, foodKey: key, grams: "", calories: 0 });
                             }}
                             style={inputStyle}
-                            disabled={combinedFoodList.length === 0}
+                            disabled={personalFoods.length === 0}
                           >
-                            <option value="">{combinedFoodList.length === 0 ? "No foods available yet" : "Select a food…"}</option>
-                            {combinedFoodList.map((f) => (
-                              <option key={f.key} value={f.key}>
+                            <option value="">{personalFoods.length === 0 ? "No foods available yet" : "Select a food…"}</option>
+                            {personalFoods.map((f) => (
+                              <option key={f.id} value={f.id}>
                                 {f.name}
                               </option>
                             ))}
@@ -3910,7 +4007,7 @@ export default function CalorieTrackerApp() {
                             value={newClientPlanFood.grams}
                             onChange={(e) => {
                               const grams = e.target.value;
-                              const match = combinedFoodList.find((f) => f.key === newClientPlanFood.foodKey);
+                              const match = personalFoods.find((f) => f.id === newClientPlanFood.foodKey);
                               const numGrams = Number(grams) || 0;
                               const calories = match && match.calPer100g ? Math.round((match.calPer100g * numGrams) / 100) : 0;
                               setNewClientPlanFood({ ...newClientPlanFood, grams, calories });
@@ -4135,6 +4232,51 @@ export default function CalorieTrackerApp() {
                 {adminTab === "foodList" && (
                   <div style={{ display: "grid", gap: 20 }}>
                     <div style={panelStyle}>
+                      <SectionTitle>Global food list</SectionTitle>
+                      {globalFoodsError && (
+                        <div style={{ marginBottom: 10, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                          {globalFoodsError}
+                        </div>
+                      )}
+                      {transferError && (
+                        <div style={{ marginBottom: 10, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                          {transferError}
+                        </div>
+                      )}
+                      <div style={{ maxHeight: 340, overflowY: "auto" }}>
+                        {globalFoods.length === 0 && !globalFoodsLoading && (
+                          <div style={{ fontSize: 12, color: INK_SOFT }}>No foods in the global list yet.</div>
+                        )}
+                        {globalFoods.map((f) => (
+                          <label key={f.id} style={{ ...foodRowStyle, justifyContent: "flex-start", gap: 10, cursor: "pointer" }}>
+                            <input
+                              type="checkbox"
+                              checked={selectedGlobalFoodIds.includes(f.id)}
+                              onChange={() => toggleGlobalFoodSelection(f.id)}
+                              style={{ width: 16, height: 16, cursor: "pointer", flexShrink: 0 }}
+                            />
+                            <div>
+                              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
+                              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                                {f.calPer100g ? `${f.calPer100g} kcal / 100g` : "No calories set"}
+                              </div>
+                            </div>
+                          </label>
+                        ))}
+                        {globalFoodsLoading && (
+                          <div style={{ fontSize: 12, color: INK_SOFT, paddingTop: 8 }}>Loading global food list…</div>
+                        )}
+                      </div>
+                      <button
+                        onClick={transferSelectedGlobalFoods}
+                        style={{ ...secondaryButtonStyle, width: "auto", marginTop: 14, background: TEAL, border: `1px solid ${TEAL}`, color: "#FFFFFF" }}
+                        disabled={selectedGlobalFoodIds.length === 0 || transferBusy}
+                      >
+                        {transferBusy ? "Transferring…" : `Transfer selected${selectedGlobalFoodIds.length > 0 ? ` (${selectedGlobalFoodIds.length})` : ""}`}
+                      </button>
+                    </div>
+
+                    <div style={panelStyle}>
                       <SectionTitle>Add a food</SectionTitle>
 
                       <label style={labelStyle}>Food name</label>
@@ -4170,33 +4312,66 @@ export default function CalorieTrackerApp() {
                     </div>
 
                     <div style={panelStyle}>
-                      <SectionTitle>Food list</SectionTitle>
-                      {globalFoodsError && (
+                      <SectionTitle>Your own food list</SectionTitle>
+                      {editFoodError && (
                         <div style={{ marginBottom: 10, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                          {globalFoodsError}
+                          {editFoodError}
                         </div>
                       )}
                       <div style={{ maxHeight: 340, overflowY: "auto" }}>
-                        {combinedFoodList.length === 0 && !globalFoodsLoading && (
-                          <div style={{ fontSize: 12, color: INK_SOFT }}>No foods yet.</div>
+                        {personalFoods.length === 0 && (
+                          <div style={{ fontSize: 12, color: INK_SOFT }}>No foods in your list yet.</div>
                         )}
-                        {combinedFoodList.map((f) => (
-                          <div key={f.key} style={foodRowStyle}>
-                            <div>
-                              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
-                              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                                {f.calPer100g ? `${f.calPer100g} kcal / 100g` : "No calories set"}
+                        {personalFoods.map((f) =>
+                          editingFoodId === f.id ? (
+                            <div key={f.id} style={{ ...foodRowStyle, gap: 8 }}>
+                              <div style={{ display: "flex", gap: 8, flex: 1 }}>
+                                <input
+                                  placeholder="Food name"
+                                  value={editFoodName}
+                                  onChange={(e) => setEditFoodName(e.target.value)}
+                                  style={{ ...smallInputStyle, flex: 1 }}
+                                />
+                                <input
+                                  type="text"
+                                  inputMode="decimal"
+                                  placeholder="Cal / 100g"
+                                  value={editFoodCalPer100g}
+                                  onChange={(e) => {
+                                    const raw = e.target.value.replace(/[^0-9.]/g, "");
+                                    const firstDot = raw.indexOf(".");
+                                    const sanitized =
+                                      firstDot === -1 ? raw : raw.slice(0, firstDot + 1) + raw.slice(firstDot + 1).replace(/\./g, "");
+                                    setEditFoodCalPer100g(sanitized);
+                                  }}
+                                  style={{ ...smallInputStyle, width: 100 }}
+                                />
+                              </div>
+                              <button onClick={saveEditFood} style={iconButtonStyle} aria-label="Save changes" disabled={editFoodBusy}>
+                                <Check size={15} />
+                              </button>
+                              <button onClick={cancelEditFood} style={iconButtonStyle} aria-label="Cancel editing" disabled={editFoodBusy}>
+                                <X size={15} />
+                              </button>
+                            </div>
+                          ) : (
+                            <div key={f.id} style={foodRowStyle}>
+                              <div>
+                                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
+                                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                                  {f.calPer100g ? `${f.calPer100g} kcal / 100g` : "No calories set"}
+                                </div>
+                              </div>
+                              <div style={{ display: "flex", gap: 4 }}>
+                                <button onClick={() => startEditFood(f)} style={iconButtonStyle} aria-label="Edit food">
+                                  <Pencil size={14} />
+                                </button>
+                                <button onClick={() => removePersonalFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
+                                  <Trash2 size={14} />
+                                </button>
                               </div>
                             </div>
-                            {f.own && (
-                              <button onClick={() => removePersonalFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
-                                <Trash2 size={14} />
-                              </button>
-                            )}
-                          </div>
-                        ))}
-                        {globalFoodsLoading && (
-                          <div style={{ fontSize: 12, color: INK_SOFT, paddingTop: 8 }}>Loading global food list…</div>
+                          )
                         )}
                       </div>
                     </div>

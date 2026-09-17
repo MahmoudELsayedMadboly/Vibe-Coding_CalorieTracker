@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X } from "lucide-react";
+import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X, Send } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const INK = "#1B2430";
@@ -309,6 +309,30 @@ function PlanStatusBadge({ status }) {
   );
 }
 
+function UnreadBadge({ count }) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        minWidth: 16,
+        height: 16,
+        padding: "0 4px",
+        borderRadius: 8,
+        background: RED,
+        color: "#FFFFFF",
+        fontFamily: "'IBM Plex Mono', monospace",
+        fontSize: 10,
+        fontWeight: 700,
+        marginLeft: "auto",
+      }}
+    >
+      {count > 99 ? "99+" : count}
+    </span>
+  );
+}
+
 function describeAddClientError(reason) {
   switch (reason) {
     case "not_a_coach":
@@ -503,6 +527,18 @@ export default function CalorieTrackerApp() {
   const [planDetailsRemoveBusy, setPlanDetailsRemoveBusy] = useState(false);
 
   const [ownPlanStatus, setOwnPlanStatus] = useState("active");
+
+  const [chatSelectedClientId, setChatSelectedClientId] = useState(null);
+  const [myCoachId, setMyCoachId] = useState(null);
+  const [myCoachName, setMyCoachName] = useState(null);
+  const [myCoachLoading, setMyCoachLoading] = useState(false);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatError, setChatError] = useState(null);
+  const [chatInput, setChatInput] = useState("");
+  const [chatSending, setChatSending] = useState(false);
+  const [chatSendError, setChatSendError] = useState(null);
+  const [chatUnreadByClient, setChatUnreadByClient] = useState({});
 
   const [profile, setProfile] = useState({ sex: "male", age: 30, weightKg: 75, heightCm: 175, activity: "moderate" });
   const [goal, setGoal] = useState({ type: "maintain", rate: "moderate" });
@@ -1493,7 +1529,7 @@ export default function CalorieTrackerApp() {
   }, [roleId]);
 
   useEffect(() => {
-    if (roleId === 2 && (view === "home" || (view === "clients" && clientsView === "grid") || view === "plans")) {
+    if (roleId === 2 && (view === "home" || (view === "clients" && clientsView === "grid") || view === "plans" || view === "chat")) {
       loadClients();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1549,6 +1585,212 @@ export default function CalorieTrackerApp() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, roleId, selectedClientId, session]);
+
+  useEffect(() => {
+    if (roleId === 3) {
+      loadMyCoach();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roleId, session]);
+
+  useEffect(() => {
+    if (view !== "chat") {
+      setChatSelectedClientId(null);
+      setChatMessages([]);
+      setChatError(null);
+      setChatInput("");
+      setChatSendError(null);
+    }
+  }, [view]);
+
+  useEffect(() => {
+    if (!session) {
+      setChatUnreadByClient({});
+      return;
+    }
+
+    loadUnreadCounts();
+
+    const channel = supabase
+      .channel(`chat-unread-${session.user.id}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "messages", filter: `recipient_id=eq.${session.user.id}` },
+        () => {
+          loadUnreadCounts();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session]);
+
+  useEffect(() => {
+    if (view !== "chat" || !session) return;
+
+    const myId = session.user.id;
+    const otherId = roleId === 2 ? chatSelectedClientId : myCoachId;
+    if (!otherId) {
+      setChatMessages([]);
+      return;
+    }
+
+    loadChatThread(otherId);
+
+    const channel = supabase
+      .channel(`chat-thread-${myId}-${otherId}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "messages", filter: `sender_id=eq.${otherId}` },
+        (payload) => {
+          const row = payload.new;
+          if (row.recipient_id !== myId) return;
+          setChatMessages((prev) => (prev.some((m) => m.id === row.id) ? prev : [...prev, row]));
+          markConversationRead(otherId);
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "messages", filter: `sender_id=eq.${myId}` },
+        (payload) => {
+          const row = payload.new;
+          if (row.recipient_id !== otherId) return;
+          setChatMessages((prev) => (prev.some((m) => m.id === row.id) ? prev : [...prev, row]));
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, chatSelectedClientId, myCoachId, session]);
+
+  async function loadMyCoach() {
+    if (!session) return;
+
+    setMyCoachLoading(true);
+
+    try {
+      const { data, error } = await supabase
+        .from("coach_clients")
+        .select("coach_id")
+        .eq("client_id", session.user.id)
+        .eq("status", "active")
+        .maybeSingle();
+      if (error) throw error;
+
+      const coachId = (data && data.coach_id) || null;
+      setMyCoachId(coachId);
+
+      if (coachId) {
+        const { data: coachInfo } = await supabase.from("user_info").select("name").eq("id", coachId).maybeSingle();
+        setMyCoachName((coachInfo && coachInfo.name) || "Your coach");
+      } else {
+        setMyCoachName(null);
+      }
+    } catch (err) {
+      setMyCoachId(null);
+      setMyCoachName(null);
+    } finally {
+      setMyCoachLoading(false);
+    }
+  }
+
+  async function loadUnreadCounts() {
+    if (!session) return;
+
+    try {
+      const { data, error } = await supabase
+        .from("messages")
+        .select("sender_id")
+        .eq("recipient_id", session.user.id)
+        .is("read_at", null);
+      if (error) throw error;
+
+      const byClient = {};
+      (data || []).forEach((row) => {
+        byClient[row.sender_id] = (byClient[row.sender_id] || 0) + 1;
+      });
+      setChatUnreadByClient(byClient);
+    } catch (err) {
+      // Unread badge is a convenience indicator; a failure here shouldn't block chat.
+    }
+  }
+
+  async function loadChatThread(otherId) {
+    if (!session || !otherId) return;
+
+    setChatLoading(true);
+    setChatError(null);
+
+    try {
+      const myId = session.user.id;
+      const { data, error } = await supabase
+        .from("messages")
+        .select("*")
+        .or(`and(sender_id.eq.${myId},recipient_id.eq.${otherId}),and(sender_id.eq.${otherId},recipient_id.eq.${myId})`)
+        .order("created_at", { ascending: true });
+      if (error) throw error;
+
+      setChatMessages(data || []);
+      await markConversationRead(otherId);
+    } catch (err) {
+      setChatError(err && err.message ? err.message : "Couldn't load messages.");
+    } finally {
+      setChatLoading(false);
+    }
+  }
+
+  async function markConversationRead(otherId) {
+    if (!session || !otherId) return;
+
+    try {
+      const { error } = await supabase
+        .from("messages")
+        .update({ read_at: new Date().toISOString() })
+        .eq("recipient_id", session.user.id)
+        .eq("sender_id", otherId)
+        .is("read_at", null);
+      if (error) throw error;
+
+      setChatUnreadByClient((prev) => {
+        if (!prev[otherId]) return prev;
+        const next = { ...prev };
+        delete next[otherId];
+        return next;
+      });
+    } catch (err) {
+      // Best-effort; the unread badge will resync on the next load.
+    }
+  }
+
+  async function sendChatMessage(otherId) {
+    const body = chatInput.trim();
+    if (!body || !otherId || !session) return;
+
+    setChatSending(true);
+    setChatSendError(null);
+
+    try {
+      const { data, error } = await supabase
+        .from("messages")
+        .insert({ sender_id: session.user.id, recipient_id: otherId, body })
+        .select()
+        .single();
+      if (error) throw error;
+
+      setChatMessages((prev) => (prev.some((m) => m.id === data.id) ? prev : [...prev, data]));
+      setChatInput("");
+    } catch (err) {
+      setChatSendError(err && err.message ? err.message : "Couldn't send that message.");
+    } finally {
+      setChatSending(false);
+    }
+  }
 
   async function loadClientDetail(clientId) {
     if (!session || !clientId) return;
@@ -2497,6 +2739,8 @@ export default function CalorieTrackerApp() {
 
   const activePlanClients = clients.filter((c) => c.active);
 
+  const chatUnreadTotal = Object.values(chatUnreadByClient).reduce((sum, n) => sum + n, 0);
+
   return (
     <div style={{ fontFamily: "'Inter', sans-serif", background: PAPER, color: INK, padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
       <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -2577,11 +2821,15 @@ export default function CalorieTrackerApp() {
           { id: "setup", label: "Configuration" },
           { id: "log", label: "Daily log" },
           { id: "history", label: "History" },
+          ...(roleId === 3 ? [{ id: "chat", label: "Chat" }] : []),
         ].map((t) => (
           <button
             key={t.id}
             onClick={() => setView(t.id)}
             style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
               padding: "8px 16px",
               borderRadius: 4,
               border: `1px solid ${view === t.id ? TEAL : GRID}`,
@@ -2594,6 +2842,7 @@ export default function CalorieTrackerApp() {
             }}
           >
             {t.label}
+            {t.id === "chat" && chatUnreadTotal > 0 && <UnreadBadge count={chatUnreadTotal} />}
           </button>
         ))}
       </div>
@@ -3778,6 +4027,30 @@ export default function CalorieTrackerApp() {
           )}
         </div>
       )}
+
+      {view === "chat" && (
+        <div style={panelStyle}>
+          <SectionTitle>Chat</SectionTitle>
+          {myCoachLoading ? (
+            <div style={{ fontSize: 12, color: INK_SOFT }}>Loading…</div>
+          ) : !myCoachId ? (
+            <div style={{ fontSize: 12.5, color: INK_SOFT }}>You don't have an active coach yet.</div>
+          ) : (
+            <ChatThread
+              messages={chatMessages}
+              loading={chatLoading}
+              error={chatError}
+              currentUserId={session && session.user.id}
+              headerLabel={myCoachName || "Your coach"}
+              input={chatInput}
+              onInputChange={setChatInput}
+              onSend={() => sendChatMessage(myCoachId)}
+              sending={chatSending}
+              sendError={chatSendError}
+            />
+          )}
+        </div>
+      )}
       </>
       )}
 
@@ -3813,6 +4086,7 @@ export default function CalorieTrackerApp() {
               >
                 <t.icon size={16} />
                 {t.label}
+                {t.id === "chat" && chatUnreadTotal > 0 && <UnreadBadge count={chatUnreadTotal} />}
               </button>
             ))}
           </div>
@@ -4896,7 +5170,79 @@ export default function CalorieTrackerApp() {
             {view === "chat" && (
               <div style={panelStyle}>
                 <SectionTitle>Chat</SectionTitle>
-                <div style={{ fontSize: 12.5, color: INK_SOFT }}>Chat — coming soon.</div>
+                {clientsLoading ? (
+                  <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
+                ) : clientsError ? (
+                  <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                    {clientsError}
+                  </div>
+                ) : activePlanClients.length === 0 ? (
+                  <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any active clients yet.</div>
+                ) : (
+                  <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+                    <div
+                      style={{
+                        width: 220,
+                        flexShrink: 0,
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 4,
+                        maxHeight: 480,
+                        overflowY: "auto",
+                      }}
+                    >
+                      {activePlanClients.map((c) => {
+                        const unread = chatUnreadByClient[c.id] || 0;
+                        const selected = chatSelectedClientId === c.id;
+                        return (
+                          <button
+                            key={c.id}
+                            onClick={() => setChatSelectedClientId(c.id)}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 8,
+                              padding: "9px 12px",
+                              borderRadius: 4,
+                              border: `1px solid ${selected ? TEAL : GRID}`,
+                              background: selected ? TEAL_SOFT : PANEL,
+                              color: selected ? TEAL : INK,
+                              fontFamily: "'Space Grotesk', sans-serif",
+                              fontSize: 13,
+                              fontWeight: 600,
+                              cursor: "pointer",
+                              textAlign: "left",
+                            }}
+                          >
+                            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {c.name}
+                            </span>
+                            {unread > 0 && <UnreadBadge count={unread} />}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      {chatSelectedClientId ? (
+                        <ChatThread
+                          messages={chatMessages}
+                          loading={chatLoading}
+                          error={chatError}
+                          currentUserId={session && session.user.id}
+                          headerLabel={(clients.find((c) => c.id === chatSelectedClientId) || {}).name}
+                          input={chatInput}
+                          onInputChange={setChatInput}
+                          onSend={() => sendChatMessage(chatSelectedClientId)}
+                          sending={chatSending}
+                          sendError={chatSendError}
+                        />
+                      ) : (
+                        <div style={{ fontSize: 12, color: INK_SOFT }}>Select a client to view your conversation.</div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -5006,6 +5352,117 @@ function SectionTitle({ children }) {
   return (
     <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 14, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
       {children}
+    </div>
+  );
+}
+
+function formatChatTime(isoString) {
+  if (!isoString) return "";
+  const d = new Date(isoString);
+  if (Number.isNaN(d.getTime())) return "";
+
+  const isToday = d.toDateString() === new Date().toDateString();
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return isToday ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+}
+
+function ChatThread({ messages, loading, error, currentUserId, headerLabel, input, onInputChange, onSend, sending, sendError }) {
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    onSend();
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: 480 }}>
+      {headerLabel && (
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 700, marginBottom: 10, color: INK }}>
+          {headerLabel}
+        </div>
+      )}
+
+      <div
+        ref={scrollRef}
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          border: `1px solid ${GRID}`,
+          borderRadius: 6,
+          padding: 12,
+          background: PAPER,
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+          marginBottom: 10,
+        }}
+      >
+        {loading ? (
+          <div style={{ fontSize: 12, color: INK_SOFT }}>Loading messages…</div>
+        ) : error ? (
+          <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>{error}</div>
+        ) : messages.length === 0 ? (
+          <div style={{ fontSize: 12, color: INK_SOFT }}>No messages yet. Say hello!</div>
+        ) : (
+          messages.map((m) => {
+            const isMine = m.sender_id === currentUserId;
+            return (
+              <div key={m.id} style={{ display: "flex", justifyContent: isMine ? "flex-end" : "flex-start" }}>
+                <div
+                  style={{
+                    maxWidth: "70%",
+                    padding: "8px 12px",
+                    borderRadius: 10,
+                    background: isMine ? TEAL : PANEL,
+                    color: isMine ? "#FFFFFF" : INK,
+                    border: isMine ? "none" : `1px solid ${GRID}`,
+                    fontFamily: "'Space Grotesk', sans-serif",
+                    fontSize: 13,
+                  }}
+                >
+                  <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{m.body}</div>
+                  <div
+                    style={{
+                      marginTop: 4,
+                      fontFamily: "'IBM Plex Mono', monospace",
+                      fontSize: 9.5,
+                      opacity: 0.75,
+                      textAlign: "right",
+                    }}
+                  >
+                    {formatChatTime(m.created_at)}
+                  </div>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {sendError && (
+        <div style={{ marginBottom: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+          {sendError}
+        </div>
+      )}
+
+      <form onSubmit={handleSubmit} style={{ display: "flex", gap: 8 }}>
+        <input
+          type="text"
+          placeholder="Type a message…"
+          value={input}
+          onChange={(e) => onInputChange(e.target.value)}
+          style={{ ...inputStyle, flex: 1, marginBottom: 0 }}
+        />
+        <button type="submit" style={{ ...primaryButtonStyle, width: "auto" }} disabled={sending || !input.trim()}>
+          <Send size={14} strokeWidth={2.5} /> {sending ? "Sending…" : "Send"}
+        </button>
+      </form>
     </div>
   );
 }

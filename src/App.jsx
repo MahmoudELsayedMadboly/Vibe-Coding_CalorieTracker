@@ -278,6 +278,37 @@ function clientStatusMeta(client) {
   return { label: "Invited", color: AMBER, soft: AMBER_SOFT };
 }
 
+function planStatusMeta(status) {
+  if (status === "active") return { label: "Active", color: GREEN, soft: GREEN_SOFT };
+  if (status === "draft") return { label: "Draft", color: TEAL, soft: TEAL_SOFT };
+  if (status === "inactive") return { label: "Inactive", color: INK_SOFT, soft: "#EEEEEC" };
+  return { label: "No status yet", color: INK_SOFT, soft: "#EEEEEC" };
+}
+
+function PlanStatusBadge({ status }) {
+  const meta = planStatusMeta(status);
+
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "3px 10px",
+        borderRadius: 4,
+        background: meta.soft,
+        color: meta.color,
+        fontFamily: "'IBM Plex Mono', monospace",
+        fontSize: 10.5,
+        fontWeight: 600,
+        textTransform: "uppercase",
+        letterSpacing: 0.4,
+      }}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
 function describeAddClientError(reason) {
   switch (reason) {
     case "not_a_coach":
@@ -446,9 +477,7 @@ export default function CalorieTrackerApp() {
   const [plansView, setPlansView] = useState("list");
   const [clientPlanSummaries, setClientPlanSummaries] = useState({});
   const [clientPlanSummariesLoading, setClientPlanSummariesLoading] = useState(false);
-  const [planActionClientId, setPlanActionClientId] = useState(null);
-  const [planOverrideBusy, setPlanOverrideBusy] = useState(false);
-  const [planOverrideError, setPlanOverrideError] = useState(null);
+  const [clientPlanStatuses, setClientPlanStatuses] = useState({});
 
   const [planBuilderClientId, setPlanBuilderClientId] = useState(null);
   const [clientPlanFoods, setClientPlanFoods] = useState([]);
@@ -457,8 +486,23 @@ export default function CalorieTrackerApp() {
   const [clientPlanName, setClientPlanName] = useState("");
   const [clientPlanDateFrom, setClientPlanDateFrom] = useState("");
   const [clientPlanDateTo, setClientPlanDateTo] = useState("");
+  const [clientPlanStatus, setClientPlanStatus] = useState(null);
   const [newClientPlanFood, setNewClientPlanFood] = useState({ foodKey: "", grams: "", calories: "", meal: "Breakfast", course: "Main" });
   const [clientPlanAddError, setClientPlanAddError] = useState(null);
+  const [clientPlanSaveBusy, setClientPlanSaveBusy] = useState(false);
+  const [clientPlanSaveError, setClientPlanSaveError] = useState(null);
+  const [clientPlanSendBusy, setClientPlanSendBusy] = useState(false);
+  const [clientPlanSendError, setClientPlanSendError] = useState(null);
+
+  const [planDetailsClientId, setPlanDetailsClientId] = useState(null);
+  const [planDetailsLoading, setPlanDetailsLoading] = useState(false);
+  const [planDetailsError, setPlanDetailsError] = useState(null);
+  const [planDetailsFoods, setPlanDetailsFoods] = useState([]);
+  const [planDetailsStatus, setPlanDetailsStatus] = useState(null);
+  const [planDetailsDeactivateBusy, setPlanDetailsDeactivateBusy] = useState(false);
+  const [planDetailsRemoveBusy, setPlanDetailsRemoveBusy] = useState(false);
+
+  const [ownPlanStatus, setOwnPlanStatus] = useState("active");
 
   const [profile, setProfile] = useState({ sex: "male", age: 30, weightKg: 75, heightCm: 175, activity: "moderate" });
   const [goal, setGoal] = useState({ type: "maintain", rate: "moderate" });
@@ -651,6 +695,25 @@ export default function CalorieTrackerApp() {
           .eq("id", userId)
           .maybeSingle();
         if (userInfoErr) throw userInfoErr;
+
+        // A standalone user (no coach) has no client_profile row at all, so
+        // their own plan stays effectively "active" by default. Only a
+        // coach's client has this row, and only a coach can set it to
+        // "draft" or "inactive".
+        let ownPlanStatusValue = "active";
+        try {
+          const { data: selfClientProfileRow } = await supabase
+            .from("client_profile")
+            .select("plan_status")
+            .eq("user_id", userId)
+            .maybeSingle();
+          if (selfClientProfileRow && selfClientProfileRow.plan_status) {
+            ownPlanStatusValue = selfClientProfileRow.plan_status;
+          }
+        } catch (e) {
+          // No client_profile row / not a coach's client — stays "active".
+        }
+        setOwnPlanStatus(ownPlanStatusValue);
 
         const [personalFoodsRes, planFoodsRes, logsRes] = await Promise.all([
           supabase.from("food_list").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
@@ -1458,10 +1521,17 @@ export default function CalorieTrackerApp() {
   }, [view, roleId, planBuilderClientId, session]);
 
   useEffect(() => {
+    if (roleId === 2 && view === "plans" && plansView === "details" && planDetailsClientId) {
+      loadPlanDetails(planDetailsClientId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, plansView, planDetailsClientId, session]);
+
+  useEffect(() => {
     if (view === "plans") {
       setPlansView("list");
       setPlanBuilderClientId(null);
-      setPlanActionClientId(null);
+      setPlanDetailsClientId(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view]);
@@ -1779,12 +1849,14 @@ export default function CalorieTrackerApp() {
     setClientPlanLoading(true);
     setClientPlanError(null);
     setClientPlanAddError(null);
+    setClientPlanSaveError(null);
+    setClientPlanSendError(null);
     setNewClientPlanFood({ foodKey: "", grams: "", calories: "", meal: "Breakfast", course: "Main" });
 
     try {
       const [planFoodsRes, profileRes] = await Promise.all([
         supabase.from("plan_foods").select("*").eq("user_id", clientId).order("created_at", { ascending: true }),
-        supabase.from("client_profile").select("date_from, date_to").eq("user_id", clientId).maybeSingle(),
+        supabase.from("client_profile").select("date_from, date_to, plan_status").eq("user_id", clientId).maybeSingle(),
       ]);
       if (planFoodsRes.error) throw planFoodsRes.error;
       if (profileRes.error) throw profileRes.error;
@@ -1803,6 +1875,7 @@ export default function CalorieTrackerApp() {
         }))
       );
       setClientPlanName((rows[0] && rows[0].plan_name) || "");
+      setClientPlanStatus(clientProfile.plan_status || null);
 
       if (rows.length > 0) {
         setClientPlanDateFrom(rows[0].plan_date_from || "");
@@ -1821,17 +1894,22 @@ export default function CalorieTrackerApp() {
   async function loadClientPlanSummaries(clientIds) {
     if (!clientIds || clientIds.length === 0) {
       setClientPlanSummaries({});
+      setClientPlanStatuses({});
       return;
     }
 
     setClientPlanSummariesLoading(true);
 
     try {
-      const { data, error } = await supabase.from("plan_foods").select("user_id, meal").in("user_id", clientIds);
-      if (error) throw error;
+      const [foodsRes, profilesRes] = await Promise.all([
+        supabase.from("plan_foods").select("user_id, meal").in("user_id", clientIds),
+        supabase.from("client_profile").select("user_id, plan_status").in("user_id", clientIds),
+      ]);
+      if (foodsRes.error) throw foodsRes.error;
+      if (profilesRes.error) throw profilesRes.error;
 
       const mealsByClient = {};
-      (data || []).forEach((row) => {
+      (foodsRes.data || []).forEach((row) => {
         if (!mealsByClient[row.user_id]) mealsByClient[row.user_id] = new Set();
         mealsByClient[row.user_id].add(row.meal);
       });
@@ -1841,7 +1919,13 @@ export default function CalorieTrackerApp() {
         summaries[id] = mealsByClient[id].size;
       });
 
+      const statuses = {};
+      (profilesRes.data || []).forEach((row) => {
+        statuses[row.user_id] = row.plan_status || null;
+      });
+
       setClientPlanSummaries(summaries);
+      setClientPlanStatuses(statuses);
     } catch (err) {
       // Plan status is a convenience indicator on the client list; a failure here
       // shouldn't block the coach from opening a client's plan.
@@ -1850,62 +1934,18 @@ export default function CalorieTrackerApp() {
     }
   }
 
-  function openClientPlan(clientId) {
-    if ((clientPlanSummaries[clientId] || 0) > 0) {
-      setPlanActionClientId(clientId);
-      setPlanOverrideError(null);
-    } else {
-      setPlanBuilderClientId(clientId);
-      setPlansView("builder");
-    }
-  }
-
-  function closePlanActionPopup() {
-    setPlanActionClientId(null);
-    setPlanOverrideError(null);
-  }
-
   function editClientPlan(clientId) {
     setPlanBuilderClientId(clientId);
     setPlansView("builder");
-    setPlanActionClientId(null);
-  }
-
-  async function overrideClientPlan(clientId) {
-    setPlanOverrideError(null);
-    setPlanOverrideBusy(true);
-
-    try {
-      const { error } = await supabase.from("plan_foods").delete().eq("user_id", clientId);
-      if (error) throw error;
-
-      setClientPlanSummaries((prev) => ({ ...prev, [clientId]: 0 }));
-      setPlanBuilderClientId(clientId);
-      setPlansView("builder");
-      setPlanActionClientId(null);
-    } catch (err) {
-      setPlanOverrideError(err && err.message ? err.message : "Couldn't clear the existing plan. Please try again.");
-    } finally {
-      setPlanOverrideBusy(false);
-    }
   }
 
   function backToClientsList() {
     setPlansView("list");
     setPlanBuilderClientId(null);
+    setPlanDetailsClientId(null);
   }
 
-  async function updateClientPlanField(column, value) {
-    if (!planBuilderClientId) return;
-    await supabase.from("plan_foods").update({ [column]: value || null }).eq("user_id", planBuilderClientId);
-  }
-
-  async function updateClientProfileDate(column, value) {
-    if (!planBuilderClientId) return;
-    await supabase.from("client_profile").update({ [column]: value || null }).eq("user_id", planBuilderClientId);
-  }
-
-  async function addClientPlanFood() {
+  function addClientPlanFood() {
     setClientPlanAddError(null);
 
     if (!newClientPlanFood.foodKey) {
@@ -1945,34 +1985,160 @@ export default function CalorieTrackerApp() {
       calories: match.calPer100g ? Math.round((match.calPer100g * grams) / 100) : 0,
     };
 
-    const { error: insErr } = await supabase.from("plan_foods").insert({
-      id: food.id,
-      user_id: planBuilderClientId,
-      name: food.name,
-      grams: food.grams,
-      meal: food.meal,
-      course: food.course,
-      calories: food.calories,
-      plan_name: clientPlanName || null,
-      plan_date_from: clientPlanDateFrom || null,
-      plan_date_to: clientPlanDateTo || null,
-    });
+    setClientPlanFoods([...clientPlanFoods, food]);
+    setNewClientPlanFood({ foodKey: "", grams: "", calories: "", meal: newClientPlanFood.meal, course: newClientPlanFood.course });
+  }
 
-    if (!insErr) {
-      setClientPlanFoods([...clientPlanFoods, food]);
-      setNewClientPlanFood({ foodKey: "", grams: "", calories: "", meal: newClientPlanFood.meal, course: newClientPlanFood.course });
-    } else {
-      setClientPlanAddError("Couldn't save this food. Please try again.");
+  function removeClientPlanFood(id) {
+    setClientPlanFoods(clientPlanFoods.filter((f) => f.id !== id));
+  }
+
+  async function saveClientPlan() {
+    if (!planBuilderClientId) return;
+
+    setClientPlanSaveError(null);
+    setClientPlanSaveBusy(true);
+
+    try {
+      const { error: delErr } = await supabase.from("plan_foods").delete().eq("user_id", planBuilderClientId);
+      if (delErr) throw delErr;
+
+      if (clientPlanFoods.length > 0) {
+        const rows = clientPlanFoods.map((f) => ({
+          id: f.id,
+          user_id: planBuilderClientId,
+          name: f.name,
+          grams: f.grams,
+          meal: f.meal,
+          course: f.course,
+          calories: f.calories,
+          plan_name: clientPlanName || null,
+          plan_date_from: clientPlanDateFrom || null,
+          plan_date_to: clientPlanDateTo || null,
+        }));
+        const { error: insErr } = await supabase.from("plan_foods").insert(rows);
+        if (insErr) throw insErr;
+      }
+
+      const { error: profileErr } = await supabase
+        .from("client_profile")
+        .update({
+          date_from: clientPlanDateFrom || null,
+          date_to: clientPlanDateTo || null,
+          plan_status: "draft",
+        })
+        .eq("user_id", planBuilderClientId);
+      if (profileErr) throw profileErr;
+
+      setClientPlanStatus("draft");
+      setClientPlanSummaries((prev) => ({
+        ...prev,
+        [planBuilderClientId]: new Set(clientPlanFoods.map((f) => f.meal)).size,
+      }));
+    } catch (err) {
+      setClientPlanSaveError(err && err.message ? err.message : "Couldn't save this plan. Please try again.");
+    } finally {
+      setClientPlanSaveBusy(false);
     }
   }
 
-  async function removeClientPlanFood(id) {
-    const { error: delErr } = await supabase.from("plan_foods").delete().eq("id", id).eq("user_id", planBuilderClientId);
+  async function sendClientPlan() {
+    if (!planBuilderClientId || clientPlanStatus !== "draft") return;
 
-    if (!delErr) {
-      setClientPlanFoods(clientPlanFoods.filter((f) => f.id !== id));
-    } else {
-      setClientPlanAddError("Couldn't remove this food. Please try again.");
+    setClientPlanSendError(null);
+    setClientPlanSendBusy(true);
+
+    try {
+      const { error } = await supabase
+        .from("client_profile")
+        .update({ plan_status: "active" })
+        .eq("user_id", planBuilderClientId);
+      if (error) throw error;
+
+      setClientPlanStatus("active");
+    } catch (err) {
+      setClientPlanSendError(err && err.message ? err.message : "Couldn't send this plan. Please try again.");
+    } finally {
+      setClientPlanSendBusy(false);
+    }
+  }
+
+  async function loadPlanDetails(clientId) {
+    setPlanDetailsLoading(true);
+    setPlanDetailsError(null);
+
+    try {
+      const [planFoodsRes, profileRes] = await Promise.all([
+        supabase.from("plan_foods").select("*").eq("user_id", clientId).order("created_at", { ascending: true }),
+        supabase.from("client_profile").select("plan_status").eq("user_id", clientId).maybeSingle(),
+      ]);
+      if (planFoodsRes.error) throw planFoodsRes.error;
+      if (profileRes.error) throw profileRes.error;
+
+      const rows = planFoodsRes.data || [];
+
+      setPlanDetailsFoods(
+        rows.map((f) => ({
+          id: f.id,
+          name: f.name,
+          grams: f.grams,
+          meal: f.meal,
+          course: f.course || "Main",
+          calories: f.calories,
+        }))
+      );
+      setPlanDetailsStatus((profileRes.data && profileRes.data.plan_status) || null);
+    } catch (err) {
+      setPlanDetailsError(err && err.message ? err.message : "Couldn't load this client's plan.");
+    } finally {
+      setPlanDetailsLoading(false);
+    }
+  }
+
+  function openClientPlanDetails(clientId) {
+    setPlanDetailsClientId(clientId);
+    setPlansView("details");
+  }
+
+  async function deactivateClientPlan(clientId) {
+    setPlanDetailsError(null);
+    setPlanDetailsDeactivateBusy(true);
+
+    try {
+      const { error } = await supabase
+        .from("client_profile")
+        .update({ plan_status: "inactive" })
+        .eq("user_id", clientId);
+      if (error) throw error;
+
+      setPlanDetailsStatus("inactive");
+    } catch (err) {
+      setPlanDetailsError(err && err.message ? err.message : "Couldn't deactivate this plan. Please try again.");
+    } finally {
+      setPlanDetailsDeactivateBusy(false);
+    }
+  }
+
+  async function removeClientPlanEntirely(clientId, name) {
+    const confirmed = window.confirm(
+      `Remove ${name || "this client"}'s plan? This permanently deletes all of their plan foods and can't be undone.`
+    );
+    if (!confirmed) return;
+
+    setPlanDetailsError(null);
+    setPlanDetailsRemoveBusy(true);
+
+    try {
+      const { error } = await supabase.from("plan_foods").delete().eq("user_id", clientId);
+      if (error) throw error;
+
+      setClientPlanSummaries((prev) => ({ ...prev, [clientId]: 0 }));
+      setPlansView("list");
+      setPlanDetailsClientId(null);
+    } catch (err) {
+      setPlanDetailsError(err && err.message ? err.message : "Couldn't remove this plan. Please try again.");
+    } finally {
+      setPlanDetailsRemoveBusy(false);
     }
   }
 
@@ -2206,7 +2372,7 @@ export default function CalorieTrackerApp() {
     }
   }
 
-  const planExpired = !planDateFrom || !planDateTo || planDateTo < todayStr();
+  const planExpired = !planDateFrom || !planDateTo || planDateTo < todayStr() || ownPlanStatus !== "active";
 
   const historyDayDates = useMemo(() => {
     if (planExpired) return [];
@@ -3305,6 +3471,10 @@ export default function CalorieTrackerApp() {
         <div style={{ ...panelStyle, marginTop: 20 }}>
           <SectionTitle>Plan comparison</SectionTitle>
 
+          {ownPlanStatus !== "active" ? (
+            <div style={{ fontSize: 12, color: INK_SOFT }}>No active plan configured.</div>
+          ) : (
+          <>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
             <button
               onClick={goToPrevComparisonDay}
@@ -3441,6 +3611,8 @@ export default function CalorieTrackerApp() {
                 );
               })}
             </>
+          )}
+          </>
           )}
         </div>
         </>
@@ -4005,54 +4177,6 @@ export default function CalorieTrackerApp() {
 
             {view === "plans" && (
               <div style={{ display: "grid", gap: 20 }}>
-                {planActionClientId && (
-                  <div
-                    style={{
-                      position: "fixed",
-                      inset: 0,
-                      background: "rgba(27, 36, 48, 0.5)",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      padding: 20,
-                      zIndex: 1000,
-                    }}
-                  >
-                    <div style={{ ...panelStyle, maxWidth: 380, width: "100%" }}>
-                      <SectionTitle>
-                        {(clients.find((c) => c.id === planActionClientId) || {}).name || "This client"} already has a plan
-                      </SectionTitle>
-                      <div style={{ fontSize: 13, color: INK_SOFT, marginBottom: 16, lineHeight: 1.5 }}>
-                        Start a fresh plan, or edit the one they already have?
-                      </div>
-                      {planOverrideError && (
-                        <div style={{ marginBottom: 12, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                          {planOverrideError}
-                        </div>
-                      )}
-                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                        <button
-                          onClick={() => editClientPlan(planActionClientId)}
-                          style={primaryButtonStyle}
-                          disabled={planOverrideBusy}
-                        >
-                          Edit existing plan
-                        </button>
-                        <button
-                          onClick={() => overrideClientPlan(planActionClientId)}
-                          style={{ ...secondaryButtonStyle, border: `1px solid ${RED}`, color: RED }}
-                          disabled={planOverrideBusy}
-                        >
-                          {planOverrideBusy ? "Clearing…" : "Override (start fresh)"}
-                        </button>
-                        <button onClick={closePlanActionPopup} style={secondaryButtonStyle} disabled={planOverrideBusy}>
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
                 {plansView === "list" ? (
                   <div style={panelStyle}>
                     <SectionTitle>Clients</SectionTitle>
@@ -4087,26 +4211,30 @@ export default function CalorieTrackerApp() {
                                     cursor: clientPlanSummariesLoading ? "default" : "pointer",
                                     opacity: clientPlanSummariesLoading ? 0.6 : 1,
                                   }}
-                                  onClick={() => !clientPlanSummariesLoading && openClientPlan(c.id)}
+                                  onClick={() => !clientPlanSummariesLoading && openClientPlanDetails(c.id)}
                                 >
                                   <td style={tdStyle}>{c.name}</td>
                                   <td style={tdStyle}>
-                                    {hasPlan ? (
-                                      <span style={{ color: GREEN, fontWeight: 600 }}>
-                                        On: {mealsConfigured} meal{mealsConfigured === 1 ? "" : "s"} configured
-                                      </span>
-                                    ) : (
-                                      <span style={{ color: INK_SOFT }}>No plan yet</span>
-                                    )}
+                                    <PlanStatusBadge status={clientPlanStatuses[c.id]} />
                                   </td>
                                   <td style={tdStyle}>
-                                    <button
-                                      onClick={(e) => { e.stopPropagation(); openClientPlan(c.id); }}
-                                      style={secondaryButtonStyle}
-                                      disabled={clientPlanSummariesLoading}
-                                    >
-                                      {hasPlan ? "Manage plan" : "Build plan"}
-                                    </button>
+                                    {hasPlan ? (
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); openClientPlanDetails(c.id); }}
+                                        style={secondaryButtonStyle}
+                                        disabled={clientPlanSummariesLoading}
+                                      >
+                                        View details
+                                      </button>
+                                    ) : (
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); editClientPlan(c.id); }}
+                                        style={{ ...secondaryButtonStyle, background: TEAL, border: `1px solid ${TEAL}`, color: "#FFFFFF" }}
+                                        disabled={clientPlanSummariesLoading}
+                                      >
+                                        Create plan
+                                      </button>
+                                    )}
                                   </td>
                                 </tr>
                               );
@@ -4119,7 +4247,7 @@ export default function CalorieTrackerApp() {
                       </div>
                     )}
                   </div>
-                ) : (
+                ) : plansView === "builder" ? (
                   <div style={panelStyle}>
                     <button
                       onClick={backToClientsList}
@@ -4145,11 +4273,7 @@ export default function CalorieTrackerApp() {
                           type="text"
                           placeholder="e.g. Cutting phase — September"
                           value={clientPlanName}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setClientPlanName(val);
-                            updateClientPlanField("plan_name", val);
-                          }}
+                          onChange={(e) => setClientPlanName(e.target.value)}
                           style={{ ...inputStyle, width: "50%" }}
                         />
 
@@ -4159,14 +4283,7 @@ export default function CalorieTrackerApp() {
                             <input
                               type="date"
                               value={clientPlanDateFrom}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setClientPlanDateFrom(val);
-                                if (!clientPlanDateTo || val <= clientPlanDateTo) {
-                                  updateClientPlanField("plan_date_from", val);
-                                  updateClientProfileDate("date_from", val);
-                                }
-                              }}
+                              onChange={(e) => setClientPlanDateFrom(e.target.value)}
                               style={{ ...inputStyle, marginBottom: 0 }}
                             />
                           </div>
@@ -4175,14 +4292,7 @@ export default function CalorieTrackerApp() {
                             <input
                               type="date"
                               value={clientPlanDateTo}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setClientPlanDateTo(val);
-                                if (!clientPlanDateFrom || val >= clientPlanDateFrom) {
-                                  updateClientPlanField("plan_date_to", val);
-                                  updateClientProfileDate("date_to", val);
-                                }
-                              }}
+                              onChange={(e) => setClientPlanDateTo(e.target.value)}
                               style={{ ...inputStyle, marginBottom: 0 }}
                             />
                           </div>
@@ -4357,10 +4467,199 @@ export default function CalorieTrackerApp() {
                             );
                           })}
                         </div>
+
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 18, paddingTop: 14, borderTop: `1px solid ${GRID}` }}>
+                          <button
+                            onClick={saveClientPlan}
+                            style={primaryButtonStyle}
+                            disabled={
+                              clientPlanSaveBusy ||
+                              (clientPlanDateFrom && clientPlanDateTo && clientPlanDateTo < clientPlanDateFrom)
+                            }
+                          >
+                            {clientPlanSaveBusy ? "Saving…" : "Save"}
+                          </button>
+                          <button
+                            onClick={sendClientPlan}
+                            style={{ ...secondaryButtonStyle, width: "auto", background: TEAL, border: `1px solid ${TEAL}`, color: "#FFFFFF" }}
+                            disabled={clientPlanStatus !== "draft" || clientPlanSendBusy}
+                          >
+                            {clientPlanSendBusy ? "Sending…" : "Send"}
+                          </button>
+                          {clientPlanStatus && (
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                              Status: {clientPlanStatus}
+                            </span>
+                          )}
+                        </div>
+
+                        {clientPlanSaveError && (
+                          <div style={{ marginTop: 10, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                            {clientPlanSaveError}
+                          </div>
+                        )}
+                        {clientPlanSendError && (
+                          <div style={{ marginTop: 10, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                            {clientPlanSendError}
+                          </div>
+                        )}
                       </>
                     )}
                   </div>
-                )}
+                ) : plansView === "details" ? (
+                  <div style={panelStyle}>
+                    <button
+                      onClick={backToClientsList}
+                      style={{ ...secondaryButtonStyle, width: "auto", marginBottom: 14 }}
+                    >
+                      ← Back to clients
+                    </button>
+
+                    <SectionTitle>
+                      {(clients.find((c) => c.id === planDetailsClientId) || {}).name || "Client"}'s plan
+                    </SectionTitle>
+
+                    {planDetailsLoading ? (
+                      <div style={{ fontSize: 12, color: INK_SOFT }}>Loading plan…</div>
+                    ) : planDetailsError ? (
+                      <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                        {planDetailsError}
+                      </div>
+                    ) : (
+                      <>
+                        <div style={{ marginBottom: 16 }}>
+                          <PlanStatusBadge status={planDetailsStatus} />
+                        </div>
+
+                        <div style={{ maxHeight: 340, overflowY: "auto", marginBottom: 18 }}>
+                          {planDetailsFoods.length === 0 && (
+                            <div style={{ fontSize: 12, color: INK_SOFT }}>No plan yet.</div>
+                          )}
+                          {MEALS.map((mealName) => {
+                            const mealFoods = planDetailsFoods.filter((f) => f.meal === mealName);
+                            if (mealFoods.length === 0) return null;
+
+                            const mealTotalCal = mealFoods.reduce((sum, f) => sum + f.calories, 0);
+
+                            return (
+                              <div key={mealName} style={{ marginBottom: 16 }}>
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "baseline",
+                                    padding: "4px 8px",
+                                    background: TEAL_SOFT,
+                                    borderRadius: 4,
+                                    marginBottom: 4,
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      fontFamily: "'Space Grotesk', sans-serif",
+                                      fontSize: 14,
+                                      fontWeight: 700,
+                                      color: TEAL,
+                                      textTransform: "uppercase",
+                                      letterSpacing: 0.5,
+                                    }}
+                                  >
+                                    {mealName}
+                                  </span>
+                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
+                                    {mealTotalCal} kcal total
+                                  </span>
+                                </div>
+                                {COURSES.map((courseName) => {
+                                  const courseFoods = mealFoods.filter((f) => (f.course || "Main") === courseName);
+                                  if (courseFoods.length === 0) return null;
+
+                                  return (
+                                    <div key={courseName} style={{ marginBottom: 8 }}>
+                                      <div
+                                        style={{
+                                          fontFamily: "'Space Grotesk', sans-serif",
+                                          fontSize: 11,
+                                          fontWeight: 700,
+                                          color: GREEN,
+                                          background: GREEN_SOFT,
+                                          textTransform: "uppercase",
+                                          letterSpacing: 0.5,
+                                          padding: "2px 8px",
+                                          borderRadius: 4,
+                                          display: "inline-block",
+                                        }}
+                                      >
+                                        {courseName}
+                                      </div>
+                                      {courseFoods.map((f) => (
+                                        <div key={f.id} style={foodRowStyle}>
+                                          <div>
+                                            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
+                                            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                                              {f.grams}g · {f.calories} kcal
+                                            </div>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        {(() => {
+                          const noPlanYet = planDetailsFoods.length === 0;
+                          const deactivateDisabled = noPlanYet || planDetailsStatus === "inactive";
+                          const editDisabled = noPlanYet;
+                          const removeDisabled = noPlanYet;
+
+                          return (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+                              <button
+                                onClick={() => deactivateClientPlan(planDetailsClientId)}
+                                style={planActionButtonStyle(
+                                  { ...secondaryButtonStyle, border: `1px solid ${AMBER}`, color: AMBER },
+                                  deactivateDisabled
+                                )}
+                                disabled={planDetailsDeactivateBusy || deactivateDisabled}
+                              >
+                                {planDetailsDeactivateBusy ? "Deactivating…" : "Deactivate"}
+                              </button>
+                              <button
+                                onClick={() => editClientPlan(planDetailsClientId)}
+                                style={planActionButtonStyle(
+                                  { ...secondaryButtonStyle, background: TEAL, border: `1px solid ${TEAL}`, color: "#FFFFFF" },
+                                  editDisabled
+                                )}
+                                disabled={editDisabled}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() =>
+                                  removeClientPlanEntirely(
+                                    planDetailsClientId,
+                                    (clients.find((c) => c.id === planDetailsClientId) || {}).name
+                                  )
+                                }
+                                style={planActionButtonStyle(
+                                  { ...secondaryButtonStyle, border: `1px solid ${RED}`, color: RED },
+                                  removeDisabled
+                                )}
+                                disabled={planDetailsRemoveBusy || removeDisabled}
+                              >
+                                {planDetailsRemoveBusy ? "Removing…" : "Remove"}
+                              </button>
+                            </div>
+                          );
+                        })()}
+                      </>
+                    )}
+                  </div>
+                ) : null}
               </div>
             )}
 
@@ -4802,6 +5101,18 @@ const iconButtonStyle = {
   cursor: "pointer",
   padding: 4,
 };
+
+const disabledActionButtonStyle = {
+  background: "#ECEDE7",
+  border: `1px solid ${GRID}`,
+  color: "#9BA096",
+  cursor: "not-allowed",
+  opacity: 0.7,
+};
+
+function planActionButtonStyle(baseStyle, isDisabled) {
+  return isDisabled ? { ...baseStyle, ...disabledActionButtonStyle } : baseStyle;
+}
 
 const foodRowStyle = {
   display: "flex",

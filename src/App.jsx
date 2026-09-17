@@ -1782,14 +1782,15 @@ export default function CalorieTrackerApp() {
     setNewClientPlanFood({ foodKey: "", grams: "", calories: "", meal: "Breakfast", course: "Main" });
 
     try {
-      const { data, error } = await supabase
-        .from("plan_foods")
-        .select("*")
-        .eq("user_id", clientId)
-        .order("created_at", { ascending: true });
-      if (error) throw error;
+      const [planFoodsRes, profileRes] = await Promise.all([
+        supabase.from("plan_foods").select("*").eq("user_id", clientId).order("created_at", { ascending: true }),
+        supabase.from("client_profile").select("date_from, date_to").eq("user_id", clientId).maybeSingle(),
+      ]);
+      if (planFoodsRes.error) throw planFoodsRes.error;
+      if (profileRes.error) throw profileRes.error;
 
-      const rows = data || [];
+      const rows = planFoodsRes.data || [];
+      const clientProfile = profileRes.data || {};
 
       setClientPlanFoods(
         rows.map((f) => ({
@@ -1802,8 +1803,14 @@ export default function CalorieTrackerApp() {
         }))
       );
       setClientPlanName((rows[0] && rows[0].plan_name) || "");
-      setClientPlanDateFrom((rows[0] && rows[0].plan_date_from) || "");
-      setClientPlanDateTo((rows[0] && rows[0].plan_date_to) || "");
+
+      if (rows.length > 0) {
+        setClientPlanDateFrom(rows[0].plan_date_from || "");
+        setClientPlanDateTo(rows[0].plan_date_to || "");
+      } else {
+        setClientPlanDateFrom(clientProfile.date_from || "");
+        setClientPlanDateTo(clientProfile.date_to || "");
+      }
     } catch (err) {
       setClientPlanError(err && err.message ? err.message : "Couldn't load this client's plan.");
     } finally {
@@ -1891,6 +1898,11 @@ export default function CalorieTrackerApp() {
   async function updateClientPlanField(column, value) {
     if (!planBuilderClientId) return;
     await supabase.from("plan_foods").update({ [column]: value || null }).eq("user_id", planBuilderClientId);
+  }
+
+  async function updateClientProfileDate(column, value) {
+    if (!planBuilderClientId) return;
+    await supabase.from("client_profile").update({ [column]: value || null }).eq("user_id", planBuilderClientId);
   }
 
   async function addClientPlanFood() {
@@ -4150,7 +4162,10 @@ export default function CalorieTrackerApp() {
                               onChange={(e) => {
                                 const val = e.target.value;
                                 setClientPlanDateFrom(val);
-                                if (!clientPlanDateTo || val <= clientPlanDateTo) updateClientPlanField("plan_date_from", val);
+                                if (!clientPlanDateTo || val <= clientPlanDateTo) {
+                                  updateClientPlanField("plan_date_from", val);
+                                  updateClientProfileDate("date_from", val);
+                                }
                               }}
                               style={{ ...inputStyle, marginBottom: 0 }}
                             />
@@ -4163,7 +4178,10 @@ export default function CalorieTrackerApp() {
                               onChange={(e) => {
                                 const val = e.target.value;
                                 setClientPlanDateTo(val);
-                                if (!clientPlanDateFrom || val >= clientPlanDateFrom) updateClientPlanField("plan_date_to", val);
+                                if (!clientPlanDateFrom || val >= clientPlanDateFrom) {
+                                  updateClientPlanField("plan_date_to", val);
+                                  updateClientProfileDate("date_to", val);
+                                }
                               }}
                               style={{ ...inputStyle, marginBottom: 0 }}
                             />

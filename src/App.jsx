@@ -1907,6 +1907,32 @@ export default function CalorieTrackerApp() {
     }
   }
 
+  // Best-effort background push, fired after a chat message is sent — never
+  // surfaces errors or blocks the chat UI, same as checkCalorieThreshold.
+  // Intentionally leaves the message body out of the notification text
+  // (only the sender's name), since it goes through an external channel.
+  async function notifyNewChatMessage(recipientId, senderId) {
+    try {
+      const { data: senderInfo } = await supabase
+        .from("user_info")
+        .select("name")
+        .eq("id", senderId)
+        .maybeSingle();
+
+      const senderName = (senderInfo && senderInfo.name) || "Someone";
+
+      await supabase.functions.invoke("send-notification", {
+        body: {
+          user_id: recipientId,
+          message: `💬 You have a new message from ${senderName}.`,
+          type: "chat_message",
+        },
+      });
+    } catch (err) {
+      console.error("Chat notification failed (non-critical):", err);
+    }
+  }
+
   async function sendChatMessage(otherId) {
     const body = chatInput.trim();
     if (!body || !otherId || !session) return;
@@ -1924,6 +1950,7 @@ export default function CalorieTrackerApp() {
 
       setChatMessages((prev) => (prev.some((m) => m.id === data.id) ? prev : [...prev, data]));
       setChatInput("");
+      notifyNewChatMessage(otherId, session.user.id);
     } catch (err) {
       setChatSendError(err && err.message ? err.message : "Couldn't send that message.");
     } finally {

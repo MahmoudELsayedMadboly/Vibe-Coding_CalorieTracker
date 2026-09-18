@@ -799,15 +799,18 @@ export default function CalorieTrackerApp() {
           supabase.from("food_list").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
           supabase.from("plan_foods").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
           supabase.from("meal_logs").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
-          supabase.from("body_measurements").select("*").eq("user_id", userId).order("date", { ascending: false }),
+          supabase.from("body_measurements").select("*").eq("user_id", userId).order("measured_at", { ascending: false }),
           supabase.from("progress_photos").select("*").eq("user_id", userId).order("taken_at", { ascending: false }),
         ]);
 
         if (personalFoodsRes.error) throw personalFoodsRes.error;
         if (planFoodsRes.error) throw planFoodsRes.error;
         if (logsRes.error) throw logsRes.error;
-        if (measurementsRes.error) throw measurementsRes.error;
-        if (photosRes.error) throw photosRes.error;
+        // Measurements/photos are a secondary section of the load — a failure here
+        // (e.g. a bad column name or transient DB error) must not abort the rest of
+        // load(), which still needs to run and set roleId below.
+        if (measurementsRes.error) console.error("Couldn't load body measurements:", measurementsRes.error);
+        if (photosRes.error) console.error("Couldn't load progress photos:", photosRes.error);
 
         const p = profileRow;
 
@@ -1296,7 +1299,7 @@ export default function CalorieTrackerApp() {
     try {
       const payload = {
         user_id: userId,
-        date: newMeasurement.date || todayStr(),
+        measured_at: newMeasurement.date || todayStr(),
         neck: numOrNull(newMeasurement.neck),
         waist: numOrNull(newMeasurement.waist),
         shoulder: numOrNull(newMeasurement.shoulder),
@@ -1308,7 +1311,7 @@ export default function CalorieTrackerApp() {
       const { data, error } = await supabase.from("body_measurements").insert(payload).select().single();
       if (error) throw error;
 
-      setMeasurements((prev) => [data, ...prev].sort((a, b) => (a.date < b.date ? 1 : -1)));
+      setMeasurements((prev) => [data, ...prev].sort((a, b) => (a.measured_at < b.measured_at ? 1 : -1)));
       setNewMeasurement({ date: todayStr(), neck: "", waist: "", shoulder: "", chest: "", abdomen: "", thighs: "" });
     } catch (err) {
       setMeasurementError(err && err.message ? err.message : "Couldn't save that measurement.");
@@ -3286,7 +3289,7 @@ export default function CalorieTrackerApp() {
                   measurements.map((m) => (
                     <div key={m.id} style={{ padding: "8px 0", borderBottom: `1px solid ${GRID}` }}>
                       <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 12.5, fontWeight: 600, marginBottom: 3 }}>
-                        {shortDayLabel(String(m.date).slice(0, 10))}
+                        {shortDayLabel(String(m.measured_at).slice(0, 10))}
                       </div>
                       <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT }}>
                         {MEASUREMENT_FIELDS.filter((f) => m[f.key] !== null && m[f.key] !== undefined)

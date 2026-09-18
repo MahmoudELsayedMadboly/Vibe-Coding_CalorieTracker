@@ -2955,6 +2955,142 @@ export default function CalorieTrackerApp() {
 
   const chatUnreadTotal = Object.values(chatUnreadByClient).reduce((sum, n) => sum + n, 0);
 
+  // A client is "managed" only when they have an active coach relationship
+  // (coach_clients row with status "active") — never inferred from role_id
+  // alone, since a standalone user also has roleId 3 but no coach.
+  const isManagedClient = !!myCoachId;
+
+  // Shared between the standalone "Measurements"/"Progress photos" sub-tabs
+  // (unmanaged users) and the merged Profile screen (managed clients).
+  const measurementsSectionContent = (
+    <>
+      <label style={labelStyle}>Date</label>
+      <input
+        type="date"
+        value={newMeasurement.date}
+        max={todayStr()}
+        onChange={(e) => setNewMeasurement({ ...newMeasurement, date: e.target.value })}
+        style={inputStyle}
+      />
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+        {MEASUREMENT_FIELDS.map((f) => (
+          <div key={f.key}>
+            <label style={labelStyle}>{f.label} (cm)</label>
+            <input
+              type="number"
+              value={newMeasurement[f.key]}
+              onChange={(e) => setNewMeasurement({ ...newMeasurement, [f.key]: e.target.value })}
+              style={{ ...inputStyle, marginBottom: 0 }}
+            />
+          </div>
+        ))}
+      </div>
+
+      <button
+        onClick={addMeasurement}
+        disabled={measurementSaving}
+        style={{ ...primaryButtonStyle, marginTop: 14, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
+      >
+        <Plus size={14} strokeWidth={2.5} />
+        {measurementSaving ? "Saving…" : "Add measurement"}
+      </button>
+      {measurementError && (
+        <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+          {measurementError}
+        </div>
+      )}
+
+      <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 18 }}>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+          Past entries
+        </div>
+
+        {measurements.length === 0 ? (
+          <div style={{ fontSize: 12, color: INK_SOFT }}>No measurements logged yet.</div>
+        ) : (
+          measurements.map((m) => (
+            <div key={m.id} style={{ padding: "8px 0", borderBottom: `1px solid ${GRID}` }}>
+              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 12.5, fontWeight: 600, marginBottom: 3 }}>
+                {shortDayLabel(String(m.measured_at).slice(0, 10))}
+              </div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT }}>
+                {MEASUREMENT_FIELDS.filter((f) => m[f.key] !== null && m[f.key] !== undefined)
+                  .map((f) => `${f.label} ${m[f.key]}cm`)
+                  .join(" · ") || "No values recorded"}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </>
+  );
+
+  const photosSectionContent = (
+    <>
+      <label style={labelStyle}>Date</label>
+      <input
+        type="date"
+        value={newPhotoDate}
+        max={todayStr()}
+        onChange={(e) => setNewPhotoDate(e.target.value)}
+        style={inputStyle}
+      />
+
+      <label style={labelStyle}>Photo</label>
+      <input
+        type="file"
+        accept="image/*"
+        ref={photoFileInputRef}
+        onChange={(e) => setPhotoFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)}
+        style={{ ...inputStyle, padding: "6px 0" }}
+      />
+
+      <button
+        onClick={uploadProgressPhoto}
+        disabled={photoUploading || !photoFile}
+        style={{ ...primaryButtonStyle, marginTop: 4, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
+      >
+        <Save size={14} strokeWidth={2.5} />
+        {photoUploading ? "Uploading…" : "Upload photo"}
+      </button>
+      {photoError && (
+        <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+          {photoError}
+        </div>
+      )}
+
+      <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 18 }}>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+          Past photos
+        </div>
+
+        {photos.length === 0 ? (
+          <div style={{ fontSize: 12, color: INK_SOFT }}>No progress photos yet.</div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 12 }}>
+            {photos.map((p) => (
+              <div key={p.id}>
+                {p.url ? (
+                  <img
+                    src={p.url}
+                    alt={`Progress photo from ${p.taken_at}`}
+                    style={{ width: "100%", aspectRatio: "3 / 4", objectFit: "cover", borderRadius: 4, border: `1px solid ${GRID}`, display: "block" }}
+                  />
+                ) : (
+                  <div style={{ width: "100%", aspectRatio: "3 / 4", borderRadius: 4, border: `1px solid ${GRID}`, background: PAPER }} />
+                )}
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT, marginTop: 4, textAlign: "center" }}>
+                  {shortDayLabel(String(p.taken_at).slice(0, 10))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  );
+
   return (
     <div style={{ fontFamily: "'Inter', sans-serif", background: PAPER, color: INK, padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
       <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -2969,7 +3105,7 @@ export default function CalorieTrackerApp() {
             nutrition tracker
           </div>
           <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 24, fontWeight: 700, margin: 0 }}>
-            {view === "setup" && "Configuration"}
+            {view === "setup" && (isManagedClient ? "Profile" : "Configuration")}
             {view === "log" && "Daily log"}
             {view === "history" && "History"}
             {view === "home" && "Home"}
@@ -3032,7 +3168,7 @@ export default function CalorieTrackerApp() {
       <>
       <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
         {[
-          { id: "setup", label: "Configuration" },
+          { id: "setup", label: isManagedClient ? "Profile" : "Configuration" },
           { id: "log", label: "Daily log" },
           { id: "history", label: "History" },
           ...(roleId === 3 ? [{ id: "chat", label: "Chat" }] : []),
@@ -3064,14 +3200,20 @@ export default function CalorieTrackerApp() {
       {view === "setup" && (
         <div>
           <div style={{ display: "flex", gap: 4, marginBottom: 20, borderBottom: `1px solid ${GRID}`, paddingBottom: 12 }}>
-            {[
-              { id: "profile", label: "Profile & program" },
-              { id: "measurements", label: "Measurements" },
-              { id: "photos", label: "Progress photos" },
-              { id: "foodListConfig", label: "Configure your food list" },
-              { id: "foodMaterials", label: "Create a plan" },
-              { id: "notifications", label: "Notifications" },
-            ].map((t) => (
+            {(isManagedClient
+              ? [
+                  { id: "profile", label: "Profile & program" },
+                  { id: "notifications", label: "Notifications" },
+                ]
+              : [
+                  { id: "profile", label: "Profile & program" },
+                  { id: "measurements", label: "Measurements" },
+                  { id: "photos", label: "Progress photos" },
+                  { id: "foodListConfig", label: "Configure your food list" },
+                  { id: "foodMaterials", label: "Create a plan" },
+                  { id: "notifications", label: "Notifications" },
+                ]
+            ).map((t) => (
               <button
                 key={t.id}
                 onClick={() => setConfigTab(t.id)}
@@ -3300,143 +3442,38 @@ export default function CalorieTrackerApp() {
                   {saveError}
                 </div>
               )}
+
+              {isManagedClient && (
+                <>
+                  <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 20, marginTop: 24 }}>
+                    <SectionTitle>Measurements</SectionTitle>
+                    {measurementsSectionContent}
+                  </div>
+
+                  <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 20, marginTop: 24 }}>
+                    <SectionTitle>Progress photos</SectionTitle>
+                    {photosSectionContent}
+                  </div>
+                </>
+              )}
             </div>
           )}
 
-          {configTab === "measurements" && (
+          {!isManagedClient && configTab === "measurements" && (
             <div style={panelStyle}>
               <SectionTitle>Measurements</SectionTitle>
-
-              <label style={labelStyle}>Date</label>
-              <input
-                type="date"
-                value={newMeasurement.date}
-                max={todayStr()}
-                onChange={(e) => setNewMeasurement({ ...newMeasurement, date: e.target.value })}
-                style={inputStyle}
-              />
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-                {MEASUREMENT_FIELDS.map((f) => (
-                  <div key={f.key}>
-                    <label style={labelStyle}>{f.label} (cm)</label>
-                    <input
-                      type="number"
-                      value={newMeasurement[f.key]}
-                      onChange={(e) => setNewMeasurement({ ...newMeasurement, [f.key]: e.target.value })}
-                      style={{ ...inputStyle, marginBottom: 0 }}
-                    />
-                  </div>
-                ))}
-              </div>
-
-              <button
-                onClick={addMeasurement}
-                disabled={measurementSaving}
-                style={{ ...primaryButtonStyle, marginTop: 14, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
-              >
-                <Plus size={14} strokeWidth={2.5} />
-                {measurementSaving ? "Saving…" : "Add measurement"}
-              </button>
-              {measurementError && (
-                <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                  {measurementError}
-                </div>
-              )}
-
-              <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 18 }}>
-                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                  Past entries
-                </div>
-
-                {measurements.length === 0 ? (
-                  <div style={{ fontSize: 12, color: INK_SOFT }}>No measurements logged yet.</div>
-                ) : (
-                  measurements.map((m) => (
-                    <div key={m.id} style={{ padding: "8px 0", borderBottom: `1px solid ${GRID}` }}>
-                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 12.5, fontWeight: 600, marginBottom: 3 }}>
-                        {shortDayLabel(String(m.measured_at).slice(0, 10))}
-                      </div>
-                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT }}>
-                        {MEASUREMENT_FIELDS.filter((f) => m[f.key] !== null && m[f.key] !== undefined)
-                          .map((f) => `${f.label} ${m[f.key]}cm`)
-                          .join(" · ") || "No values recorded"}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
+              {measurementsSectionContent}
             </div>
           )}
 
-          {configTab === "photos" && (
+          {!isManagedClient && configTab === "photos" && (
             <div style={panelStyle}>
               <SectionTitle>Progress photos</SectionTitle>
-
-              <label style={labelStyle}>Date</label>
-              <input
-                type="date"
-                value={newPhotoDate}
-                max={todayStr()}
-                onChange={(e) => setNewPhotoDate(e.target.value)}
-                style={inputStyle}
-              />
-
-              <label style={labelStyle}>Photo</label>
-              <input
-                type="file"
-                accept="image/*"
-                ref={photoFileInputRef}
-                onChange={(e) => setPhotoFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)}
-                style={{ ...inputStyle, padding: "6px 0" }}
-              />
-
-              <button
-                onClick={uploadProgressPhoto}
-                disabled={photoUploading || !photoFile}
-                style={{ ...primaryButtonStyle, marginTop: 4, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
-              >
-                <Save size={14} strokeWidth={2.5} />
-                {photoUploading ? "Uploading…" : "Upload photo"}
-              </button>
-              {photoError && (
-                <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                  {photoError}
-                </div>
-              )}
-
-              <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 18 }}>
-                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                  Past photos
-                </div>
-
-                {photos.length === 0 ? (
-                  <div style={{ fontSize: 12, color: INK_SOFT }}>No progress photos yet.</div>
-                ) : (
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 12 }}>
-                    {photos.map((p) => (
-                      <div key={p.id}>
-                        {p.url ? (
-                          <img
-                            src={p.url}
-                            alt={`Progress photo from ${p.taken_at}`}
-                            style={{ width: "100%", aspectRatio: "3 / 4", objectFit: "cover", borderRadius: 4, border: `1px solid ${GRID}`, display: "block" }}
-                          />
-                        ) : (
-                          <div style={{ width: "100%", aspectRatio: "3 / 4", borderRadius: 4, border: `1px solid ${GRID}`, background: PAPER }} />
-                        )}
-                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT, marginTop: 4, textAlign: "center" }}>
-                          {shortDayLabel(String(p.taken_at).slice(0, 10))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+              {photosSectionContent}
             </div>
           )}
 
-          {configTab === "foodMaterials" && (
+          {!isManagedClient && configTab === "foodMaterials" && (
             <div style={panelStyle}>
               <SectionTitle>Create a plan</SectionTitle>
               <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 10 }}>
@@ -3681,7 +3718,7 @@ export default function CalorieTrackerApp() {
             </div>
           )}
 
-          {configTab === "foodListConfig" && (
+          {!isManagedClient && configTab === "foodListConfig" && (
             <div style={panelStyle}>
               <SectionTitle>Configure your food list</SectionTitle>
               <div

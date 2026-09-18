@@ -763,11 +763,17 @@ export default function CalorieTrackerApp() {
 
         setNotificationSettings(notifRow);
 
+        console.log("[roleId debug] querying user_info for userId:", userId);
+
         const { data: userInfoRow, error: userInfoErr } = await supabase
           .from("user_info")
           .select("role_id, first_login_at")
           .eq("id", userId)
           .maybeSingle();
+
+        console.log("[roleId debug] userInfoErr:", userInfoErr);
+        console.log("[roleId debug] raw userInfoRow:", userInfoRow);
+
         if (userInfoErr) throw userInfoErr;
 
         // A standalone user (no coach) has no client_profile row at all, so
@@ -818,6 +824,7 @@ export default function CalorieTrackerApp() {
             heightCm: p.height_cm ?? 175,
             activity: p.activity || "moderate",
           });
+          console.log("[roleId debug] value passed to setRoleId:", userInfoRow?.role_id ?? null);
           setRoleId(userInfoRow?.role_id ?? null);
           setGoal({ type: p.goal_type || "maintain", rate: p.goal_rate || "moderate" });
 

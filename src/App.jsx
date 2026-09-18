@@ -567,6 +567,7 @@ export default function CalorieTrackerApp() {
   const [chatUnreadByClient, setChatUnreadByClient] = useState({});
 
   const [profile, setProfile] = useState({ sex: "male", age: 30, dateOfBirth: "", healthNotes: "", weightKg: 75, heightCm: 175, activity: "moderate" });
+  const [coachOwnedInfo, setCoachOwnedInfo] = useState({ name: "", email: "", phone: "", planDateFrom: null, planDateTo: null });
 
   const [measurements, setMeasurements] = useState([]);
   const [newMeasurement, setNewMeasurement] = useState({ date: todayStr(), neck: "", waist: "", shoulder: "", chest: "", abdomen: "", thighs: "" });
@@ -767,7 +768,7 @@ export default function CalorieTrackerApp() {
 
         const { data: userInfoRow, error: userInfoErr } = await supabase
           .from("user_info")
-          .select("role_id, first_login_at")
+          .select("role_id, first_login_at, name, email, phone")
           .eq("id", userId)
           .maybeSingle();
 
@@ -781,19 +782,30 @@ export default function CalorieTrackerApp() {
         // coach's client has this row, and only a coach can set it to
         // "draft" or "inactive".
         let ownPlanStatusValue = "active";
+        let ownPlanDateFrom = null;
+        let ownPlanDateTo = null;
         try {
           const { data: selfClientProfileRow } = await supabase
             .from("client_profile")
-            .select("plan_status")
+            .select("plan_status, date_from, date_to")
             .eq("user_id", userId)
             .maybeSingle();
-          if (selfClientProfileRow && selfClientProfileRow.plan_status) {
-            ownPlanStatusValue = selfClientProfileRow.plan_status;
+          if (selfClientProfileRow) {
+            if (selfClientProfileRow.plan_status) ownPlanStatusValue = selfClientProfileRow.plan_status;
+            ownPlanDateFrom = selfClientProfileRow.date_from || null;
+            ownPlanDateTo = selfClientProfileRow.date_to || null;
           }
         } catch (e) {
           // No client_profile row / not a coach's client — stays "active".
         }
         setOwnPlanStatus(ownPlanStatusValue);
+        setCoachOwnedInfo({
+          name: userInfoRow?.name || "",
+          email: userInfoRow?.email || "",
+          phone: userInfoRow?.phone || "",
+          planDateFrom: ownPlanDateFrom,
+          planDateTo: ownPlanDateTo,
+        });
 
         const [personalFoodsRes, planFoodsRes, logsRes, measurementsRes, photosRes] = await Promise.all([
           supabase.from("food_list").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
@@ -1975,18 +1987,30 @@ export default function CalorieTrackerApp() {
     setClientDetailError(null);
 
     try {
-      const [infoRes, profileRes, linkRes] = await Promise.all([
+      const [infoRes, profileRes, linkRes, ownProfileRes, latestMeasurementRes] = await Promise.all([
         supabase.from("user_info").select("id, name, email, phone, first_login_at").eq("id", clientId).maybeSingle(),
         supabase.from("client_profile").select("user_id, date_from, date_to, plan_type_id").eq("user_id", clientId).maybeSingle(),
         supabase.from("coach_clients").select("status").eq("coach_id", session.user.id).eq("client_id", clientId).maybeSingle(),
+        supabase.from("profile").select("date_of_birth, health_notes").eq("user_id", clientId).maybeSingle(),
+        supabase
+          .from("body_measurements")
+          .select("*")
+          .eq("user_id", clientId)
+          .order("measured_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
       ]);
       if (infoRes.error) throw infoRes.error;
       if (profileRes.error) throw profileRes.error;
       if (linkRes.error) throw linkRes.error;
+      if (ownProfileRes.error) throw ownProfileRes.error;
+      if (latestMeasurementRes.error) throw latestMeasurementRes.error;
 
       const info = infoRes.data || {};
       const clientProfile = profileRes.data || {};
       const link = linkRes.data || {};
+      const ownProfile = ownProfileRes.data || {};
+      const latestMeasurement = latestMeasurementRes.data || null;
 
       let planTypeName = null;
       if (clientProfile.plan_type_id) {
@@ -2015,6 +2039,20 @@ export default function CalorieTrackerApp() {
         planTypeName,
         firstLoginAt: info.first_login_at || null,
         coachStatus: link.status || "active",
+        dateOfBirth: ownProfile.date_of_birth || null,
+        age: ownProfile.date_of_birth ? calcAgeFromDOB(ownProfile.date_of_birth) : null,
+        healthNotes: ownProfile.health_notes || null,
+        latestMeasurement: latestMeasurement
+          ? {
+              measuredAt: latestMeasurement.measured_at,
+              neck: latestMeasurement.neck,
+              waist: latestMeasurement.waist,
+              shoulder: latestMeasurement.shoulder,
+              chest: latestMeasurement.chest,
+              abdomen: latestMeasurement.abdomen,
+              thighs: latestMeasurement.thighs,
+            }
+          : null,
       });
     } catch (err) {
       setClientDetailError(err && err.message ? err.message : "Couldn't load this client.");
@@ -2917,6 +2955,142 @@ export default function CalorieTrackerApp() {
 
   const chatUnreadTotal = Object.values(chatUnreadByClient).reduce((sum, n) => sum + n, 0);
 
+  // A client is "managed" only when they have an active coach relationship
+  // (coach_clients row with status "active") — never inferred from role_id
+  // alone, since a standalone user also has roleId 3 but no coach.
+  const isManagedClient = !!myCoachId;
+
+  // Shared between the standalone "Measurements"/"Progress photos" sub-tabs
+  // (unmanaged users) and the merged Profile screen (managed clients).
+  const measurementsSectionContent = (
+    <>
+      <label style={labelStyle}>Date</label>
+      <input
+        type="date"
+        value={newMeasurement.date}
+        max={todayStr()}
+        onChange={(e) => setNewMeasurement({ ...newMeasurement, date: e.target.value })}
+        style={inputStyle}
+      />
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+        {MEASUREMENT_FIELDS.map((f) => (
+          <div key={f.key}>
+            <label style={labelStyle}>{f.label} (cm)</label>
+            <input
+              type="number"
+              value={newMeasurement[f.key]}
+              onChange={(e) => setNewMeasurement({ ...newMeasurement, [f.key]: e.target.value })}
+              style={{ ...inputStyle, marginBottom: 0 }}
+            />
+          </div>
+        ))}
+      </div>
+
+      <button
+        onClick={addMeasurement}
+        disabled={measurementSaving}
+        style={{ ...primaryButtonStyle, marginTop: 14, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
+      >
+        <Plus size={14} strokeWidth={2.5} />
+        {measurementSaving ? "Saving…" : "Add measurement"}
+      </button>
+      {measurementError && (
+        <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+          {measurementError}
+        </div>
+      )}
+
+      <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 18 }}>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+          Past entries
+        </div>
+
+        {measurements.length === 0 ? (
+          <div style={{ fontSize: 12, color: INK_SOFT }}>No measurements logged yet.</div>
+        ) : (
+          measurements.map((m) => (
+            <div key={m.id} style={{ padding: "8px 0", borderBottom: `1px solid ${GRID}` }}>
+              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 12.5, fontWeight: 600, marginBottom: 3 }}>
+                {shortDayLabel(String(m.measured_at).slice(0, 10))}
+              </div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT }}>
+                {MEASUREMENT_FIELDS.filter((f) => m[f.key] !== null && m[f.key] !== undefined)
+                  .map((f) => `${f.label} ${m[f.key]}cm`)
+                  .join(" · ") || "No values recorded"}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </>
+  );
+
+  const photosSectionContent = (
+    <>
+      <label style={labelStyle}>Date</label>
+      <input
+        type="date"
+        value={newPhotoDate}
+        max={todayStr()}
+        onChange={(e) => setNewPhotoDate(e.target.value)}
+        style={inputStyle}
+      />
+
+      <label style={labelStyle}>Photo</label>
+      <input
+        type="file"
+        accept="image/*"
+        ref={photoFileInputRef}
+        onChange={(e) => setPhotoFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)}
+        style={{ ...inputStyle, padding: "6px 0" }}
+      />
+
+      <button
+        onClick={uploadProgressPhoto}
+        disabled={photoUploading || !photoFile}
+        style={{ ...primaryButtonStyle, marginTop: 4, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
+      >
+        <Save size={14} strokeWidth={2.5} />
+        {photoUploading ? "Uploading…" : "Upload photo"}
+      </button>
+      {photoError && (
+        <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+          {photoError}
+        </div>
+      )}
+
+      <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 18 }}>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+          Past photos
+        </div>
+
+        {photos.length === 0 ? (
+          <div style={{ fontSize: 12, color: INK_SOFT }}>No progress photos yet.</div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 12 }}>
+            {photos.map((p) => (
+              <div key={p.id}>
+                {p.url ? (
+                  <img
+                    src={p.url}
+                    alt={`Progress photo from ${p.taken_at}`}
+                    style={{ width: "100%", aspectRatio: "3 / 4", objectFit: "cover", borderRadius: 4, border: `1px solid ${GRID}`, display: "block" }}
+                  />
+                ) : (
+                  <div style={{ width: "100%", aspectRatio: "3 / 4", borderRadius: 4, border: `1px solid ${GRID}`, background: PAPER }} />
+                )}
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT, marginTop: 4, textAlign: "center" }}>
+                  {shortDayLabel(String(p.taken_at).slice(0, 10))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  );
+
   return (
     <div style={{ fontFamily: "'Inter', sans-serif", background: PAPER, color: INK, padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
       <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -2931,7 +3105,7 @@ export default function CalorieTrackerApp() {
             nutrition tracker
           </div>
           <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 24, fontWeight: 700, margin: 0 }}>
-            {view === "setup" && "Configuration"}
+            {view === "setup" && (isManagedClient ? "Profile" : "Configuration")}
             {view === "log" && "Daily log"}
             {view === "history" && "History"}
             {view === "home" && "Home"}
@@ -2994,7 +3168,7 @@ export default function CalorieTrackerApp() {
       <>
       <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
         {[
-          { id: "setup", label: "Configuration" },
+          { id: "setup", label: isManagedClient ? "Profile" : "Configuration" },
           { id: "log", label: "Daily log" },
           { id: "history", label: "History" },
           ...(roleId === 3 ? [{ id: "chat", label: "Chat" }] : []),
@@ -3026,14 +3200,20 @@ export default function CalorieTrackerApp() {
       {view === "setup" && (
         <div>
           <div style={{ display: "flex", gap: 4, marginBottom: 20, borderBottom: `1px solid ${GRID}`, paddingBottom: 12 }}>
-            {[
-              { id: "profile", label: "Profile & program" },
-              { id: "measurements", label: "Measurements" },
-              { id: "photos", label: "Progress photos" },
-              { id: "foodListConfig", label: "Configure your food list" },
-              { id: "foodMaterials", label: "Create a plan" },
-              { id: "notifications", label: "Notifications" },
-            ].map((t) => (
+            {(isManagedClient
+              ? [
+                  { id: "profile", label: "Profile & program" },
+                  { id: "notifications", label: "Notifications" },
+                ]
+              : [
+                  { id: "profile", label: "Profile & program" },
+                  { id: "measurements", label: "Measurements" },
+                  { id: "photos", label: "Progress photos" },
+                  { id: "foodListConfig", label: "Configure your food list" },
+                  { id: "foodMaterials", label: "Create a plan" },
+                  { id: "notifications", label: "Notifications" },
+                ]
+            ).map((t) => (
               <button
                 key={t.id}
                 onClick={() => setConfigTab(t.id)}
@@ -3057,6 +3237,34 @@ export default function CalorieTrackerApp() {
           {configTab === "profile" && (
             <div style={panelStyle}>
               <SectionTitle>Profile & program</SectionTitle>
+
+              <div style={{ borderBottom: `1px solid ${GRID}`, paddingBottom: 16, marginBottom: 20 }}>
+                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                  Your account (set by your coach)
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                  <div>
+                    <div style={labelStyle}>Name</div>
+                    <div style={{ fontSize: 13 }}>{coachOwnedInfo.name || "—"}</div>
+                  </div>
+                  <div>
+                    <div style={labelStyle}>Email</div>
+                    <div style={{ fontSize: 13 }}>{coachOwnedInfo.email || "—"}</div>
+                  </div>
+                  <div>
+                    <div style={labelStyle}>Mobile number</div>
+                    <div style={{ fontSize: 13 }}>{coachOwnedInfo.phone || "—"}</div>
+                  </div>
+                  <div>
+                    <div style={labelStyle}>Plan dates</div>
+                    <div style={{ fontSize: 13 }}>
+                      {coachOwnedInfo.planDateFrom || coachOwnedInfo.planDateTo
+                        ? `${coachOwnedInfo.planDateFrom || "—"} to ${coachOwnedInfo.planDateTo || "—"}`
+                        : "—"}
+                    </div>
+                  </div>
+                </div>
+              </div>
 
               <label style={labelStyle}>Sex</label>
               <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
@@ -3234,143 +3442,38 @@ export default function CalorieTrackerApp() {
                   {saveError}
                 </div>
               )}
+
+              {isManagedClient && (
+                <>
+                  <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 20, marginTop: 24 }}>
+                    <SectionTitle>Measurements</SectionTitle>
+                    {measurementsSectionContent}
+                  </div>
+
+                  <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 20, marginTop: 24 }}>
+                    <SectionTitle>Progress photos</SectionTitle>
+                    {photosSectionContent}
+                  </div>
+                </>
+              )}
             </div>
           )}
 
-          {configTab === "measurements" && (
+          {!isManagedClient && configTab === "measurements" && (
             <div style={panelStyle}>
               <SectionTitle>Measurements</SectionTitle>
-
-              <label style={labelStyle}>Date</label>
-              <input
-                type="date"
-                value={newMeasurement.date}
-                max={todayStr()}
-                onChange={(e) => setNewMeasurement({ ...newMeasurement, date: e.target.value })}
-                style={inputStyle}
-              />
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-                {MEASUREMENT_FIELDS.map((f) => (
-                  <div key={f.key}>
-                    <label style={labelStyle}>{f.label} (cm)</label>
-                    <input
-                      type="number"
-                      value={newMeasurement[f.key]}
-                      onChange={(e) => setNewMeasurement({ ...newMeasurement, [f.key]: e.target.value })}
-                      style={{ ...inputStyle, marginBottom: 0 }}
-                    />
-                  </div>
-                ))}
-              </div>
-
-              <button
-                onClick={addMeasurement}
-                disabled={measurementSaving}
-                style={{ ...primaryButtonStyle, marginTop: 14, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
-              >
-                <Plus size={14} strokeWidth={2.5} />
-                {measurementSaving ? "Saving…" : "Add measurement"}
-              </button>
-              {measurementError && (
-                <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                  {measurementError}
-                </div>
-              )}
-
-              <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 18 }}>
-                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                  Past entries
-                </div>
-
-                {measurements.length === 0 ? (
-                  <div style={{ fontSize: 12, color: INK_SOFT }}>No measurements logged yet.</div>
-                ) : (
-                  measurements.map((m) => (
-                    <div key={m.id} style={{ padding: "8px 0", borderBottom: `1px solid ${GRID}` }}>
-                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 12.5, fontWeight: 600, marginBottom: 3 }}>
-                        {shortDayLabel(String(m.measured_at).slice(0, 10))}
-                      </div>
-                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT }}>
-                        {MEASUREMENT_FIELDS.filter((f) => m[f.key] !== null && m[f.key] !== undefined)
-                          .map((f) => `${f.label} ${m[f.key]}cm`)
-                          .join(" · ") || "No values recorded"}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
+              {measurementsSectionContent}
             </div>
           )}
 
-          {configTab === "photos" && (
+          {!isManagedClient && configTab === "photos" && (
             <div style={panelStyle}>
               <SectionTitle>Progress photos</SectionTitle>
-
-              <label style={labelStyle}>Date</label>
-              <input
-                type="date"
-                value={newPhotoDate}
-                max={todayStr()}
-                onChange={(e) => setNewPhotoDate(e.target.value)}
-                style={inputStyle}
-              />
-
-              <label style={labelStyle}>Photo</label>
-              <input
-                type="file"
-                accept="image/*"
-                ref={photoFileInputRef}
-                onChange={(e) => setPhotoFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)}
-                style={{ ...inputStyle, padding: "6px 0" }}
-              />
-
-              <button
-                onClick={uploadProgressPhoto}
-                disabled={photoUploading || !photoFile}
-                style={{ ...primaryButtonStyle, marginTop: 4, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
-              >
-                <Save size={14} strokeWidth={2.5} />
-                {photoUploading ? "Uploading…" : "Upload photo"}
-              </button>
-              {photoError && (
-                <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                  {photoError}
-                </div>
-              )}
-
-              <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 18 }}>
-                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                  Past photos
-                </div>
-
-                {photos.length === 0 ? (
-                  <div style={{ fontSize: 12, color: INK_SOFT }}>No progress photos yet.</div>
-                ) : (
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 12 }}>
-                    {photos.map((p) => (
-                      <div key={p.id}>
-                        {p.url ? (
-                          <img
-                            src={p.url}
-                            alt={`Progress photo from ${p.taken_at}`}
-                            style={{ width: "100%", aspectRatio: "3 / 4", objectFit: "cover", borderRadius: 4, border: `1px solid ${GRID}`, display: "block" }}
-                          />
-                        ) : (
-                          <div style={{ width: "100%", aspectRatio: "3 / 4", borderRadius: 4, border: `1px solid ${GRID}`, background: PAPER }} />
-                        )}
-                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT, marginTop: 4, textAlign: "center" }}>
-                          {shortDayLabel(String(p.taken_at).slice(0, 10))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+              {photosSectionContent}
             </div>
           )}
 
-          {configTab === "foodMaterials" && (
+          {!isManagedClient && configTab === "foodMaterials" && (
             <div style={panelStyle}>
               <SectionTitle>Create a plan</SectionTitle>
               <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 10 }}>
@@ -3615,7 +3718,7 @@ export default function CalorieTrackerApp() {
             </div>
           )}
 
-          {configTab === "foodListConfig" && (
+          {!isManagedClient && configTab === "foodListConfig" && (
             <div style={panelStyle}>
               <SectionTitle>Configure your food list</SectionTitle>
               <div
@@ -5663,6 +5766,44 @@ export default function CalorieTrackerApp() {
                         <div style={labelStyle}>Plan to</div>
                         <div style={{ fontSize: 13 }}>{clientDetail.dateTo || "—"}</div>
                       </div>
+                    </div>
+
+                    <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
+                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                        Client-reported info
+                      </div>
+
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
+                        <div>
+                          <div style={labelStyle}>Date of birth</div>
+                          <div style={{ fontSize: 13 }}>{clientDetail.dateOfBirth || "—"}</div>
+                        </div>
+                        <div>
+                          <div style={labelStyle}>Age</div>
+                          <div style={{ fontSize: 13 }}>{clientDetail.age !== null && clientDetail.age !== undefined ? clientDetail.age : "—"}</div>
+                        </div>
+                      </div>
+
+                      <div style={{ marginBottom: 16 }}>
+                        <div style={labelStyle}>Health notes</div>
+                        <div style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{clientDetail.healthNotes || "None reported"}</div>
+                      </div>
+
+                      <div style={labelStyle}>Latest body measurements</div>
+                      {clientDetail.latestMeasurement ? (
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 6 }}>
+                          {MEASUREMENT_FIELDS.map((f) => (
+                            <div key={f.key} style={{ fontSize: 12.5 }}>
+                              <span style={{ color: INK_SOFT }}>{f.label}:</span>{" "}
+                              {clientDetail.latestMeasurement[f.key] !== null && clientDetail.latestMeasurement[f.key] !== undefined
+                                ? `${clientDetail.latestMeasurement[f.key]}cm`
+                                : "—"}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 4 }}>No measurements logged yet.</div>
+                      )}
                     </div>
 
                     <div style={{ display: "flex", gap: 10 }}>

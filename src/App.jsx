@@ -39,6 +39,15 @@ const RATES = [
 const MEALS = ["Breakfast", "Lunch", "Dinner", "Snack", "Before training", "After training"];
 const COURSES = ["Main", "Side1", "Side2", "Drink", "Dessert"];
 
+const MEASUREMENT_FIELDS = [
+  { key: "neck", label: "Neck" },
+  { key: "waist", label: "Waist" },
+  { key: "shoulder", label: "Shoulder" },
+  { key: "chest", label: "Chest" },
+  { key: "abdomen", label: "Abdomen" },
+  { key: "thighs", label: "Thighs" },
+];
+
 function draftKey(userId) {
   return `calorie-tracker-draft-${userId}`;
 }
@@ -111,6 +120,23 @@ function addDaysStr(s, days) {
 
 function daysBetweenStr(a, b) {
   return Math.round((parseDateStr(b) - parseDateStr(a)) / 86400000);
+}
+
+// Whole years between a "YYYY-MM-DD" date of birth and today, done in UTC
+// for the same DST-safety reason as the other calendar-date helpers above.
+function calcAgeFromDOB(dobStr) {
+  if (!dobStr) return null;
+
+  const dob = parseDateStr(dobStr);
+  const now = parseDateStr(todayStr());
+
+  let age = now.getUTCFullYear() - dob.getUTCFullYear();
+  const monthDiff = now.getUTCMonth() - dob.getUTCMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && now.getUTCDate() < dob.getUTCDate())) {
+    age -= 1;
+  }
+
+  return age;
 }
 
 const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -540,7 +566,19 @@ export default function CalorieTrackerApp() {
   const [chatSendError, setChatSendError] = useState(null);
   const [chatUnreadByClient, setChatUnreadByClient] = useState({});
 
-  const [profile, setProfile] = useState({ sex: "male", age: 30, weightKg: 75, heightCm: 175, activity: "moderate" });
+  const [profile, setProfile] = useState({ sex: "male", age: 30, dateOfBirth: "", healthNotes: "", weightKg: 75, heightCm: 175, activity: "moderate" });
+
+  const [measurements, setMeasurements] = useState([]);
+  const [newMeasurement, setNewMeasurement] = useState({ date: todayStr(), neck: "", waist: "", shoulder: "", chest: "", abdomen: "", thighs: "" });
+  const [measurementSaving, setMeasurementSaving] = useState(false);
+  const [measurementError, setMeasurementError] = useState(null);
+
+  const [photos, setPhotos] = useState([]);
+  const [newPhotoDate, setNewPhotoDate] = useState(todayStr());
+  const [photoFile, setPhotoFile] = useState(null);
+  const photoFileInputRef = useRef(null);
+  const [photoUploading, setPhotoUploading] = useState(false);
+  const [photoError, setPhotoError] = useState(null);
   const [goal, setGoal] = useState({ type: "maintain", rate: "moderate" });
   const [planOverride, setPlanOverride] = useState(null);
   const [foods, setFoods] = useState([]);
@@ -751,22 +789,31 @@ export default function CalorieTrackerApp() {
         }
         setOwnPlanStatus(ownPlanStatusValue);
 
-        const [personalFoodsRes, planFoodsRes, logsRes] = await Promise.all([
+        const [personalFoodsRes, planFoodsRes, logsRes, measurementsRes, photosRes] = await Promise.all([
           supabase.from("food_list").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
           supabase.from("plan_foods").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
           supabase.from("meal_logs").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
+          supabase.from("body_measurements").select("*").eq("user_id", userId).order("date", { ascending: false }),
+          supabase.from("progress_photos").select("*").eq("user_id", userId).order("taken_at", { ascending: false }),
         ]);
 
         if (personalFoodsRes.error) throw personalFoodsRes.error;
         if (planFoodsRes.error) throw planFoodsRes.error;
         if (logsRes.error) throw logsRes.error;
+        if (measurementsRes.error) throw measurementsRes.error;
+        if (photosRes.error) throw photosRes.error;
 
         const p = profileRow;
 
         if (p) {
+          const dob = p.date_of_birth || "";
+          const dobAge = calcAgeFromDOB(dob);
+
           setProfile({
             sex: p.sex || "male",
-            age: p.age ?? 30,
+            age: dobAge !== null ? dobAge : (p.age ?? 30),
+            dateOfBirth: dob,
+            healthNotes: p.health_notes || "",
             weightKg: p.weight_kg ?? 75,
             heightCm: p.height_cm ?? 175,
             activity: p.activity || "moderate",
@@ -849,6 +896,25 @@ export default function CalorieTrackerApp() {
         });
         setLogs(logsByDate);
 
+        setMeasurements(measurementsRes.data || []);
+
+        const photoRows = photosRes.data || [];
+        if (photoRows.length > 0) {
+          const { data: signedUrls, error: signedUrlErr } = await supabase.storage
+            .from("progress-photos")
+            .createSignedUrls(photoRows.map((row) => row.photo_path), 3600);
+          if (signedUrlErr) console.error("Couldn't create signed photo URLs:", signedUrlErr);
+
+          const urlByPath = {};
+          (signedUrls || []).forEach((s) => {
+            if (s.signedUrl) urlByPath[s.path] = s.signedUrl;
+          });
+
+          setPhotos(photoRows.map((row) => ({ ...row, url: urlByPath[row.photo_path] || null })));
+        } else {
+          setPhotos([]);
+        }
+
         if (userInfoRow && !userInfoRow.first_login_at) {
           const { error: firstLoginErr } = await supabase
             .from("user_info")
@@ -891,6 +957,8 @@ export default function CalorieTrackerApp() {
           .update({
             sex: p.sex,
             age: Number(p.age) || null,
+            date_of_birth: p.dateOfBirth || null,
+            health_notes: p.healthNotes || null,
             weight_kg: Number(p.weightKg) || null,
             height_cm: Number(p.heightCm) || null,
             activity: p.activity,
@@ -1204,6 +1272,77 @@ export default function CalorieTrackerApp() {
       setSetupSavedFlash(true);
       setTimeout(() => setSetupSavedFlash(false), 2500);
       if (session && session.user) clearDraft(session.user.id);
+    }
+  }
+
+  function numOrNull(v) {
+    return v !== "" && v !== null && v !== undefined ? Number(v) : null;
+  }
+
+  async function addMeasurement() {
+    if (!session || !session.user) return;
+    const userId = session.user.id;
+
+    setMeasurementSaving(true);
+    setMeasurementError(null);
+
+    try {
+      const payload = {
+        user_id: userId,
+        date: newMeasurement.date || todayStr(),
+        neck: numOrNull(newMeasurement.neck),
+        waist: numOrNull(newMeasurement.waist),
+        shoulder: numOrNull(newMeasurement.shoulder),
+        chest: numOrNull(newMeasurement.chest),
+        abdomen: numOrNull(newMeasurement.abdomen),
+        thighs: numOrNull(newMeasurement.thighs),
+      };
+
+      const { data, error } = await supabase.from("body_measurements").insert(payload).select().single();
+      if (error) throw error;
+
+      setMeasurements((prev) => [data, ...prev].sort((a, b) => (a.date < b.date ? 1 : -1)));
+      setNewMeasurement({ date: todayStr(), neck: "", waist: "", shoulder: "", chest: "", abdomen: "", thighs: "" });
+    } catch (err) {
+      setMeasurementError(err && err.message ? err.message : "Couldn't save that measurement.");
+    } finally {
+      setMeasurementSaving(false);
+    }
+  }
+
+  async function uploadProgressPhoto() {
+    if (!session || !session.user || !photoFile) return;
+    const userId = session.user.id;
+
+    setPhotoUploading(true);
+    setPhotoError(null);
+
+    try {
+      const path = `${userId}/${Date.now()}-${photoFile.name}`;
+
+      const { error: uploadErr } = await supabase.storage.from("progress-photos").upload(path, photoFile);
+      if (uploadErr) throw uploadErr;
+
+      const takenAt = newPhotoDate || todayStr();
+      const { data, error: insertErr } = await supabase
+        .from("progress_photos")
+        .insert({ user_id: userId, taken_at: takenAt, photo_path: path })
+        .select()
+        .single();
+      if (insertErr) throw insertErr;
+
+      const { data: signedData, error: signedErr } = await supabase.storage
+        .from("progress-photos")
+        .createSignedUrl(path, 3600);
+      if (signedErr) console.error("Couldn't create signed photo URL:", signedErr);
+
+      setPhotos((prev) => [{ ...data, url: signedData?.signedUrl || null }, ...prev].sort((a, b) => (a.taken_at < b.taken_at ? 1 : -1)));
+      setPhotoFile(null);
+      if (photoFileInputRef.current) photoFileInputRef.current.value = "";
+    } catch (err) {
+      setPhotoError(err && err.message ? err.message : "Couldn't upload that photo.");
+    } finally {
+      setPhotoUploading(false);
     }
   }
 
@@ -2852,6 +2991,8 @@ export default function CalorieTrackerApp() {
           <div style={{ display: "flex", gap: 4, marginBottom: 20, borderBottom: `1px solid ${GRID}`, paddingBottom: 12 }}>
             {[
               { id: "profile", label: "Profile & program" },
+              { id: "measurements", label: "Measurements" },
+              { id: "photos", label: "Progress photos" },
               { id: "foodListConfig", label: "Configure your food list" },
               { id: "foodMaterials", label: "Create a plan" },
               { id: "notifications", label: "Notifications" },
@@ -2889,8 +3030,33 @@ export default function CalorieTrackerApp() {
                 ))}
               </div>
 
-              <label style={labelStyle}>Age</label>
-              <input type="number" value={profile.age} onChange={(e) => setProfile({ ...profile, age: e.target.value })} style={inputStyle} />
+              <label style={labelStyle}>Date of birth (optional)</label>
+              <input
+                type="date"
+                value={profile.dateOfBirth || ""}
+                max={todayStr()}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  const computedAge = calcAgeFromDOB(val);
+                  setProfile({ ...profile, dateOfBirth: val, age: computedAge !== null ? computedAge : profile.age });
+                }}
+                style={inputStyle}
+              />
+              {profile.dateOfBirth && (
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT, marginTop: -8, marginBottom: 14 }}>
+                  Age: {profile.age} (calculated from date of birth)
+                </div>
+              )}
+
+              <label style={labelStyle}>Age{profile.dateOfBirth ? " (calculated)" : ""}</label>
+              <input
+                type="number"
+                value={profile.age}
+                onChange={(e) => setProfile({ ...profile, age: e.target.value })}
+                style={profile.dateOfBirth ? { ...inputStyle, background: GRID, color: INK_SOFT } : inputStyle}
+                readOnly={!!profile.dateOfBirth}
+                disabled={!!profile.dateOfBirth}
+              />
 
               <label style={labelStyle}>Weight (kg)</label>
               <input type="number" value={profile.weightKg} onChange={(e) => setProfile({ ...profile, weightKg: e.target.value })} style={inputStyle} />
@@ -2904,6 +3070,15 @@ export default function CalorieTrackerApp() {
                   <option key={a.id} value={a.id}>{a.label}</option>
                 ))}
               </select>
+
+              <label style={labelStyle}>Health issues or conditions (optional)</label>
+              <textarea
+                value={profile.healthNotes || ""}
+                onChange={(e) => setProfile({ ...profile, healthNotes: e.target.value })}
+                placeholder="e.g. knee injury, hypertension, food allergies…"
+                rows={3}
+                style={{ ...inputStyle, resize: "vertical", fontFamily: "'IBM Plex Mono', monospace" }}
+              />
 
               <label style={labelStyle}>Goal</label>
               <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
@@ -3022,6 +3197,139 @@ export default function CalorieTrackerApp() {
                   {saveError}
                 </div>
               )}
+            </div>
+          )}
+
+          {configTab === "measurements" && (
+            <div style={panelStyle}>
+              <SectionTitle>Measurements</SectionTitle>
+
+              <label style={labelStyle}>Date</label>
+              <input
+                type="date"
+                value={newMeasurement.date}
+                max={todayStr()}
+                onChange={(e) => setNewMeasurement({ ...newMeasurement, date: e.target.value })}
+                style={inputStyle}
+              />
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                {MEASUREMENT_FIELDS.map((f) => (
+                  <div key={f.key}>
+                    <label style={labelStyle}>{f.label} (cm)</label>
+                    <input
+                      type="number"
+                      value={newMeasurement[f.key]}
+                      onChange={(e) => setNewMeasurement({ ...newMeasurement, [f.key]: e.target.value })}
+                      style={{ ...inputStyle, marginBottom: 0 }}
+                    />
+                  </div>
+                ))}
+              </div>
+
+              <button
+                onClick={addMeasurement}
+                disabled={measurementSaving}
+                style={{ ...primaryButtonStyle, marginTop: 14, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
+              >
+                <Plus size={14} strokeWidth={2.5} />
+                {measurementSaving ? "Saving…" : "Add measurement"}
+              </button>
+              {measurementError && (
+                <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                  {measurementError}
+                </div>
+              )}
+
+              <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 18 }}>
+                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                  Past entries
+                </div>
+
+                {measurements.length === 0 ? (
+                  <div style={{ fontSize: 12, color: INK_SOFT }}>No measurements logged yet.</div>
+                ) : (
+                  measurements.map((m) => (
+                    <div key={m.id} style={{ padding: "8px 0", borderBottom: `1px solid ${GRID}` }}>
+                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 12.5, fontWeight: 600, marginBottom: 3 }}>
+                        {shortDayLabel(String(m.date).slice(0, 10))}
+                      </div>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT }}>
+                        {MEASUREMENT_FIELDS.filter((f) => m[f.key] !== null && m[f.key] !== undefined)
+                          .map((f) => `${f.label} ${m[f.key]}cm`)
+                          .join(" · ") || "No values recorded"}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {configTab === "photos" && (
+            <div style={panelStyle}>
+              <SectionTitle>Progress photos</SectionTitle>
+
+              <label style={labelStyle}>Date</label>
+              <input
+                type="date"
+                value={newPhotoDate}
+                max={todayStr()}
+                onChange={(e) => setNewPhotoDate(e.target.value)}
+                style={inputStyle}
+              />
+
+              <label style={labelStyle}>Photo</label>
+              <input
+                type="file"
+                accept="image/*"
+                ref={photoFileInputRef}
+                onChange={(e) => setPhotoFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)}
+                style={{ ...inputStyle, padding: "6px 0" }}
+              />
+
+              <button
+                onClick={uploadProgressPhoto}
+                disabled={photoUploading || !photoFile}
+                style={{ ...primaryButtonStyle, marginTop: 4, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
+              >
+                <Save size={14} strokeWidth={2.5} />
+                {photoUploading ? "Uploading…" : "Upload photo"}
+              </button>
+              {photoError && (
+                <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                  {photoError}
+                </div>
+              )}
+
+              <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 18 }}>
+                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                  Past photos
+                </div>
+
+                {photos.length === 0 ? (
+                  <div style={{ fontSize: 12, color: INK_SOFT }}>No progress photos yet.</div>
+                ) : (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 12 }}>
+                    {photos.map((p) => (
+                      <div key={p.id}>
+                        {p.url ? (
+                          <img
+                            src={p.url}
+                            alt={`Progress photo from ${p.taken_at}`}
+                            style={{ width: "100%", aspectRatio: "3 / 4", objectFit: "cover", borderRadius: 4, border: `1px solid ${GRID}`, display: "block" }}
+                          />
+                        ) : (
+                          <div style={{ width: "100%", aspectRatio: "3 / 4", borderRadius: 4, border: `1px solid ${GRID}`, background: PAPER }} />
+                        )}
+                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT, marginTop: 4, textAlign: "center" }}>
+                          {shortDayLabel(String(p.taken_at).slice(0, 10))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

@@ -5852,8 +5852,12 @@ function formatChatTime(isoString) {
   return isToday ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
 }
 
+const CHAT_INPUT_MIN_HEIGHT = 38;
+const CHAT_INPUT_MAX_HEIGHT = 110; // ~4-5 lines before internal scrolling kicks in
+
 function ChatThread({ messages, loading, error, currentUserId, headerLabel, input, onInputChange, onSend, sending, sendError }) {
   const scrollRef = useRef(null);
+  const textareaRef = useRef(null);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -5861,9 +5865,25 @@ function ChatThread({ messages, loading, error, currentUserId, headerLabel, inpu
     }
   }, [messages]);
 
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, CHAT_INPUT_MAX_HEIGHT) + "px";
+  }, [input]);
+
   function handleSubmit(e) {
     e.preventDefault();
     onSend();
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (!sending && input.trim()) {
+        onSend();
+      }
+    }
   }
 
   return (
@@ -5937,13 +5957,24 @@ function ChatThread({ messages, loading, error, currentUserId, headerLabel, inpu
         </div>
       )}
 
-      <form onSubmit={handleSubmit} style={{ display: "flex", gap: 8 }}>
-        <input
-          type="text"
+      <form onSubmit={handleSubmit} style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+        <textarea
+          ref={textareaRef}
           placeholder="Type a message…"
           value={input}
           onChange={(e) => onInputChange(e.target.value)}
-          style={{ ...inputStyle, flex: 1, marginBottom: 0 }}
+          onKeyDown={handleKeyDown}
+          rows={1}
+          style={{
+            ...inputStyle,
+            flex: 1,
+            marginBottom: 0,
+            resize: "none",
+            minHeight: CHAT_INPUT_MIN_HEIGHT,
+            maxHeight: CHAT_INPUT_MAX_HEIGHT,
+            overflowY: "auto",
+            lineHeight: 1.4,
+          }}
         />
         <button type="submit" style={{ ...primaryButtonStyle, width: "auto" }} disabled={sending || !input.trim()}>
           <Send size={14} strokeWidth={2.5} /> {sending ? "Sending…" : "Send"}

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X, Send } from "lucide-react";
+import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X, Send, User } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const INK = "#1B2430";
@@ -120,6 +120,14 @@ function addDaysStr(s, days) {
 
 function daysBetweenStr(a, b) {
   return Math.round((parseDateStr(b) - parseDateStr(a)) / 86400000);
+}
+
+function planDurationLabel(dateFrom, dateTo) {
+  if (!dateFrom || !dateTo) return "No plan yet";
+  const days = daysBetweenStr(dateFrom, dateTo);
+  if (days < 0) return "No plan yet";
+  const months = Math.max(1, Math.round(days / 30));
+  return `${months} month${months === 1 ? "" : "s"}`;
 }
 
 // Whole years between a "YYYY-MM-DD" date of birth and today, done in UTC
@@ -459,6 +467,97 @@ function MetricRow({ label, actual, target, unit }) {
   );
 }
 
+// Shared "cards per meal" layout used by the coach's Plan Builder, the
+// coach's Plan Details screen, and the client's My Plan screen — all three
+// display the same grouped meal/course/food structure, editable only in
+// the Plan Builder (via onRemoveFood).
+function MealPlanCards({ foods, onRemoveFood }) {
+  const mealsWithFood = MEALS.filter((mealName) => foods.some((f) => f.meal === mealName));
+  if (mealsWithFood.length === 0) return null;
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
+      {mealsWithFood.map((mealName) => {
+        const mealFoods = foods.filter((f) => f.meal === mealName);
+        const mealTotalCal = mealFoods.reduce((sum, f) => sum + f.calories, 0);
+
+        return (
+          <div key={mealName} style={{ background: PANEL, border: `1px solid ${GRID}`, borderRadius: 6, padding: 14 }}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "baseline",
+                padding: "4px 8px",
+                background: TEAL_SOFT,
+                borderRadius: 4,
+                marginBottom: 10,
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: "'Space Grotesk', sans-serif",
+                  fontSize: 14,
+                  fontWeight: 700,
+                  color: TEAL,
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                }}
+              >
+                {mealName}
+              </span>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
+                {mealTotalCal} kcal total
+              </span>
+            </div>
+
+            {COURSES.map((courseName) => {
+              const courseFoods = mealFoods.filter((f) => (f.course || "Main") === courseName);
+              if (courseFoods.length === 0) return null;
+
+              return (
+                <div key={courseName} style={{ marginBottom: 8 }}>
+                  <div
+                    style={{
+                      fontFamily: "'Space Grotesk', sans-serif",
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: GREEN,
+                      background: GREEN_SOFT,
+                      textTransform: "uppercase",
+                      letterSpacing: 0.5,
+                      padding: "2px 8px",
+                      borderRadius: 4,
+                      display: "inline-block",
+                    }}
+                  >
+                    {courseName}
+                  </div>
+                  {courseFoods.map((f) => (
+                    <div key={f.id} style={foodRowStyle}>
+                      <div>
+                        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
+                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                          {f.grams}g · {f.calories} kcal
+                        </div>
+                      </div>
+                      {onRemoveFood && (
+                        <button onClick={() => onRemoveFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
+                          <Trash2 size={14} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function CalorieTrackerApp() {
   const [session, setSession] = useState(undefined);
   const [authMode, setAuthMode] = useState("login");
@@ -491,8 +590,6 @@ export default function CalorieTrackerApp() {
   const [addClientPhoneCountryCode, setAddClientPhoneCountryCode] = useState("+20");
   const [addClientPhoneNumber, setAddClientPhoneNumber] = useState("");
   const [addClientPlanTypeId, setAddClientPlanTypeId] = useState("");
-  const [addClientDateFrom, setAddClientDateFrom] = useState("");
-  const [addClientDateTo, setAddClientDateTo] = useState("");
   const [addClientBusy, setAddClientBusy] = useState(false);
   const [addClientMessage, setAddClientMessage] = useState(null);
   const [createdClientCredentials, setCreatedClientCredentials] = useState(null);
@@ -537,6 +634,11 @@ export default function CalorieTrackerApp() {
   const [clientPlanDateFrom, setClientPlanDateFrom] = useState("");
   const [clientPlanDateTo, setClientPlanDateTo] = useState("");
   const [clientPlanStatus, setClientPlanStatus] = useState(null);
+  const [clientPlanSuggestedCalories, setClientPlanSuggestedCalories] = useState(null);
+  const [clientPlanTargetCalories, setClientPlanTargetCalories] = useState("");
+  const [clientPlanTargetProtein, setClientPlanTargetProtein] = useState("");
+  const [clientPlanTargetCarb, setClientPlanTargetCarb] = useState("");
+  const [clientPlanTargetFat, setClientPlanTargetFat] = useState("");
   const [newClientPlanFood, setNewClientPlanFood] = useState({ foodKey: "", grams: "", calories: "", meal: "Breakfast", course: "Main" });
   const [clientPlanAddError, setClientPlanAddError] = useState(null);
   const [clientPlanSaveBusy, setClientPlanSaveBusy] = useState(false);
@@ -568,6 +670,7 @@ export default function CalorieTrackerApp() {
 
   const [profile, setProfile] = useState({ sex: "male", age: 30, dateOfBirth: "", healthNotes: "", weightKg: 75, heightCm: 175, activity: "moderate" });
   const [coachOwnedInfo, setCoachOwnedInfo] = useState({ name: "", email: "", phone: "", planDateFrom: null, planDateTo: null, planTypeName: null });
+  const [coachSetPlanTargets, setCoachSetPlanTargets] = useState({ calories: null, protein: null, carb: null, fat: null });
 
   const [measurements, setMeasurements] = useState([]);
   const [newMeasurement, setNewMeasurement] = useState({ date: todayStr(), neck: "", waist: "", shoulder: "", chest: "", abdomen: "", thighs: "" });
@@ -580,6 +683,25 @@ export default function CalorieTrackerApp() {
   const photoFileInputRef = useRef(null);
   const [photoUploading, setPhotoUploading] = useState(false);
   const [photoError, setPhotoError] = useState(null);
+
+  const [accountEmail, setAccountEmail] = useState("");
+  const [avatarPath, setAvatarPath] = useState(null);
+  const [avatarUrl, setAvatarUrl] = useState(null);
+  const [avatarUploading, setAvatarUploading] = useState(false);
+  const [avatarError, setAvatarError] = useState(null);
+  const avatarFileInputRef = useRef(null);
+
+  const [languagePreference, setLanguagePreference] = useState("en");
+  const [languageSaving, setLanguageSaving] = useState(false);
+  const [languageFlash, setLanguageFlash] = useState(false);
+  const [languageError, setLanguageError] = useState(null);
+
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordSaving, setPasswordSaving] = useState(false);
+  const [passwordError, setPasswordError] = useState(null);
+  const [passwordFlash, setPasswordFlash] = useState(false);
+
   const [goal, setGoal] = useState({ type: "maintain", rate: "moderate" });
   const [planOverride, setPlanOverride] = useState(null);
   const [foods, setFoods] = useState([]);
@@ -768,7 +890,7 @@ export default function CalorieTrackerApp() {
 
         const { data: userInfoRow, error: userInfoErr } = await supabase
           .from("user_info")
-          .select("role_id, first_login_at, name, email, phone")
+          .select("role_id, first_login_at, name, email, phone, avatar_path, language_preference")
           .eq("id", userId)
           .maybeSingle();
 
@@ -776,6 +898,19 @@ export default function CalorieTrackerApp() {
         console.log("[roleId debug] raw userInfoRow:", userInfoRow);
 
         if (userInfoErr) throw userInfoErr;
+
+        setAccountEmail(userInfoRow?.email || "");
+        setLanguagePreference(userInfoRow?.language_preference || "en");
+        setAvatarPath(userInfoRow?.avatar_path || null);
+        if (userInfoRow?.avatar_path) {
+          const { data: avatarSigned, error: avatarSignedErr } = await supabase.storage
+            .from("avatars")
+            .createSignedUrl(userInfoRow.avatar_path, 3600);
+          if (avatarSignedErr) console.error("Couldn't create signed avatar URL:", avatarSignedErr);
+          setAvatarUrl(avatarSigned?.signedUrl || null);
+        } else {
+          setAvatarUrl(null);
+        }
 
         // A standalone user (no coach) has no client_profile row at all, so
         // their own plan stays effectively "active" by default. Only a
@@ -785,16 +920,23 @@ export default function CalorieTrackerApp() {
         let ownPlanDateFrom = null;
         let ownPlanDateTo = null;
         let ownPlanTypeName = null;
+        let ownPlanTargets = { calories: null, protein: null, carb: null, fat: null };
         try {
           const { data: selfClientProfileRow } = await supabase
             .from("client_profile")
-            .select("plan_status, date_from, date_to, plan_type_id")
+            .select("plan_status, date_from, date_to, plan_type_id, target_calories, target_protein_g, target_carb_g, target_fat_g")
             .eq("user_id", userId)
             .maybeSingle();
           if (selfClientProfileRow) {
             if (selfClientProfileRow.plan_status) ownPlanStatusValue = selfClientProfileRow.plan_status;
             ownPlanDateFrom = selfClientProfileRow.date_from || null;
             ownPlanDateTo = selfClientProfileRow.date_to || null;
+            ownPlanTargets = {
+              calories: selfClientProfileRow.target_calories ?? null,
+              protein: selfClientProfileRow.target_protein_g ?? null,
+              carb: selfClientProfileRow.target_carb_g ?? null,
+              fat: selfClientProfileRow.target_fat_g ?? null,
+            };
             if (selfClientProfileRow.plan_type_id) {
               const { data: planTypeRow } = await supabase
                 .from("coach_plan_types")
@@ -808,6 +950,7 @@ export default function CalorieTrackerApp() {
           // No client_profile row / not a coach's client — stays "active".
         }
         setOwnPlanStatus(ownPlanStatusValue);
+        setCoachSetPlanTargets(ownPlanTargets);
         setCoachOwnedInfo({
           name: userInfoRow?.name || "",
           email: userInfoRow?.email || "",
@@ -1375,6 +1518,87 @@ export default function CalorieTrackerApp() {
       setPhotoError(err && err.message ? err.message : "Couldn't upload that photo.");
     } finally {
       setPhotoUploading(false);
+    }
+  }
+
+  async function uploadAvatar(file) {
+    if (!session || !session.user || !file) return;
+    const userId = session.user.id;
+
+    setAvatarUploading(true);
+    setAvatarError(null);
+
+    try {
+      const extMatch = /\.([a-zA-Z0-9]+)$/.exec(file.name);
+      const ext = extMatch ? extMatch[1].toLowerCase() : "jpg";
+      const path = `${userId}/avatar.${ext}`;
+
+      const { error: uploadErr } = await supabase.storage.from("avatars").upload(path, file, { upsert: true });
+      if (uploadErr) throw uploadErr;
+
+      const { error: updateErr } = await supabase.from("user_info").update({ avatar_path: path }).eq("id", userId);
+      if (updateErr) throw updateErr;
+
+      const { data: signedData, error: signedErr } = await supabase.storage
+        .from("avatars")
+        .createSignedUrl(path, 3600);
+      if (signedErr) console.error("Couldn't create signed avatar URL:", signedErr);
+
+      setAvatarPath(path);
+      setAvatarUrl(signedData?.signedUrl || null);
+      if (avatarFileInputRef.current) avatarFileInputRef.current.value = "";
+    } catch (err) {
+      setAvatarError(err && err.message ? err.message : "Couldn't upload that photo.");
+    } finally {
+      setAvatarUploading(false);
+    }
+  }
+
+  async function saveLanguagePreference(next) {
+    if (!session || !session.user) return;
+
+    setLanguagePreference(next);
+    setLanguageSaving(true);
+    setLanguageError(null);
+
+    try {
+      const { error } = await supabase.from("user_info").update({ language_preference: next }).eq("id", session.user.id);
+      if (error) throw error;
+      setLanguageFlash(true);
+      setTimeout(() => setLanguageFlash(false), 2500);
+    } catch (err) {
+      setLanguageError(err && err.message ? err.message : "Couldn't save your language preference.");
+    } finally {
+      setLanguageSaving(false);
+    }
+  }
+
+  async function submitChangePassword() {
+    setPasswordError(null);
+
+    if (!newPassword || newPassword.length < 6) {
+      setPasswordError("Password must be at least 6 characters.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError("Passwords don't match.");
+      return;
+    }
+
+    setPasswordSaving(true);
+
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) throw error;
+
+      setNewPassword("");
+      setConfirmPassword("");
+      setPasswordFlash(true);
+      setTimeout(() => setPasswordFlash(false), 2500);
+    } catch (err) {
+      setPasswordError(err && err.message ? err.message : "Couldn't change your password.");
+    } finally {
+      setPasswordSaving(false);
     }
   }
 
@@ -2078,8 +2302,6 @@ export default function CalorieTrackerApp() {
     setAddClientPhoneCountryCode("+20");
     setAddClientPhoneNumber("");
     setAddClientPlanTypeId("");
-    setAddClientDateFrom("");
-    setAddClientDateTo("");
     setAddClientMessage(null);
     setCreatedClientCredentials(null);
     setEditingClientId(null);
@@ -2093,8 +2315,6 @@ export default function CalorieTrackerApp() {
     setAddClientPhoneCountryCode(code);
     setAddClientPhoneNumber(number);
     setAddClientPlanTypeId(client.planTypeId || "");
-    setAddClientDateFrom(client.dateFrom || "");
-    setAddClientDateTo(client.dateTo || "");
     setAddClientMessage(null);
     setCreatedClientCredentials(null);
     setEditingClientId(client.id);
@@ -2130,8 +2350,6 @@ export default function CalorieTrackerApp() {
           name,
           phone: combinedPhone,
           plan_type_id: addClientPlanTypeId || null,
-          date_from: addClientDateFrom || null,
-          date_to: addClientDateTo || null,
         },
       });
       if (error) throw error;
@@ -2226,8 +2444,6 @@ export default function CalorieTrackerApp() {
           name,
           phone: combinedPhone,
           plan_type_id: addClientPlanTypeId || null,
-          date_from: addClientDateFrom || null,
-          date_to: addClientDateTo || null,
         },
       });
       if (error) throw error;
@@ -2242,8 +2458,6 @@ export default function CalorieTrackerApp() {
         setAddClientPhoneCountryCode("+20");
         setAddClientPhoneNumber("");
         setAddClientPlanTypeId("");
-        setAddClientDateFrom("");
-        setAddClientDateTo("");
         setClientsView("grid");
         loadClients();
       } else {
@@ -2321,15 +2535,26 @@ export default function CalorieTrackerApp() {
     setNewClientPlanFood({ foodKey: "", grams: "", calories: "", meal: "Breakfast", course: "Main" });
 
     try {
-      const [planFoodsRes, profileRes] = await Promise.all([
+      const [planFoodsRes, profileRes, ownProfileRes] = await Promise.all([
         supabase.from("plan_foods").select("*").eq("user_id", clientId).order("created_at", { ascending: true }),
-        supabase.from("client_profile").select("date_from, date_to, plan_status").eq("user_id", clientId).maybeSingle(),
+        supabase
+          .from("client_profile")
+          .select("date_from, date_to, plan_status, target_calories, target_protein_g, target_carb_g, target_fat_g")
+          .eq("user_id", clientId)
+          .maybeSingle(),
+        supabase
+          .from("profile")
+          .select("sex, age, weight_kg, height_cm, activity, goal_type, goal_rate")
+          .eq("user_id", clientId)
+          .maybeSingle(),
       ]);
       if (planFoodsRes.error) throw planFoodsRes.error;
       if (profileRes.error) throw profileRes.error;
+      if (ownProfileRes.error) throw ownProfileRes.error;
 
       const rows = planFoodsRes.data || [];
       const clientProfile = profileRes.data || {};
+      const ownProfile = ownProfileRes.data || {};
 
       setClientPlanFoods(
         rows.map((f) => ({
@@ -2351,6 +2576,39 @@ export default function CalorieTrackerApp() {
         setClientPlanDateFrom(clientProfile.date_from || "");
         setClientPlanDateTo(clientProfile.date_to || "");
       }
+
+      const suggested = computePlan(
+        {
+          sex: ownProfile.sex || "male",
+          age: ownProfile.age,
+          weightKg: ownProfile.weight_kg,
+          heightCm: ownProfile.height_cm,
+          activity: ownProfile.activity || "moderate",
+        },
+        { type: ownProfile.goal_type || "maintain", rate: ownProfile.goal_rate }
+      );
+      setClientPlanSuggestedCalories(suggested.calories);
+
+      setClientPlanTargetCalories(
+        clientProfile.target_calories !== null && clientProfile.target_calories !== undefined
+          ? String(clientProfile.target_calories)
+          : String(suggested.calories)
+      );
+      setClientPlanTargetProtein(
+        clientProfile.target_protein_g !== null && clientProfile.target_protein_g !== undefined
+          ? String(clientProfile.target_protein_g)
+          : ""
+      );
+      setClientPlanTargetCarb(
+        clientProfile.target_carb_g !== null && clientProfile.target_carb_g !== undefined
+          ? String(clientProfile.target_carb_g)
+          : ""
+      );
+      setClientPlanTargetFat(
+        clientProfile.target_fat_g !== null && clientProfile.target_fat_g !== undefined
+          ? String(clientProfile.target_fat_g)
+          : ""
+      );
     } catch (err) {
       setClientPlanError(err && err.message ? err.message : "Couldn't load this client's plan.");
     } finally {
@@ -2493,6 +2751,10 @@ export default function CalorieTrackerApp() {
           date_from: clientPlanDateFrom || null,
           date_to: clientPlanDateTo || null,
           plan_status: "draft",
+          target_calories: clientPlanTargetCalories !== "" ? Number(clientPlanTargetCalories) : null,
+          target_protein_g: clientPlanTargetProtein !== "" ? Number(clientPlanTargetProtein) : null,
+          target_carb_g: clientPlanTargetCarb !== "" ? Number(clientPlanTargetCarb) : null,
+          target_fat_g: clientPlanTargetFat !== "" ? Number(clientPlanTargetFat) : null,
         })
         .eq("user_id", planBuilderClientId);
       if (profileErr) throw profileErr;
@@ -3239,6 +3501,127 @@ export default function CalorieTrackerApp() {
     await Promise.all(tasks);
   }
 
+  const accountScreenContent = (
+    <div style={panelStyle}>
+      <SectionTitle>Account</SectionTitle>
+
+      <div style={{ marginBottom: 20 }}>
+        <label style={labelStyle}>Email</label>
+        <div style={{ fontSize: 13 }}>{accountEmail || "—"}</div>
+      </div>
+
+      <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+          Profile picture
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 10 }}>
+          {avatarUrl ? (
+            <img
+              src={avatarUrl}
+              alt="Avatar"
+              style={{ width: 72, height: 72, borderRadius: "50%", objectFit: "cover", border: `1px solid ${GRID}` }}
+            />
+          ) : (
+            <div
+              style={{
+                width: 72,
+                height: 72,
+                borderRadius: "50%",
+                background: PAPER,
+                border: `1px solid ${GRID}`,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: INK_SOFT,
+              }}
+            >
+              <User size={28} />
+            </div>
+          )}
+          <div>
+            <input
+              type="file"
+              accept="image/*"
+              ref={avatarFileInputRef}
+              onChange={(e) => {
+                const file = e.target.files && e.target.files[0] ? e.target.files[0] : null;
+                if (file) uploadAvatar(file);
+              }}
+              style={{ fontSize: 12 }}
+              disabled={avatarUploading}
+            />
+            {avatarUploading && <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 4 }}>Uploading…</div>}
+          </div>
+        </div>
+        {avatarError && (
+          <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+            {avatarError}
+          </div>
+        )}
+      </div>
+
+      <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
+        <label style={labelStyle}>Language</label>
+        <select
+          value={languagePreference}
+          onChange={(e) => saveLanguagePreference(e.target.value)}
+          style={{ ...inputStyle, width: 220 }}
+          disabled={languageSaving}
+        >
+          <option value="en">English</option>
+          <option value="ar">Arabic</option>
+        </select>
+        {languageFlash && <div style={{ fontSize: 11, color: GREEN, marginTop: 4 }}>Saved</div>}
+        {languageError && (
+          <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+            {languageError}
+          </div>
+        )}
+      </div>
+
+      <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+          Change password
+        </div>
+        <label style={labelStyle}>New password</label>
+        <input
+          type="password"
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          style={inputStyle}
+          disabled={passwordSaving}
+        />
+        <label style={labelStyle}>Confirm password</label>
+        <input
+          type="password"
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          style={inputStyle}
+          disabled={passwordSaving}
+        />
+        <button
+          onClick={submitChangePassword}
+          disabled={passwordSaving}
+          style={{ ...primaryButtonStyle, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
+        >
+          {passwordFlash ? <Check size={14} strokeWidth={2.5} /> : <Save size={14} strokeWidth={2.5} />}
+          {passwordSaving ? "Saving…" : passwordFlash ? "Password changed" : "Change password"}
+        </button>
+        {passwordError && (
+          <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+            {passwordError}
+          </div>
+        )}
+      </div>
+
+      <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16 }}>
+        <button onClick={handleLogout} style={secondaryButtonStyle}>
+          Log out
+        </button>
+      </div>
+    </div>
+  );
+
   return (
     <div style={{ fontFamily: "'Inter', sans-serif", background: PAPER, color: INK, padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
       <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -3262,6 +3645,7 @@ export default function CalorieTrackerApp() {
             {view === "administration" && "Administration"}
             {view === "chat" && "Chat"}
             {view === "notifications" && "Notifications"}
+            {view === "account" && "Account"}
             {view === "client-detail" && "Client details"}
           </h1>
         </div>
@@ -3321,6 +3705,7 @@ export default function CalorieTrackerApp() {
           { id: "history", label: "History" },
           ...(roleId === 3 ? [{ id: "chat", label: "Chat" }] : []),
           ...(isManagedClient ? [{ id: "notifications", label: "Notifications" }] : []),
+          { id: "account", label: "Account" },
         ].map((t) => (
           <button
             key={t.id}
@@ -3675,86 +4060,20 @@ export default function CalorieTrackerApp() {
                         fontWeight: 700,
                       }}
                     >
-                      Daily target: {effectivePlan.calories} kcal · P{effectivePlan.protein} C{effectivePlan.carbs} F{effectivePlan.fat}
+                      Daily target: {coachSetPlanTargets.calories ?? effectivePlan.calories} kcal
+                      {" · "}
+                      {coachSetPlanTargets.protein ?? effectivePlan.protein}g protein
+                      {" · "}
+                      {coachSetPlanTargets.carb ?? effectivePlan.carbs}g carbs
+                      {" · "}
+                      {coachSetPlanTargets.fat ?? effectivePlan.fat}g fat
                     </span>
                   </div>
 
                   {foods.length === 0 ? (
                     <div style={{ fontSize: 12, color: INK_SOFT }}>Your coach hasn't added any foods to your plan yet.</div>
                   ) : (
-                    MEALS.map((mealName) => {
-                      const mealFoods = foods.filter((f) => f.meal === mealName);
-                      if (mealFoods.length === 0) return null;
-
-                      const mealTotalCal = mealFoods.reduce((sum, f) => sum + f.calories, 0);
-
-                      return (
-                        <div key={mealName} style={{ marginBottom: 16 }}>
-                          <div
-                            style={{
-                              display: "flex",
-                              justifyContent: "space-between",
-                              alignItems: "baseline",
-                              padding: "4px 8px",
-                              background: TEAL_SOFT,
-                              borderRadius: 4,
-                              marginBottom: 4,
-                            }}
-                          >
-                            <span
-                              style={{
-                                fontFamily: "'Space Grotesk', sans-serif",
-                                fontSize: 14,
-                                fontWeight: 700,
-                                color: TEAL,
-                                textTransform: "uppercase",
-                                letterSpacing: 0.5,
-                              }}
-                            >
-                              {mealName}
-                            </span>
-                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
-                              {mealTotalCal} kcal total
-                            </span>
-                          </div>
-                          {COURSES.map((courseName) => {
-                            const courseFoods = mealFoods.filter((f) => (f.course || "Main") === courseName);
-                            if (courseFoods.length === 0) return null;
-
-                            return (
-                              <div key={courseName} style={{ marginBottom: 8 }}>
-                                <div
-                                  style={{
-                                    fontFamily: "'Space Grotesk', sans-serif",
-                                    fontSize: 11,
-                                    fontWeight: 700,
-                                    color: GREEN,
-                                    background: GREEN_SOFT,
-                                    textTransform: "uppercase",
-                                    letterSpacing: 0.5,
-                                    padding: "2px 8px",
-                                    borderRadius: 4,
-                                    display: "inline-block",
-                                  }}
-                                >
-                                  {courseName}
-                                </div>
-                                {courseFoods.map((f) => (
-                                  <div key={f.id} style={foodRowStyle}>
-                                    <div>
-                                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
-                                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                                        {f.grams}g · {f.calories} kcal
-                                      </div>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      );
-                    })
+                    <MealPlanCards foods={foods} />
                   )}
                 </>
               )}
@@ -4104,6 +4423,8 @@ export default function CalorieTrackerApp() {
         </div>
       )}
 
+      {view === "account" && accountScreenContent}
+
       {view === "log" && (
         <>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
@@ -4351,9 +4672,6 @@ export default function CalorieTrackerApp() {
           <div style={panelStyle}>
             <SectionTitle>Today vs plan</SectionTitle>
             <MetricRow label="Calories" actual={dayTotals.calories} target={effectivePlan.calories} unit=" kcal" />
-            <MetricRow label="Protein" actual={dayTotals.protein} target={effectivePlan.protein} unit="g" />
-            <MetricRow label="Carbs" actual={dayTotals.carbs} target={effectivePlan.carbs} unit="g" />
-            <MetricRow label="Fat" actual={dayTotals.fat} target={effectivePlan.fat} unit="g" />
             <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 12, lineHeight: 1.5 }}>
               Green means within {TOLERANCE * 100}% of target. Red means over. Yellow means under.
             </div>
@@ -4707,6 +5025,7 @@ export default function CalorieTrackerApp() {
               { id: "administration", label: "Administration", icon: Settings },
               { id: "chat", label: "Chat", icon: MessageSquare },
               { id: "notifications", label: "Notifications", icon: Bell },
+              { id: "account", label: "Account", icon: User },
             ].map((t) => (
               <button
                 key={t.id}
@@ -4907,8 +5226,7 @@ export default function CalorieTrackerApp() {
                             <thead>
                               <tr>
                                 <th style={thStyle}>Client name</th>
-                                <th style={thStyle}>Plan from</th>
-                                <th style={thStyle}>Plan to</th>
+                                <th style={thStyle}>Plan duration</th>
                                 <th style={thStyle}>Status</th>
                                 <th style={thStyle}></th>
                               </tr>
@@ -4917,8 +5235,7 @@ export default function CalorieTrackerApp() {
                               {pagedClients.map((c) => (
                                 <tr key={c.id} style={{ borderTop: `1px solid ${GRID}` }}>
                                   <td style={tdStyle}>{c.name}</td>
-                                  <td style={tdStyle}>{c.dateFrom || "—"}</td>
-                                  <td style={tdStyle}>{c.dateTo || "—"}</td>
+                                  <td style={tdStyle}>{planDurationLabel(c.dateFrom, c.dateTo)}</td>
                                   <td style={tdStyle}>
                                     <span
                                       style={{
@@ -5015,29 +5332,6 @@ export default function CalorieTrackerApp() {
                         </option>
                       ))}
                     </select>
-
-                    <div style={{ display: "flex", gap: 12 }}>
-                      <div style={{ flex: 1 }}>
-                        <label style={labelStyle}>Plan from (optional)</label>
-                        <input
-                          type="date"
-                          value={addClientDateFrom}
-                          onChange={(e) => setAddClientDateFrom(e.target.value)}
-                          style={inputStyle}
-                          disabled={addClientBusy}
-                        />
-                      </div>
-                      <div style={{ flex: 1 }}>
-                        <label style={labelStyle}>Plan to (optional)</label>
-                        <input
-                          type="date"
-                          value={addClientDateTo}
-                          onChange={(e) => setAddClientDateTo(e.target.value)}
-                          style={inputStyle}
-                          disabled={addClientBusy}
-                        />
-                      </div>
-                    </div>
 
                     <label style={labelStyle}>Phone number (optional)</label>
                     <div style={{ display: "flex", gap: 8 }}>
@@ -5222,6 +5516,55 @@ export default function CalorieTrackerApp() {
                           <div style={{ marginBottom: 16 }} />
                         )}
 
+                        <div style={{ marginBottom: 6 }}>
+                          <label style={labelStyle}>Target calories</label>
+                          {clientPlanSuggestedCalories !== null && (
+                            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT, marginTop: -8, marginBottom: 8 }}>
+                              Suggested: {clientPlanSuggestedCalories.toLocaleString()} kcal (based on the client's profile)
+                            </div>
+                          )}
+                          <input
+                            type="number"
+                            placeholder="e.g. 2200"
+                            value={clientPlanTargetCalories}
+                            onChange={(e) => setClientPlanTargetCalories(e.target.value)}
+                            style={{ ...inputStyle, width: "50%" }}
+                          />
+                        </div>
+
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 16 }}>
+                          <div>
+                            <label style={labelStyle}>Protein (g)</label>
+                            <input
+                              type="number"
+                              placeholder="e.g. 150"
+                              value={clientPlanTargetProtein}
+                              onChange={(e) => setClientPlanTargetProtein(e.target.value)}
+                              style={{ ...inputStyle, marginBottom: 0 }}
+                            />
+                          </div>
+                          <div>
+                            <label style={labelStyle}>Carbs (g)</label>
+                            <input
+                              type="number"
+                              placeholder="e.g. 200"
+                              value={clientPlanTargetCarb}
+                              onChange={(e) => setClientPlanTargetCarb(e.target.value)}
+                              style={{ ...inputStyle, marginBottom: 0 }}
+                            />
+                          </div>
+                          <div>
+                            <label style={labelStyle}>Fat (g)</label>
+                            <input
+                              type="number"
+                              placeholder="e.g. 70"
+                              value={clientPlanTargetFat}
+                              onChange={(e) => setClientPlanTargetFat(e.target.value)}
+                              style={{ ...inputStyle, marginBottom: 0 }}
+                            />
+                          </div>
+                        </div>
+
                         <div style={{ marginBottom: 14 }}>
                           <label style={labelStyle}>Food name</label>
                           <select
@@ -5305,84 +5648,9 @@ export default function CalorieTrackerApp() {
                           )}
                         </div>
 
-                        <div style={{ maxHeight: 340, overflowY: "auto" }}>
+                        <div style={{ maxHeight: 480, overflowY: "auto" }}>
                           {clientPlanFoods.length === 0 && <div style={{ fontSize: 12, color: INK_SOFT }}>No foods added to this plan yet.</div>}
-                          {MEALS.map((mealName) => {
-                            const mealFoods = clientPlanFoods.filter((f) => f.meal === mealName);
-                            if (mealFoods.length === 0) return null;
-
-                            const mealTotalCal = mealFoods.reduce((sum, f) => sum + f.calories, 0);
-
-                            return (
-                              <div key={mealName} style={{ marginBottom: 16 }}>
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    justifyContent: "space-between",
-                                    alignItems: "baseline",
-                                    padding: "4px 8px",
-                                    background: TEAL_SOFT,
-                                    borderRadius: 4,
-                                    marginBottom: 4,
-                                  }}
-                                >
-                                  <span
-                                    style={{
-                                      fontFamily: "'Space Grotesk', sans-serif",
-                                      fontSize: 14,
-                                      fontWeight: 700,
-                                      color: TEAL,
-                                      textTransform: "uppercase",
-                                      letterSpacing: 0.5,
-                                    }}
-                                  >
-                                    {mealName}
-                                  </span>
-                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
-                                    {mealTotalCal} kcal total
-                                  </span>
-                                </div>
-                                {COURSES.map((courseName) => {
-                                  const courseFoods = mealFoods.filter((f) => (f.course || "Main") === courseName);
-                                  if (courseFoods.length === 0) return null;
-
-                                  return (
-                                    <div key={courseName} style={{ marginBottom: 8 }}>
-                                      <div
-                                        style={{
-                                          fontFamily: "'Space Grotesk', sans-serif",
-                                          fontSize: 11,
-                                          fontWeight: 700,
-                                          color: GREEN,
-                                          background: GREEN_SOFT,
-                                          textTransform: "uppercase",
-                                          letterSpacing: 0.5,
-                                          padding: "2px 8px",
-                                          borderRadius: 4,
-                                          display: "inline-block",
-                                        }}
-                                      >
-                                        {courseName}
-                                      </div>
-                                      {courseFoods.map((f) => (
-                                        <div key={f.id} style={foodRowStyle}>
-                                          <div>
-                                            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
-                                            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                                              {f.grams}g · {f.calories} kcal
-                                            </div>
-                                          </div>
-                                          <button onClick={() => removeClientPlanFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
-                                            <Trash2 size={14} />
-                                          </button>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            );
-                          })}
+                          <MealPlanCards foods={clientPlanFoods} onRemoveFood={removeClientPlanFood} />
                         </div>
 
                         <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 18, paddingTop: 14, borderTop: `1px solid ${GRID}` }}>
@@ -5448,83 +5716,11 @@ export default function CalorieTrackerApp() {
                           <PlanStatusBadge status={planDetailsStatus} />
                         </div>
 
-                        <div style={{ maxHeight: 340, overflowY: "auto", marginBottom: 18 }}>
+                        <div style={{ marginBottom: 18 }}>
                           {planDetailsFoods.length === 0 && (
                             <div style={{ fontSize: 12, color: INK_SOFT }}>No plan yet.</div>
                           )}
-                          {MEALS.map((mealName) => {
-                            const mealFoods = planDetailsFoods.filter((f) => f.meal === mealName);
-                            if (mealFoods.length === 0) return null;
-
-                            const mealTotalCal = mealFoods.reduce((sum, f) => sum + f.calories, 0);
-
-                            return (
-                              <div key={mealName} style={{ marginBottom: 16 }}>
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    justifyContent: "space-between",
-                                    alignItems: "baseline",
-                                    padding: "4px 8px",
-                                    background: TEAL_SOFT,
-                                    borderRadius: 4,
-                                    marginBottom: 4,
-                                  }}
-                                >
-                                  <span
-                                    style={{
-                                      fontFamily: "'Space Grotesk', sans-serif",
-                                      fontSize: 14,
-                                      fontWeight: 700,
-                                      color: TEAL,
-                                      textTransform: "uppercase",
-                                      letterSpacing: 0.5,
-                                    }}
-                                  >
-                                    {mealName}
-                                  </span>
-                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
-                                    {mealTotalCal} kcal total
-                                  </span>
-                                </div>
-                                {COURSES.map((courseName) => {
-                                  const courseFoods = mealFoods.filter((f) => (f.course || "Main") === courseName);
-                                  if (courseFoods.length === 0) return null;
-
-                                  return (
-                                    <div key={courseName} style={{ marginBottom: 8 }}>
-                                      <div
-                                        style={{
-                                          fontFamily: "'Space Grotesk', sans-serif",
-                                          fontSize: 11,
-                                          fontWeight: 700,
-                                          color: GREEN,
-                                          background: GREEN_SOFT,
-                                          textTransform: "uppercase",
-                                          letterSpacing: 0.5,
-                                          padding: "2px 8px",
-                                          borderRadius: 4,
-                                          display: "inline-block",
-                                        }}
-                                      >
-                                        {courseName}
-                                      </div>
-                                      {courseFoods.map((f) => (
-                                        <div key={f.id} style={foodRowStyle}>
-                                          <div>
-                                            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
-                                            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                                              {f.grams}g · {f.calories} kcal
-                                            </div>
-                                          </div>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            );
-                          })}
+                          <MealPlanCards foods={planDetailsFoods} />
                         </div>
 
                         {(() => {
@@ -5895,6 +6091,8 @@ export default function CalorieTrackerApp() {
                 <div style={{ fontSize: 12.5, color: INK_SOFT }}>Notifications screen — coming soon.</div>
               </div>
             )}
+
+            {view === "account" && accountScreenContent}
 
             {view === "client-detail" && (
               <div style={{ display: "grid", gap: 16 }}>

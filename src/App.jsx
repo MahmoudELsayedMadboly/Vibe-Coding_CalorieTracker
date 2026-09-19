@@ -122,6 +122,14 @@ function daysBetweenStr(a, b) {
   return Math.round((parseDateStr(b) - parseDateStr(a)) / 86400000);
 }
 
+function planDurationLabel(dateFrom, dateTo) {
+  if (!dateFrom || !dateTo) return "No plan yet";
+  const days = daysBetweenStr(dateFrom, dateTo);
+  if (days < 0) return "No plan yet";
+  const months = Math.max(1, Math.round(days / 30));
+  return `${months} month${months === 1 ? "" : "s"}`;
+}
+
 // Whole years between a "YYYY-MM-DD" date of birth and today, done in UTC
 // for the same DST-safety reason as the other calendar-date helpers above.
 function calcAgeFromDOB(dobStr) {
@@ -2203,8 +2211,6 @@ export default function CalorieTrackerApp() {
     setAddClientPhoneCountryCode("+20");
     setAddClientPhoneNumber("");
     setAddClientPlanTypeId("");
-    setAddClientDateFrom("");
-    setAddClientDateTo("");
     setAddClientMessage(null);
     setCreatedClientCredentials(null);
     setEditingClientId(null);
@@ -5201,8 +5207,7 @@ export default function CalorieTrackerApp() {
                             <thead>
                               <tr>
                                 <th style={thStyle}>Client name</th>
-                                <th style={thStyle}>Plan from</th>
-                                <th style={thStyle}>Plan to</th>
+                                <th style={thStyle}>Plan duration</th>
                                 <th style={thStyle}>Status</th>
                                 <th style={thStyle}></th>
                               </tr>
@@ -5211,8 +5216,7 @@ export default function CalorieTrackerApp() {
                               {pagedClients.map((c) => (
                                 <tr key={c.id} style={{ borderTop: `1px solid ${GRID}` }}>
                                   <td style={tdStyle}>{c.name}</td>
-                                  <td style={tdStyle}>{c.dateFrom || "—"}</td>
-                                  <td style={tdStyle}>{c.dateTo || "—"}</td>
+                                  <td style={tdStyle}>{planDurationLabel(c.dateFrom, c.dateTo)}</td>
                                   <td style={tdStyle}>
                                     <span
                                       style={{

@@ -467,6 +467,97 @@ function MetricRow({ label, actual, target, unit }) {
   );
 }
 
+// Shared "cards per meal" layout used by the coach's Plan Builder, the
+// coach's Plan Details screen, and the client's My Plan screen — all three
+// display the same grouped meal/course/food structure, editable only in
+// the Plan Builder (via onRemoveFood).
+function MealPlanCards({ foods, onRemoveFood }) {
+  const mealsWithFood = MEALS.filter((mealName) => foods.some((f) => f.meal === mealName));
+  if (mealsWithFood.length === 0) return null;
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
+      {mealsWithFood.map((mealName) => {
+        const mealFoods = foods.filter((f) => f.meal === mealName);
+        const mealTotalCal = mealFoods.reduce((sum, f) => sum + f.calories, 0);
+
+        return (
+          <div key={mealName} style={{ background: PANEL, border: `1px solid ${GRID}`, borderRadius: 6, padding: 14 }}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "baseline",
+                padding: "4px 8px",
+                background: TEAL_SOFT,
+                borderRadius: 4,
+                marginBottom: 10,
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: "'Space Grotesk', sans-serif",
+                  fontSize: 14,
+                  fontWeight: 700,
+                  color: TEAL,
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                }}
+              >
+                {mealName}
+              </span>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
+                {mealTotalCal} kcal total
+              </span>
+            </div>
+
+            {COURSES.map((courseName) => {
+              const courseFoods = mealFoods.filter((f) => (f.course || "Main") === courseName);
+              if (courseFoods.length === 0) return null;
+
+              return (
+                <div key={courseName} style={{ marginBottom: 8 }}>
+                  <div
+                    style={{
+                      fontFamily: "'Space Grotesk', sans-serif",
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: GREEN,
+                      background: GREEN_SOFT,
+                      textTransform: "uppercase",
+                      letterSpacing: 0.5,
+                      padding: "2px 8px",
+                      borderRadius: 4,
+                      display: "inline-block",
+                    }}
+                  >
+                    {courseName}
+                  </div>
+                  {courseFoods.map((f) => (
+                    <div key={f.id} style={foodRowStyle}>
+                      <div>
+                        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
+                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                          {f.grams}g · {f.calories} kcal
+                        </div>
+                      </div>
+                      {onRemoveFood && (
+                        <button onClick={() => onRemoveFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
+                          <Trash2 size={14} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function CalorieTrackerApp() {
   const [session, setSession] = useState(undefined);
   const [authMode, setAuthMode] = useState("login");
@@ -3982,79 +4073,7 @@ export default function CalorieTrackerApp() {
                   {foods.length === 0 ? (
                     <div style={{ fontSize: 12, color: INK_SOFT }}>Your coach hasn't added any foods to your plan yet.</div>
                   ) : (
-                    MEALS.map((mealName) => {
-                      const mealFoods = foods.filter((f) => f.meal === mealName);
-                      if (mealFoods.length === 0) return null;
-
-                      const mealTotalCal = mealFoods.reduce((sum, f) => sum + f.calories, 0);
-
-                      return (
-                        <div key={mealName} style={{ marginBottom: 16 }}>
-                          <div
-                            style={{
-                              display: "flex",
-                              justifyContent: "space-between",
-                              alignItems: "baseline",
-                              padding: "4px 8px",
-                              background: TEAL_SOFT,
-                              borderRadius: 4,
-                              marginBottom: 4,
-                            }}
-                          >
-                            <span
-                              style={{
-                                fontFamily: "'Space Grotesk', sans-serif",
-                                fontSize: 14,
-                                fontWeight: 700,
-                                color: TEAL,
-                                textTransform: "uppercase",
-                                letterSpacing: 0.5,
-                              }}
-                            >
-                              {mealName}
-                            </span>
-                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
-                              {mealTotalCal} kcal total
-                            </span>
-                          </div>
-                          {COURSES.map((courseName) => {
-                            const courseFoods = mealFoods.filter((f) => (f.course || "Main") === courseName);
-                            if (courseFoods.length === 0) return null;
-
-                            return (
-                              <div key={courseName} style={{ marginBottom: 8 }}>
-                                <div
-                                  style={{
-                                    fontFamily: "'Space Grotesk', sans-serif",
-                                    fontSize: 11,
-                                    fontWeight: 700,
-                                    color: GREEN,
-                                    background: GREEN_SOFT,
-                                    textTransform: "uppercase",
-                                    letterSpacing: 0.5,
-                                    padding: "2px 8px",
-                                    borderRadius: 4,
-                                    display: "inline-block",
-                                  }}
-                                >
-                                  {courseName}
-                                </div>
-                                {courseFoods.map((f) => (
-                                  <div key={f.id} style={foodRowStyle}>
-                                    <div>
-                                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
-                                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                                        {f.grams}g · {f.calories} kcal
-                                      </div>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      );
-                    })
+                    <MealPlanCards foods={foods} />
                   )}
                 </>
               )}
@@ -5629,84 +5648,9 @@ export default function CalorieTrackerApp() {
                           )}
                         </div>
 
-                        <div style={{ maxHeight: 340, overflowY: "auto" }}>
+                        <div style={{ maxHeight: 480, overflowY: "auto" }}>
                           {clientPlanFoods.length === 0 && <div style={{ fontSize: 12, color: INK_SOFT }}>No foods added to this plan yet.</div>}
-                          {MEALS.map((mealName) => {
-                            const mealFoods = clientPlanFoods.filter((f) => f.meal === mealName);
-                            if (mealFoods.length === 0) return null;
-
-                            const mealTotalCal = mealFoods.reduce((sum, f) => sum + f.calories, 0);
-
-                            return (
-                              <div key={mealName} style={{ marginBottom: 16 }}>
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    justifyContent: "space-between",
-                                    alignItems: "baseline",
-                                    padding: "4px 8px",
-                                    background: TEAL_SOFT,
-                                    borderRadius: 4,
-                                    marginBottom: 4,
-                                  }}
-                                >
-                                  <span
-                                    style={{
-                                      fontFamily: "'Space Grotesk', sans-serif",
-                                      fontSize: 14,
-                                      fontWeight: 700,
-                                      color: TEAL,
-                                      textTransform: "uppercase",
-                                      letterSpacing: 0.5,
-                                    }}
-                                  >
-                                    {mealName}
-                                  </span>
-                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
-                                    {mealTotalCal} kcal total
-                                  </span>
-                                </div>
-                                {COURSES.map((courseName) => {
-                                  const courseFoods = mealFoods.filter((f) => (f.course || "Main") === courseName);
-                                  if (courseFoods.length === 0) return null;
-
-                                  return (
-                                    <div key={courseName} style={{ marginBottom: 8 }}>
-                                      <div
-                                        style={{
-                                          fontFamily: "'Space Grotesk', sans-serif",
-                                          fontSize: 11,
-                                          fontWeight: 700,
-                                          color: GREEN,
-                                          background: GREEN_SOFT,
-                                          textTransform: "uppercase",
-                                          letterSpacing: 0.5,
-                                          padding: "2px 8px",
-                                          borderRadius: 4,
-                                          display: "inline-block",
-                                        }}
-                                      >
-                                        {courseName}
-                                      </div>
-                                      {courseFoods.map((f) => (
-                                        <div key={f.id} style={foodRowStyle}>
-                                          <div>
-                                            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
-                                            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                                              {f.grams}g · {f.calories} kcal
-                                            </div>
-                                          </div>
-                                          <button onClick={() => removeClientPlanFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
-                                            <Trash2 size={14} />
-                                          </button>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            );
-                          })}
+                          <MealPlanCards foods={clientPlanFoods} onRemoveFood={removeClientPlanFood} />
                         </div>
 
                         <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 18, paddingTop: 14, borderTop: `1px solid ${GRID}` }}>
@@ -5772,83 +5716,11 @@ export default function CalorieTrackerApp() {
                           <PlanStatusBadge status={planDetailsStatus} />
                         </div>
 
-                        <div style={{ maxHeight: 340, overflowY: "auto", marginBottom: 18 }}>
+                        <div style={{ marginBottom: 18 }}>
                           {planDetailsFoods.length === 0 && (
                             <div style={{ fontSize: 12, color: INK_SOFT }}>No plan yet.</div>
                           )}
-                          {MEALS.map((mealName) => {
-                            const mealFoods = planDetailsFoods.filter((f) => f.meal === mealName);
-                            if (mealFoods.length === 0) return null;
-
-                            const mealTotalCal = mealFoods.reduce((sum, f) => sum + f.calories, 0);
-
-                            return (
-                              <div key={mealName} style={{ marginBottom: 16 }}>
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    justifyContent: "space-between",
-                                    alignItems: "baseline",
-                                    padding: "4px 8px",
-                                    background: TEAL_SOFT,
-                                    borderRadius: 4,
-                                    marginBottom: 4,
-                                  }}
-                                >
-                                  <span
-                                    style={{
-                                      fontFamily: "'Space Grotesk', sans-serif",
-                                      fontSize: 14,
-                                      fontWeight: 700,
-                                      color: TEAL,
-                                      textTransform: "uppercase",
-                                      letterSpacing: 0.5,
-                                    }}
-                                  >
-                                    {mealName}
-                                  </span>
-                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
-                                    {mealTotalCal} kcal total
-                                  </span>
-                                </div>
-                                {COURSES.map((courseName) => {
-                                  const courseFoods = mealFoods.filter((f) => (f.course || "Main") === courseName);
-                                  if (courseFoods.length === 0) return null;
-
-                                  return (
-                                    <div key={courseName} style={{ marginBottom: 8 }}>
-                                      <div
-                                        style={{
-                                          fontFamily: "'Space Grotesk', sans-serif",
-                                          fontSize: 11,
-                                          fontWeight: 700,
-                                          color: GREEN,
-                                          background: GREEN_SOFT,
-                                          textTransform: "uppercase",
-                                          letterSpacing: 0.5,
-                                          padding: "2px 8px",
-                                          borderRadius: 4,
-                                          display: "inline-block",
-                                        }}
-                                      >
-                                        {courseName}
-                                      </div>
-                                      {courseFoods.map((f) => (
-                                        <div key={f.id} style={foodRowStyle}>
-                                          <div>
-                                            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
-                                            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                                              {f.grams}g · {f.calories} kcal
-                                            </div>
-                                          </div>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            );
-                          })}
+                          <MealPlanCards foods={planDetailsFoods} />
                         </div>
 
                         {(() => {

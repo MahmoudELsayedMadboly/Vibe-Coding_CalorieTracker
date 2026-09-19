@@ -567,7 +567,7 @@ export default function CalorieTrackerApp() {
   const [chatUnreadByClient, setChatUnreadByClient] = useState({});
 
   const [profile, setProfile] = useState({ sex: "male", age: 30, dateOfBirth: "", healthNotes: "", weightKg: 75, heightCm: 175, activity: "moderate" });
-  const [coachOwnedInfo, setCoachOwnedInfo] = useState({ name: "", email: "", phone: "", planDateFrom: null, planDateTo: null });
+  const [coachOwnedInfo, setCoachOwnedInfo] = useState({ name: "", email: "", phone: "", planDateFrom: null, planDateTo: null, planTypeName: null });
 
   const [measurements, setMeasurements] = useState([]);
   const [newMeasurement, setNewMeasurement] = useState({ date: todayStr(), neck: "", waist: "", shoulder: "", chest: "", abdomen: "", thighs: "" });
@@ -784,16 +784,25 @@ export default function CalorieTrackerApp() {
         let ownPlanStatusValue = "active";
         let ownPlanDateFrom = null;
         let ownPlanDateTo = null;
+        let ownPlanTypeName = null;
         try {
           const { data: selfClientProfileRow } = await supabase
             .from("client_profile")
-            .select("plan_status, date_from, date_to")
+            .select("plan_status, date_from, date_to, plan_type_id")
             .eq("user_id", userId)
             .maybeSingle();
           if (selfClientProfileRow) {
             if (selfClientProfileRow.plan_status) ownPlanStatusValue = selfClientProfileRow.plan_status;
             ownPlanDateFrom = selfClientProfileRow.date_from || null;
             ownPlanDateTo = selfClientProfileRow.date_to || null;
+            if (selfClientProfileRow.plan_type_id) {
+              const { data: planTypeRow } = await supabase
+                .from("coach_plan_types")
+                .select("name")
+                .eq("id", selfClientProfileRow.plan_type_id)
+                .maybeSingle();
+              ownPlanTypeName = (planTypeRow && planTypeRow.name) || null;
+            }
           }
         } catch (e) {
           // No client_profile row / not a coach's client — stays "active".
@@ -805,6 +814,7 @@ export default function CalorieTrackerApp() {
           phone: userInfoRow?.phone || "",
           planDateFrom: ownPlanDateFrom,
           planDateTo: ownPlanDateTo,
+          planTypeName: ownPlanTypeName,
         });
 
         const [personalFoodsRes, planFoodsRes, logsRes, measurementsRes, photosRes] = await Promise.all([
@@ -1991,7 +2001,7 @@ export default function CalorieTrackerApp() {
         supabase.from("user_info").select("id, name, email, phone, first_login_at").eq("id", clientId).maybeSingle(),
         supabase.from("client_profile").select("user_id, date_from, date_to, plan_type_id").eq("user_id", clientId).maybeSingle(),
         supabase.from("coach_clients").select("status").eq("coach_id", session.user.id).eq("client_id", clientId).maybeSingle(),
-        supabase.from("profile").select("date_of_birth, health_notes").eq("user_id", clientId).maybeSingle(),
+        supabase.from("profile").select("date_of_birth, health_notes, weight_kg, height_cm").eq("user_id", clientId).maybeSingle(),
         supabase
           .from("body_measurements")
           .select("*")
@@ -2042,6 +2052,7 @@ export default function CalorieTrackerApp() {
         dateOfBirth: ownProfile.date_of_birth || null,
         age: ownProfile.date_of_birth ? calcAgeFromDOB(ownProfile.date_of_birth) : null,
         healthNotes: ownProfile.health_notes || null,
+        bmiInfo: computeBMI({ weightKg: ownProfile.weight_kg, heightCm: ownProfile.height_cm }),
         latestMeasurement: latestMeasurement
           ? {
               measuredAt: latestMeasurement.measured_at,
@@ -2961,8 +2972,10 @@ export default function CalorieTrackerApp() {
   const isManagedClient = !!myCoachId;
 
   // Shared between the standalone "Measurements"/"Progress photos" sub-tabs
-  // (unmanaged users) and the merged Profile screen (managed clients).
-  const measurementsSectionContent = (
+  // (unmanaged users, own Save button) and the merged Profile Info screen
+  // (managed clients, consolidated into the screen's single Save button).
+  function renderMeasurementsSection(showOwnSaveButton) {
+    return (
     <>
       <label style={labelStyle}>Date</label>
       <input
@@ -2987,15 +3000,17 @@ export default function CalorieTrackerApp() {
         ))}
       </div>
 
-      <button
-        onClick={addMeasurement}
-        disabled={measurementSaving}
-        style={{ ...primaryButtonStyle, marginTop: 14, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
-      >
-        <Plus size={14} strokeWidth={2.5} />
-        {measurementSaving ? "Saving…" : "Add measurement"}
-      </button>
-      {measurementError && (
+      {showOwnSaveButton && (
+        <button
+          onClick={addMeasurement}
+          disabled={measurementSaving}
+          style={{ ...primaryButtonStyle, marginTop: 14, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
+        >
+          <Plus size={14} strokeWidth={2.5} />
+          {measurementSaving ? "Saving…" : "Add measurement"}
+        </button>
+      )}
+      {showOwnSaveButton && measurementError && (
         <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
           {measurementError}
         </div>
@@ -3024,9 +3039,11 @@ export default function CalorieTrackerApp() {
         )}
       </div>
     </>
-  );
+    );
+  }
 
-  const photosSectionContent = (
+  function renderPhotosSection(showOwnSaveButton) {
+    return (
     <>
       <label style={labelStyle}>Date</label>
       <input
@@ -3046,15 +3063,17 @@ export default function CalorieTrackerApp() {
         style={{ ...inputStyle, padding: "6px 0" }}
       />
 
-      <button
-        onClick={uploadProgressPhoto}
-        disabled={photoUploading || !photoFile}
-        style={{ ...primaryButtonStyle, marginTop: 4, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
-      >
-        <Save size={14} strokeWidth={2.5} />
-        {photoUploading ? "Uploading…" : "Upload photo"}
-      </button>
-      {photoError && (
+      {showOwnSaveButton && (
+        <button
+          onClick={uploadProgressPhoto}
+          disabled={photoUploading || !photoFile}
+          style={{ ...primaryButtonStyle, marginTop: 4, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
+        >
+          <Save size={14} strokeWidth={2.5} />
+          {photoUploading ? "Uploading…" : "Upload photo"}
+        </button>
+      )}
+      {showOwnSaveButton && photoError && (
         <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
           {photoError}
         </div>
@@ -3089,7 +3108,136 @@ export default function CalorieTrackerApp() {
         )}
       </div>
     </>
+    );
+  }
+
+  const notificationsSectionContent = !notificationSettings ? (
+    <div style={{ fontSize: 12, color: INK_SOFT }}>Loading notification settings…</div>
+  ) : (
+    <>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 12,
+          padding: "12px 14px",
+          background: notificationSettings.target ? GREEN_SOFT : "#EEEEEC",
+          borderRadius: 4,
+          marginBottom: 14,
+        }}
+      >
+        <div>
+          <div
+            style={{
+              fontFamily: "'Space Grotesk', sans-serif",
+              fontSize: 13,
+              fontWeight: 600,
+              color: notificationSettings.target ? GREEN : INK_SOFT,
+            }}
+          >
+            {notificationSettings.target ? "Telegram: Connected ✓" : "Telegram: Not connected"}
+          </div>
+          {!notificationSettings.target && (
+            <div style={{ fontSize: 11.5, color: INK_SOFT, marginTop: 4, maxWidth: 320, lineHeight: 1.4 }}>
+              Click below, then press Send in Telegram to connect your account.
+            </div>
+          )}
+        </div>
+        <button
+          onClick={checkTelegramConnection}
+          style={{ ...secondaryButtonStyle, fontSize: 11, padding: "6px 10px", flexShrink: 0 }}
+          disabled={saving}
+        >
+          Check connection
+        </button>
+      </div>
+
+      {!notificationSettings.target && (
+        <button
+          onClick={connectTelegram}
+          style={{ ...primaryButtonStyle, width: "auto", marginBottom: 20 }}
+          disabled={saving}
+        >
+          Connect Telegram
+        </button>
+      )}
+
+      <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16 }}>
+        <label style={labelStyle}>Send me a daily summary</label>
+        <button
+          onClick={() =>
+            updateNotificationSettings({ daily_summary_enabled: !notificationSettings.daily_summary_enabled })
+          }
+          style={{ ...toggleStyle(!!notificationSettings.daily_summary_enabled), marginBottom: 14 }}
+          disabled={saving}
+        >
+          {notificationSettings.daily_summary_enabled ? "On" : "Off"}
+        </button>
+
+        {notificationSettings.daily_summary_enabled && (
+          <>
+            <label style={labelStyle}>At what time</label>
+            <input
+              type="time"
+              value={notificationSettings.daily_summary_time || ""}
+              onChange={(e) => updateNotificationSettings({ daily_summary_time: e.target.value })}
+              style={inputStyle}
+              disabled={saving}
+            />
+          </>
+        )}
+
+        <label style={labelStyle}>Warn me when I'm approaching my limit</label>
+        <button
+          onClick={() =>
+            updateNotificationSettings({ threshold_enabled: !notificationSettings.threshold_enabled })
+          }
+          style={{ ...toggleStyle(!!notificationSettings.threshold_enabled), marginBottom: 14 }}
+          disabled={saving}
+        >
+          {notificationSettings.threshold_enabled ? "On" : "Off"}
+        </button>
+
+        {notificationSettings.threshold_enabled && (
+          <>
+            <label style={labelStyle}>Warn me at this % of my daily target</label>
+            <input
+              type="number"
+              value={thresholdPercentDraft}
+              onChange={(e) => setThresholdPercentDraft(e.target.value)}
+              onBlur={() => {
+                if (thresholdPercentDraft !== (notificationSettings.threshold_percent ?? "")) {
+                  updateNotificationSettings({ threshold_percent: thresholdPercentDraft });
+                }
+              }}
+              style={inputStyle}
+              disabled={saving}
+            />
+          </>
+        )}
+      </div>
+
+      {saveError && (
+        <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+          {saveError}
+        </div>
+      )}
+    </>
   );
+
+  async function saveProfileInfoAll() {
+    const hasMeasurementInput = MEASUREMENT_FIELDS.some(
+      (f) => newMeasurement[f.key] !== "" && newMeasurement[f.key] !== null && newMeasurement[f.key] !== undefined
+    );
+    const hasPhotoInput = !!photoFile;
+
+    const tasks = [saveSetup()];
+    if (hasMeasurementInput) tasks.push(addMeasurement());
+    if (hasPhotoInput) tasks.push(uploadProgressPhoto());
+
+    await Promise.all(tasks);
+  }
 
   return (
     <div style={{ fontFamily: "'Inter', sans-serif", background: PAPER, color: INK, padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
@@ -3172,6 +3320,7 @@ export default function CalorieTrackerApp() {
           { id: "log", label: "Daily log" },
           { id: "history", label: "History" },
           ...(roleId === 3 ? [{ id: "chat", label: "Chat" }] : []),
+          ...(isManagedClient ? [{ id: "notifications", label: "Notifications" }] : []),
         ].map((t) => (
           <button
             key={t.id}
@@ -3202,8 +3351,8 @@ export default function CalorieTrackerApp() {
           <div style={{ display: "flex", gap: 4, marginBottom: 20, borderBottom: `1px solid ${GRID}`, paddingBottom: 12 }}>
             {(isManagedClient
               ? [
-                  { id: "profile", label: "Profile & program" },
-                  { id: "notifications", label: "Notifications" },
+                  { id: "profile", label: "Profile Info" },
+                  { id: "myPlan", label: "My Plan" },
                 ]
               : [
                   { id: "profile", label: "Profile & program" },
@@ -3236,12 +3385,14 @@ export default function CalorieTrackerApp() {
 
           {configTab === "profile" && (
             <div style={panelStyle}>
-              <SectionTitle>Profile & program</SectionTitle>
+              <SectionTitle>{isManagedClient ? "Profile Info" : "Profile & program"}</SectionTitle>
 
               <div style={{ borderBottom: `1px solid ${GRID}`, paddingBottom: 16, marginBottom: 20 }}>
-                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                  Your account (set by your coach)
-                </div>
+                {!isManagedClient && (
+                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                    Your account (set by your coach)
+                  </div>
+                )}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                   <div>
                     <div style={labelStyle}>Name</div>
@@ -3263,8 +3414,20 @@ export default function CalorieTrackerApp() {
                         : "—"}
                     </div>
                   </div>
+                  {isManagedClient && (
+                    <div>
+                      <div style={labelStyle}>Plan type</div>
+                      <div style={{ fontSize: 13 }}>{coachOwnedInfo.planTypeName || "—"}</div>
+                    </div>
+                  )}
                 </div>
               </div>
+
+              {isManagedClient && (
+                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                  Basic Info
+                </div>
+              )}
 
               <label style={labelStyle}>Sex</label>
               <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
@@ -3347,7 +3510,7 @@ export default function CalorieTrackerApp() {
                 </>
               )}
 
-              {bmiInfo && (
+              {!isManagedClient && bmiInfo && (
                 <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 4, marginBottom: 4 }}>
                   <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
                     Weight vs. international standard (BMI)
@@ -3382,6 +3545,7 @@ export default function CalorieTrackerApp() {
                 </div>
               )}
 
+              {!isManagedClient && (
               <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 4 }}>
                 <div
                   style={{
@@ -3432,28 +3596,166 @@ export default function CalorieTrackerApp() {
                   style={inputStyle}
                 />
               </div>
+              )}
 
-              <button onClick={saveSetup} style={{ ...primaryButtonStyle, marginTop: 8, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}>
-                {setupSavedFlash ? <Check size={14} strokeWidth={2.5} /> : <Save size={14} strokeWidth={2.5} />}
-                {setupSavedFlash ? "Configuration saved" : "Save configuration"}
-              </button>
-              {saveError && (
-                <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                  {saveError}
-                </div>
+              {!isManagedClient && (
+                <>
+                  <button onClick={saveSetup} style={{ ...primaryButtonStyle, marginTop: 8, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}>
+                    {setupSavedFlash ? <Check size={14} strokeWidth={2.5} /> : <Save size={14} strokeWidth={2.5} />}
+                    {setupSavedFlash ? "Configuration saved" : "Save configuration"}
+                  </button>
+                  {saveError && (
+                    <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                      {saveError}
+                    </div>
+                  )}
+                </>
               )}
 
               {isManagedClient && (
                 <>
                   <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 20, marginTop: 24 }}>
                     <SectionTitle>Measurements</SectionTitle>
-                    {measurementsSectionContent}
+                    {renderMeasurementsSection(false)}
                   </div>
 
                   <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 20, marginTop: 24 }}>
                     <SectionTitle>Progress photos</SectionTitle>
-                    {photosSectionContent}
+                    {renderPhotosSection(false)}
                   </div>
+
+                  <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 20, marginTop: 24 }}>
+                    <button
+                      onClick={saveProfileInfoAll}
+                      disabled={saving || measurementSaving || photoUploading}
+                      style={{ ...primaryButtonStyle, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
+                    >
+                      {setupSavedFlash ? <Check size={14} strokeWidth={2.5} /> : <Save size={14} strokeWidth={2.5} />}
+                      {saving || measurementSaving || photoUploading ? "Saving…" : setupSavedFlash ? "Saved" : "Save"}
+                    </button>
+                    {(saveError || measurementError || photoError) && (
+                      <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                        {saveError || measurementError || photoError}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {isManagedClient && configTab === "myPlan" && (
+            <div style={panelStyle}>
+              <SectionTitle>My Plan</SectionTitle>
+
+              {ownPlanStatus !== "active" ? (
+                <div style={{ fontSize: 12, color: INK_SOFT }}>No active plan configured.</div>
+              ) : (
+                <>
+                  {planName && (
+                    <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 6 }}>
+                      {planName}
+                    </div>
+                  )}
+                  {(planDateFrom || planDateTo) && (
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT, marginBottom: 14 }}>
+                      {planDateFrom || "—"} to {planDateTo || "—"}
+                    </div>
+                  )}
+
+                  <div style={{ marginBottom: 18 }}>
+                    <span
+                      style={{
+                        display: "inline-block",
+                        padding: "3px 8px",
+                        background: TEAL_SOFT,
+                        color: TEAL,
+                        borderRadius: 4,
+                        fontSize: 12,
+                        fontWeight: 700,
+                      }}
+                    >
+                      Daily target: {effectivePlan.calories} kcal · P{effectivePlan.protein} C{effectivePlan.carbs} F{effectivePlan.fat}
+                    </span>
+                  </div>
+
+                  {foods.length === 0 ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>Your coach hasn't added any foods to your plan yet.</div>
+                  ) : (
+                    MEALS.map((mealName) => {
+                      const mealFoods = foods.filter((f) => f.meal === mealName);
+                      if (mealFoods.length === 0) return null;
+
+                      const mealTotalCal = mealFoods.reduce((sum, f) => sum + f.calories, 0);
+
+                      return (
+                        <div key={mealName} style={{ marginBottom: 16 }}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              alignItems: "baseline",
+                              padding: "4px 8px",
+                              background: TEAL_SOFT,
+                              borderRadius: 4,
+                              marginBottom: 4,
+                            }}
+                          >
+                            <span
+                              style={{
+                                fontFamily: "'Space Grotesk', sans-serif",
+                                fontSize: 14,
+                                fontWeight: 700,
+                                color: TEAL,
+                                textTransform: "uppercase",
+                                letterSpacing: 0.5,
+                              }}
+                            >
+                              {mealName}
+                            </span>
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
+                              {mealTotalCal} kcal total
+                            </span>
+                          </div>
+                          {COURSES.map((courseName) => {
+                            const courseFoods = mealFoods.filter((f) => (f.course || "Main") === courseName);
+                            if (courseFoods.length === 0) return null;
+
+                            return (
+                              <div key={courseName} style={{ marginBottom: 8 }}>
+                                <div
+                                  style={{
+                                    fontFamily: "'Space Grotesk', sans-serif",
+                                    fontSize: 11,
+                                    fontWeight: 700,
+                                    color: GREEN,
+                                    background: GREEN_SOFT,
+                                    textTransform: "uppercase",
+                                    letterSpacing: 0.5,
+                                    padding: "2px 8px",
+                                    borderRadius: 4,
+                                    display: "inline-block",
+                                  }}
+                                >
+                                  {courseName}
+                                </div>
+                                {courseFoods.map((f) => (
+                                  <div key={f.id} style={foodRowStyle}>
+                                    <div>
+                                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
+                                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                                        {f.grams}g · {f.calories} kcal
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })
+                  )}
                 </>
               )}
             </div>
@@ -3462,14 +3764,14 @@ export default function CalorieTrackerApp() {
           {!isManagedClient && configTab === "measurements" && (
             <div style={panelStyle}>
               <SectionTitle>Measurements</SectionTitle>
-              {measurementsSectionContent}
+              {renderMeasurementsSection(true)}
             </div>
           )}
 
           {!isManagedClient && configTab === "photos" && (
             <div style={panelStyle}>
               <SectionTitle>Progress photos</SectionTitle>
-              {photosSectionContent}
+              {renderPhotosSection(true)}
             </div>
           )}
 
@@ -3786,126 +4088,19 @@ export default function CalorieTrackerApp() {
             </div>
           )}
 
-          {configTab === "notifications" && (
+          {!isManagedClient && configTab === "notifications" && (
             <div style={panelStyle}>
               <SectionTitle>Notifications</SectionTitle>
-
-              {!notificationSettings ? (
-                <div style={{ fontSize: 12, color: INK_SOFT }}>Loading notification settings…</div>
-              ) : (
-                <>
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      gap: 12,
-                      padding: "12px 14px",
-                      background: notificationSettings.target ? GREEN_SOFT : "#EEEEEC",
-                      borderRadius: 4,
-                      marginBottom: 14,
-                    }}
-                  >
-                    <div>
-                      <div
-                        style={{
-                          fontFamily: "'Space Grotesk', sans-serif",
-                          fontSize: 13,
-                          fontWeight: 600,
-                          color: notificationSettings.target ? GREEN : INK_SOFT,
-                        }}
-                      >
-                        {notificationSettings.target ? "Telegram: Connected ✓" : "Telegram: Not connected"}
-                      </div>
-                      {!notificationSettings.target && (
-                        <div style={{ fontSize: 11.5, color: INK_SOFT, marginTop: 4, maxWidth: 320, lineHeight: 1.4 }}>
-                          Click below, then press Send in Telegram to connect your account.
-                        </div>
-                      )}
-                    </div>
-                    <button
-                      onClick={checkTelegramConnection}
-                      style={{ ...secondaryButtonStyle, fontSize: 11, padding: "6px 10px", flexShrink: 0 }}
-                      disabled={saving}
-                    >
-                      Check connection
-                    </button>
-                  </div>
-
-                  {!notificationSettings.target && (
-                    <button
-                      onClick={connectTelegram}
-                      style={{ ...primaryButtonStyle, width: "auto", marginBottom: 20 }}
-                      disabled={saving}
-                    >
-                      Connect Telegram
-                    </button>
-                  )}
-
-                  <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16 }}>
-                    <label style={labelStyle}>Send me a daily summary</label>
-                    <button
-                      onClick={() =>
-                        updateNotificationSettings({ daily_summary_enabled: !notificationSettings.daily_summary_enabled })
-                      }
-                      style={{ ...toggleStyle(!!notificationSettings.daily_summary_enabled), marginBottom: 14 }}
-                      disabled={saving}
-                    >
-                      {notificationSettings.daily_summary_enabled ? "On" : "Off"}
-                    </button>
-
-                    {notificationSettings.daily_summary_enabled && (
-                      <>
-                        <label style={labelStyle}>At what time</label>
-                        <input
-                          type="time"
-                          value={notificationSettings.daily_summary_time || ""}
-                          onChange={(e) => updateNotificationSettings({ daily_summary_time: e.target.value })}
-                          style={inputStyle}
-                          disabled={saving}
-                        />
-                      </>
-                    )}
-
-                    <label style={labelStyle}>Warn me when I'm approaching my limit</label>
-                    <button
-                      onClick={() =>
-                        updateNotificationSettings({ threshold_enabled: !notificationSettings.threshold_enabled })
-                      }
-                      style={{ ...toggleStyle(!!notificationSettings.threshold_enabled), marginBottom: 14 }}
-                      disabled={saving}
-                    >
-                      {notificationSettings.threshold_enabled ? "On" : "Off"}
-                    </button>
-
-                    {notificationSettings.threshold_enabled && (
-                      <>
-                        <label style={labelStyle}>Warn me at this % of my daily target</label>
-                        <input
-                          type="number"
-                          value={thresholdPercentDraft}
-                          onChange={(e) => setThresholdPercentDraft(e.target.value)}
-                          onBlur={() => {
-                            if (thresholdPercentDraft !== (notificationSettings.threshold_percent ?? "")) {
-                              updateNotificationSettings({ threshold_percent: thresholdPercentDraft });
-                            }
-                          }}
-                          style={inputStyle}
-                          disabled={saving}
-                        />
-                      </>
-                    )}
-                  </div>
-
-                  {saveError && (
-                    <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                      {saveError}
-                    </div>
-                  )}
-                </>
-              )}
+              {notificationsSectionContent}
             </div>
           )}
+        </div>
+      )}
+
+      {isManagedClient && view === "notifications" && (
+        <div style={panelStyle}>
+          <SectionTitle>Notifications</SectionTitle>
+          {notificationsSectionContent}
         </div>
       )}
 
@@ -5787,6 +5982,41 @@ export default function CalorieTrackerApp() {
                       <div style={{ marginBottom: 16 }}>
                         <div style={labelStyle}>Health notes</div>
                         <div style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{clientDetail.healthNotes || "None reported"}</div>
+                      </div>
+
+                      <div style={{ marginBottom: 16 }}>
+                        <div style={labelStyle}>BMI</div>
+                        {clientDetail.bmiInfo ? (
+                          <div
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "baseline",
+                              gap: 8,
+                              padding: "6px 10px",
+                              background: STATUS_META[clientDetail.bmiInfo.status].soft,
+                              borderRadius: 4,
+                              marginTop: 4,
+                            }}
+                          >
+                            <span
+                              style={{
+                                fontFamily: "'Space Grotesk', sans-serif",
+                                fontSize: 12,
+                                fontWeight: 700,
+                                color: STATUS_META[clientDetail.bmiInfo.status].color,
+                                textTransform: "uppercase",
+                                letterSpacing: 0.5,
+                              }}
+                            >
+                              {clientDetail.bmiInfo.category}
+                            </span>
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: STATUS_META[clientDetail.bmiInfo.status].color }}>
+                              BMI {clientDetail.bmiInfo.bmi.toFixed(1)}
+                            </span>
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: 13, color: INK_SOFT }}>— (weight/height not set)</div>
+                        )}
                       </div>
 
                       <div style={labelStyle}>Latest body measurements</div>

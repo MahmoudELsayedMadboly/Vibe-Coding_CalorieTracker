@@ -579,6 +579,38 @@ export default function CalorieTrackerApp() {
   const telegramPollRef = useRef(null);
   const [roleId, setRoleId] = useState(null);
 
+  const [eventTypes, setEventTypes] = useState([]);
+  const [eventTypesLoading, setEventTypesLoading] = useState(false);
+  const [eventTypesError, setEventTypesError] = useState(null);
+  const [placeholders, setPlaceholders] = useState([]);
+  const [eventTypeFormOpen, setEventTypeFormOpen] = useState(false);
+  const [editingEventTypeId, setEditingEventTypeId] = useState(null);
+  const [eventTypeFormName, setEventTypeFormName] = useState("");
+  const [eventTypeFormKind, setEventTypeFormKind] = useState("threshold");
+  const [eventTypeFormTimeValue, setEventTypeFormTimeValue] = useState("");
+  const [eventTypeFormPercentValue, setEventTypeFormPercentValue] = useState("");
+  const [eventTypeFormMessage, setEventTypeFormMessage] = useState("");
+  const [eventTypeFormBusy, setEventTypeFormBusy] = useState(false);
+  const [eventTypeFormError, setEventTypeFormError] = useState(null);
+  const eventTypeMessageRef = useRef(null);
+
+  const [notifView, setNotifView] = useState("byEvent");
+  const [notifSelectedEventTypeId, setNotifSelectedEventTypeId] = useState("");
+  const [notifAssignmentsByClient, setNotifAssignmentsByClient] = useState({});
+  const [notifAssignmentsLoading, setNotifAssignmentsLoading] = useState(false);
+  const [notifCheckedClientIds, setNotifCheckedClientIds] = useState([]);
+  const [notifApplyBusy, setNotifApplyBusy] = useState(false);
+  const [notifApplyError, setNotifApplyError] = useState(null);
+  const [notifApplyFlash, setNotifApplyFlash] = useState(null);
+  const [notifOverrideEditingClientId, setNotifOverrideEditingClientId] = useState(null);
+  const [notifOverrideDraft, setNotifOverrideDraft] = useState("");
+  const [notifByClientSelectedId, setNotifByClientSelectedId] = useState("");
+  const [notifByClientRows, setNotifByClientRows] = useState([]);
+  const [notifByClientLoading, setNotifByClientLoading] = useState(false);
+
+  const [clientDetailCopyBusy, setClientDetailCopyBusy] = useState(false);
+  const [clientDetailCopyFlash, setClientDetailCopyFlash] = useState(null);
+
   const [clients, setClients] = useState([]);
   const [clientsLoading, setClientsLoading] = useState(false);
   const [clientsError, setClientsError] = useState(null);
@@ -1687,11 +1719,84 @@ export default function CalorieTrackerApp() {
     }
   }
 
+  function fillMessageTemplate(template, values) {
+    let out = template || "";
+    Object.keys(values).forEach((key) => {
+      out = out.split(`{${key}}`).join(String(values[key]));
+    });
+    return out;
+  }
+
+  // Coach-scoped threshold check: this client has an active coach, so the
+  // coach's own coach_event_types / client_event_assignments drive the
+  // message instead of the standalone notification_settings columns.
+  async function checkCoachThreshold(logsAfter, userId, targetCalories, entryDate, coachId) {
+    try {
+      if (!targetCalories) return;
+
+      const { data: assignments, error } = await supabase
+        .from("client_event_assignments")
+        .select("id, override_value, last_sent_date, coach_event_types!inner(name, condition_kind, message_template, default_value)")
+        .eq("client_id", userId)
+        .eq("coach_id", coachId)
+        .eq("enabled", true)
+        .eq("coach_event_types.condition_kind", "threshold");
+      if (error || !assignments || assignments.length === 0) return;
+
+      const today = todayStr();
+      const todayTotal = (logsAfter[entryDate] || []).reduce((sum, e) => sum + (e.calories || 0), 0);
+      const pct = (todayTotal / targetCalories) * 100;
+
+      const { data: userInfo } = await supabase.from("user_info").select("name").eq("id", userId).maybeSingle();
+      const clientName = (userInfo && userInfo.name) || "there";
+
+      for (const row of assignments) {
+        if (row.last_sent_date === today) continue;
+
+        const eventType = row.coach_event_types;
+        const effectivePercent =
+          Number(row.override_value?.percent ?? eventType.default_value?.percent) || 0;
+
+        if (pct < effectivePercent) continue;
+
+        const message = fillMessageTemplate(eventType.message_template, {
+          name: clientName,
+          calories: Math.round(todayTotal),
+          target: Math.round(targetCalories),
+          percent: Math.round(effectivePercent),
+        });
+
+        await supabase.functions.invoke("send-notification", {
+          body: { user_id: userId, message, type: "coach_threshold" },
+        });
+
+        await supabase
+          .from("client_event_assignments")
+          .update({ last_sent_date: today })
+          .eq("id", row.id);
+      }
+    } catch (err) {
+      console.error("Coach threshold notification check failed (non-critical):", err);
+    }
+  }
+
   // Best-effort background check, fired after a meal is logged — never
   // surfaces errors or blocks the UI, since a missed notification isn't
   // worth interrupting the logging flow over.
   async function checkCalorieThreshold(logsAfter, userId, targetCalories, entryDate) {
     try {
+      const { data: coachLink } = await supabase
+        .from("coach_clients")
+        .select("coach_id")
+        .eq("client_id", userId)
+        .eq("status", "active")
+        .maybeSingle();
+
+      if (coachLink && coachLink.coach_id) {
+        await checkCoachThreshold(logsAfter, userId, targetCalories, entryDate, coachLink.coach_id);
+        return;
+      }
+
       const { data: notifRow, error } = await supabase
         .from("notification_settings")
         .select("threshold_enabled, threshold_percent, threshold_last_sent_date, target")
@@ -1895,6 +2000,292 @@ export default function CalorieTrackerApp() {
     }
   }
 
+  async function loadEventTypes() {
+    if (!session) return;
+
+    setEventTypesLoading(true);
+    setEventTypesError(null);
+
+    try {
+      const { data, error } = await supabase
+        .from("coach_event_types")
+        .select("*")
+        .eq("coach_id", session.user.id)
+        .order("created_at", { ascending: true });
+      if (error) throw error;
+      setEventTypes(data || []);
+    } catch (err) {
+      setEventTypesError(err && err.message ? err.message : "Couldn't load event types.");
+    } finally {
+      setEventTypesLoading(false);
+    }
+  }
+
+  async function loadPlaceholders() {
+    try {
+      const { data, error } = await supabase
+        .from("notification_placeholders")
+        .select("*")
+        .order("token", { ascending: true });
+      if (error) throw error;
+      setPlaceholders(data || []);
+    } catch (err) {
+      console.error("Couldn't load notification placeholders:", err);
+    }
+  }
+
+  function startAddEventType() {
+    setEditingEventTypeId(null);
+    setEventTypeFormName("");
+    setEventTypeFormKind("threshold");
+    setEventTypeFormTimeValue("");
+    setEventTypeFormPercentValue("");
+    setEventTypeFormMessage("");
+    setEventTypeFormError(null);
+    setEventTypeFormOpen(true);
+  }
+
+  function startEditEventType(et) {
+    setEditingEventTypeId(et.id);
+    setEventTypeFormName(et.name);
+    setEventTypeFormKind(et.condition_kind);
+    setEventTypeFormTimeValue(et.condition_kind === "time" ? (et.default_value && et.default_value.time) || "" : "");
+    setEventTypeFormPercentValue(
+      et.condition_kind === "threshold" && et.default_value && et.default_value.percent != null
+        ? String(et.default_value.percent)
+        : ""
+    );
+    setEventTypeFormMessage(et.message_template || "");
+    setEventTypeFormError(null);
+    setEventTypeFormOpen(true);
+  }
+
+  function cancelEventTypeForm() {
+    setEventTypeFormOpen(false);
+    setEditingEventTypeId(null);
+  }
+
+  function insertPlaceholderToken(token) {
+    const el = eventTypeMessageRef.current;
+    if (!el) {
+      setEventTypeFormMessage((prev) => prev + token);
+      return;
+    }
+    const start = el.selectionStart ?? eventTypeFormMessage.length;
+    const end = el.selectionEnd ?? eventTypeFormMessage.length;
+    const next = eventTypeFormMessage.slice(0, start) + token + eventTypeFormMessage.slice(end);
+    setEventTypeFormMessage(next);
+    requestAnimationFrame(() => {
+      el.focus();
+      const cursor = start + token.length;
+      el.setSelectionRange(cursor, cursor);
+    });
+  }
+
+  async function submitEventTypeForm() {
+    setEventTypeFormError(null);
+
+    if (!eventTypeFormName.trim()) {
+      setEventTypeFormError("Enter an event name.");
+      return;
+    }
+
+    let defaultValue;
+    if (eventTypeFormKind === "time") {
+      if (!eventTypeFormTimeValue) {
+        setEventTypeFormError("Pick a default time.");
+        return;
+      }
+      defaultValue = { time: eventTypeFormTimeValue };
+    } else {
+      const pct = Number(eventTypeFormPercentValue);
+      if (!eventTypeFormPercentValue || Number.isNaN(pct)) {
+        setEventTypeFormError("Enter a default percent.");
+        return;
+      }
+      defaultValue = { percent: pct };
+    }
+
+    setEventTypeFormBusy(true);
+    try {
+      if (editingEventTypeId) {
+        const { error } = await supabase
+          .from("coach_event_types")
+          .update({
+            name: eventTypeFormName.trim(),
+            condition_kind: eventTypeFormKind,
+            default_value: defaultValue,
+            message_template: eventTypeFormMessage,
+          })
+          .eq("id", editingEventTypeId);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from("coach_event_types").insert({
+          coach_id: session.user.id,
+          name: eventTypeFormName.trim(),
+          condition_kind: eventTypeFormKind,
+          default_value: defaultValue,
+          message_template: eventTypeFormMessage,
+        });
+        if (error) throw error;
+      }
+      setEventTypeFormOpen(false);
+      setEditingEventTypeId(null);
+      loadEventTypes();
+    } catch (err) {
+      setEventTypeFormError(err && err.message ? err.message : "Couldn't save this event type.");
+    } finally {
+      setEventTypeFormBusy(false);
+    }
+  }
+
+  async function loadAssignmentsForEventType(eventTypeId) {
+    if (!session || !eventTypeId) return;
+
+    setNotifAssignmentsLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from("client_event_assignments")
+        .select("*")
+        .eq("coach_id", session.user.id)
+        .eq("event_type_id", eventTypeId);
+      if (error) throw error;
+
+      const byClient = {};
+      (data || []).forEach((row) => {
+        byClient[row.client_id] = row;
+      });
+      setNotifAssignmentsByClient(byClient);
+      setNotifCheckedClientIds((data || []).filter((r) => r.enabled).map((r) => r.client_id));
+    } catch (err) {
+      console.error("Couldn't load client assignments:", err);
+    } finally {
+      setNotifAssignmentsLoading(false);
+    }
+  }
+
+  function toggleNotifClientChecked(clientId) {
+    setNotifCheckedClientIds((prev) =>
+      prev.includes(clientId) ? prev.filter((id) => id !== clientId) : [...prev, clientId]
+    );
+  }
+
+  function startEditOverride(clientId, currentDraft) {
+    setNotifOverrideEditingClientId(clientId);
+    setNotifOverrideDraft(currentDraft !== null && currentDraft !== undefined ? String(currentDraft) : "");
+  }
+
+  function cancelEditOverride() {
+    setNotifOverrideEditingClientId(null);
+    setNotifOverrideDraft("");
+  }
+
+  async function saveOverride(clientId, eventType) {
+    if (!eventType) return;
+    const value =
+      eventType.condition_kind === "time"
+        ? { time: notifOverrideDraft }
+        : { percent: Number(notifOverrideDraft) };
+
+    try {
+      const { data, error } = await supabase
+        .from("client_event_assignments")
+        .upsert(
+          {
+            coach_id: session.user.id,
+            client_id: clientId,
+            event_type_id: eventType.id,
+            enabled: notifCheckedClientIds.includes(clientId),
+            override_value: value,
+          },
+          { onConflict: "client_id,event_type_id" }
+        )
+        .select()
+        .maybeSingle();
+      if (error) throw error;
+      setNotifAssignmentsByClient((prev) => ({ ...prev, [clientId]: data }));
+      cancelEditOverride();
+    } catch (err) {
+      console.error("Couldn't save override:", err);
+    }
+  }
+
+  async function applyEventToSelectedClients() {
+    if (!notifSelectedEventTypeId || notifCheckedClientIds.length === 0) return;
+
+    setNotifApplyBusy(true);
+    setNotifApplyError(null);
+    setNotifApplyFlash(null);
+
+    try {
+      const rows = notifCheckedClientIds.map((clientId) => ({
+        coach_id: session.user.id,
+        client_id: clientId,
+        event_type_id: notifSelectedEventTypeId,
+        enabled: true,
+        override_value: notifAssignmentsByClient[clientId] ? notifAssignmentsByClient[clientId].override_value : null,
+      }));
+
+      const { error } = await supabase
+        .from("client_event_assignments")
+        .upsert(rows, { onConflict: "client_id,event_type_id" });
+      if (error) throw error;
+
+      setNotifApplyFlash("Applied to selected clients.");
+      loadAssignmentsForEventType(notifSelectedEventTypeId);
+    } catch (err) {
+      setNotifApplyError(err && err.message ? err.message : "Couldn't apply changes.");
+    } finally {
+      setNotifApplyBusy(false);
+    }
+  }
+
+  async function loadAssignmentsForClient(clientId) {
+    if (!session || !clientId) return;
+
+    setNotifByClientLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from("client_event_assignments")
+        .select("*, coach_event_types(*)")
+        .eq("coach_id", session.user.id)
+        .eq("client_id", clientId);
+      if (error) throw error;
+
+      setNotifByClientRows(
+        (data || [])
+          .filter((row) => row.coach_event_types)
+          .map((row) => ({ ...row, eventType: row.coach_event_types }))
+      );
+    } catch (err) {
+      console.error("Couldn't load client's assignments:", err);
+    } finally {
+      setNotifByClientLoading(false);
+    }
+  }
+
+  async function copyClientTelegramInviteLink(clientId, existingCode) {
+    setClientDetailCopyBusy(true);
+    try {
+      let code = existingCode;
+      if (!code) {
+        code = generateLinkCode();
+        const { error } = await supabase
+          .from("notification_settings")
+          .upsert({ user_id: clientId, link_code: code }, { onConflict: "user_id" });
+        if (error) throw error;
+        setClientDetail((prev) => (prev ? { ...prev, telegramLinkCode: code } : prev));
+      }
+      await navigator.clipboard.writeText(`https://t.me/Mmadboly_bot?start=${code}`);
+      setClientDetailCopyFlash("Link copied");
+      setTimeout(() => setClientDetailCopyFlash(null), 2000);
+    } catch (err) {
+      console.error("Couldn't generate/copy invite link:", err);
+    } finally {
+      setClientDetailCopyBusy(false);
+    }
+  }
+
   async function loadPlanTypes() {
     if (!session) return;
 
@@ -1924,7 +2315,7 @@ export default function CalorieTrackerApp() {
   }, [roleId]);
 
   useEffect(() => {
-    if (roleId === 2 && (view === "home" || (view === "clients" && clientsView === "grid") || view === "plans" || view === "chat")) {
+    if (roleId === 2 && (view === "home" || (view === "clients" && clientsView === "grid") || view === "plans" || view === "chat" || view === "notifications")) {
       loadClients();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1943,6 +2334,43 @@ export default function CalorieTrackerApp() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, roleId, adminTab, session]);
+
+  useEffect(() => {
+    if (roleId === 2 && view === "administration" && adminTab === "notificationTypes") {
+      loadEventTypes();
+      loadPlaceholders();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, adminTab, session]);
+
+  useEffect(() => {
+    if (roleId === 2 && view === "notifications") {
+      loadEventTypes();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, session]);
+
+  useEffect(() => {
+    if (eventTypes.length > 0 && !notifSelectedEventTypeId) {
+      setNotifSelectedEventTypeId(eventTypes[0].id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eventTypes]);
+
+  useEffect(() => {
+    if (roleId === 2 && view === "notifications" && notifView === "byEvent" && notifSelectedEventTypeId) {
+      cancelEditOverride();
+      loadAssignmentsForEventType(notifSelectedEventTypeId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, notifView, notifSelectedEventTypeId, session]);
+
+  useEffect(() => {
+    if (roleId === 2 && view === "notifications" && notifView === "byClient" && notifByClientSelectedId) {
+      loadAssignmentsForClient(notifByClientSelectedId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, notifView, notifByClientSelectedId, session]);
 
   useEffect(() => {
     if (roleId === 2 && view === "plans" && planBuilderClientId) {
@@ -2221,7 +2649,7 @@ export default function CalorieTrackerApp() {
     setClientDetailError(null);
 
     try {
-      const [infoRes, profileRes, linkRes, ownProfileRes, latestMeasurementRes] = await Promise.all([
+      const [infoRes, profileRes, linkRes, ownProfileRes, latestMeasurementRes, notifRes] = await Promise.all([
         supabase.from("user_info").select("id, name, email, phone, first_login_at").eq("id", clientId).maybeSingle(),
         supabase.from("client_profile").select("user_id, date_from, date_to, plan_type_id").eq("user_id", clientId).maybeSingle(),
         supabase.from("coach_clients").select("status").eq("coach_id", session.user.id).eq("client_id", clientId).maybeSingle(),
@@ -2233,6 +2661,7 @@ export default function CalorieTrackerApp() {
           .order("measured_at", { ascending: false })
           .limit(1)
           .maybeSingle(),
+        supabase.from("notification_settings").select("target, link_code").eq("user_id", clientId).maybeSingle(),
       ]);
       if (infoRes.error) throw infoRes.error;
       if (profileRes.error) throw profileRes.error;
@@ -2245,6 +2674,7 @@ export default function CalorieTrackerApp() {
       const link = linkRes.data || {};
       const ownProfile = ownProfileRes.data || {};
       const latestMeasurement = latestMeasurementRes.data || null;
+      const notif = notifRes.data || {};
 
       let planTypeName = null;
       if (clientProfile.plan_type_id) {
@@ -2288,6 +2718,8 @@ export default function CalorieTrackerApp() {
               thighs: latestMeasurement.thighs,
             }
           : null,
+        telegramTarget: notif.target || null,
+        telegramLinkCode: notif.link_code || null,
       });
     } catch (err) {
       setClientDetailError(err && err.message ? err.message : "Couldn't load this client.");
@@ -5779,7 +6211,7 @@ export default function CalorieTrackerApp() {
             {view === "administration" && (
               <div>
                 <div style={{ display: "flex", gap: 4, marginBottom: 20, borderBottom: `1px solid ${GRID}`, paddingBottom: 12 }}>
-                  {[{ id: "planTypes", label: "Plan types" }, { id: "foodList", label: "Food list" }].map((t) => (
+                  {[{ id: "planTypes", label: "Plan types" }, { id: "foodList", label: "Food list" }, { id: "notificationTypes", label: "Notification" }].map((t) => (
                     <button
                       key={t.id}
                       onClick={() => setAdminTab(t.id)}
@@ -6003,6 +6435,166 @@ export default function CalorieTrackerApp() {
                     </div>
                   </div>
                 )}
+
+                {adminTab === "notificationTypes" && (
+                  <div style={{ display: "grid", gap: 20 }}>
+                    <div style={panelStyle}>
+                      <SectionTitle>Notification event types</SectionTitle>
+
+                      {eventTypesLoading ? (
+                        <div style={{ fontSize: 12, color: INK_SOFT }}>Loading event types…</div>
+                      ) : eventTypesError ? (
+                        <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                          {eventTypesError}
+                        </div>
+                      ) : eventTypes.length === 0 ? (
+                        <div style={{ fontSize: 12, color: INK_SOFT }}>You haven't defined any notification event types yet.</div>
+                      ) : (
+                        <div style={{ overflowX: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                            <thead>
+                              <tr>
+                                <th style={thStyle}>Name</th>
+                                <th style={thStyle}>Kind</th>
+                                <th style={thStyle}>Default value</th>
+                                <th style={thStyle}></th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {eventTypes.map((et) => (
+                                <tr key={et.id} style={{ borderBottom: `1px solid ${GRID}` }}>
+                                  <td style={tdStyle}>{et.name}</td>
+                                  <td style={tdStyle}>{et.condition_kind === "time" ? "Time" : "Threshold"}</td>
+                                  <td style={tdStyle}>
+                                    {et.condition_kind === "time"
+                                      ? (et.default_value && et.default_value.time) || "—"
+                                      : et.default_value && et.default_value.percent != null
+                                      ? `${et.default_value.percent}%`
+                                      : "—"}
+                                  </td>
+                                  <td style={{ ...tdStyle, textAlign: "right" }}>
+                                    <button onClick={() => startEditEventType(et)} style={iconButtonStyle} aria-label={`Edit ${et.name}`}>
+                                      <Pencil size={14} />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+
+                      <button onClick={startAddEventType} style={{ ...primaryButtonStyle, width: "auto", marginTop: 16 }}>
+                        <Plus size={14} strokeWidth={2.5} /> Add event type
+                      </button>
+                    </div>
+
+                    {eventTypeFormOpen && (
+                      <div style={panelStyle}>
+                        <SectionTitle>{editingEventTypeId ? "Edit event type" : "Add event type"}</SectionTitle>
+
+                        <label style={labelStyle}>Event name</label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Calorie threshold warning"
+                          value={eventTypeFormName}
+                          onChange={(e) => setEventTypeFormName(e.target.value)}
+                          style={inputStyle}
+                          disabled={eventTypeFormBusy}
+                        />
+
+                        <label style={labelStyle}>Condition kind</label>
+                        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+                          {[{ id: "time", label: "Time" }, { id: "threshold", label: "Threshold" }].map((k) => (
+                            <button
+                              key={k.id}
+                              onClick={() => setEventTypeFormKind(k.id)}
+                              style={toggleStyle(eventTypeFormKind === k.id)}
+                              disabled={eventTypeFormBusy}
+                            >
+                              {k.label}
+                            </button>
+                          ))}
+                        </div>
+
+                        {eventTypeFormKind === "time" ? (
+                          <>
+                            <label style={labelStyle}>Default value (time)</label>
+                            <input
+                              type="time"
+                              value={eventTypeFormTimeValue}
+                              onChange={(e) => setEventTypeFormTimeValue(e.target.value)}
+                              style={inputStyle}
+                              disabled={eventTypeFormBusy}
+                            />
+                          </>
+                        ) : (
+                          <>
+                            <label style={labelStyle}>Default value (%)</label>
+                            <input
+                              type="number"
+                              placeholder="e.g. 90"
+                              value={eventTypeFormPercentValue}
+                              onChange={(e) => setEventTypeFormPercentValue(e.target.value)}
+                              style={inputStyle}
+                              disabled={eventTypeFormBusy}
+                            />
+                          </>
+                        )}
+
+                        <label style={labelStyle}>Message</label>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                          {placeholders
+                            .filter((p) => p.condition_kind === eventTypeFormKind || p.condition_kind === "both")
+                            .map((p) => (
+                              <button
+                                key={p.id}
+                                type="button"
+                                onClick={() => insertPlaceholderToken(p.token)}
+                                style={{
+                                  padding: "3px 8px",
+                                  borderRadius: 12,
+                                  border: `1px solid ${TEAL}`,
+                                  background: TEAL_SOFT,
+                                  color: TEAL,
+                                  fontFamily: "'IBM Plex Mono', monospace",
+                                  fontSize: 11,
+                                  cursor: "pointer",
+                                }}
+                                title={p.label}
+                              >
+                                {p.token}
+                              </button>
+                            ))}
+                        </div>
+                        <textarea
+                          ref={eventTypeMessageRef}
+                          placeholder="e.g. Hi {name}, you've reached {percent}% of your {target} kcal target."
+                          value={eventTypeFormMessage}
+                          onChange={(e) => setEventTypeFormMessage(e.target.value)}
+                          rows={3}
+                          style={{ ...inputStyle, resize: "vertical", fontFamily: "'IBM Plex Mono', monospace" }}
+                          disabled={eventTypeFormBusy}
+                        />
+
+                        <div style={{ display: "flex", gap: 10 }}>
+                          <button onClick={submitEventTypeForm} style={primaryButtonStyle} disabled={eventTypeFormBusy}>
+                            {eventTypeFormBusy ? "Saving…" : "Save event type"}
+                          </button>
+                          <button onClick={cancelEventTypeForm} style={secondaryButtonStyle} disabled={eventTypeFormBusy}>
+                            Cancel
+                          </button>
+                        </div>
+
+                        {eventTypeFormError && (
+                          <div style={{ marginTop: 12, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                            {eventTypeFormError}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
@@ -6086,9 +6678,223 @@ export default function CalorieTrackerApp() {
             )}
 
             {view === "notifications" && (
-              <div style={panelStyle}>
-                <SectionTitle>Notifications</SectionTitle>
-                <div style={{ fontSize: 12.5, color: INK_SOFT }}>Notifications screen — coming soon.</div>
+              <div style={{ display: "grid", gap: 20 }}>
+                <div style={{ display: "flex", gap: 4 }}>
+                  {[{ id: "byEvent", label: "By event" }, { id: "byClient", label: "By client" }].map((t) => (
+                    <button
+                      key={t.id}
+                      onClick={() => setNotifView(t.id)}
+                      style={{
+                        padding: "7px 14px",
+                        borderRadius: 4,
+                        border: `1px solid ${notifView === t.id ? TEAL : GRID}`,
+                        background: notifView === t.id ? TEAL_SOFT : PANEL,
+                        color: notifView === t.id ? TEAL : INK_SOFT,
+                        fontFamily: "'Space Grotesk', sans-serif",
+                        fontSize: 12.5,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+
+                {notifView === "byEvent" ? (
+                  <div style={panelStyle}>
+                    <SectionTitle>Assign event to clients</SectionTitle>
+
+                    {eventTypes.length === 0 ? (
+                      <div style={{ fontSize: 12, color: INK_SOFT }}>
+                        Define a notification event type first, under Administration → Notification.
+                      </div>
+                    ) : (
+                      <>
+                        <label style={labelStyle}>Event type</label>
+                        <select
+                          value={notifSelectedEventTypeId}
+                          onChange={(e) => setNotifSelectedEventTypeId(e.target.value)}
+                          style={inputStyle}
+                        >
+                          {eventTypes.map((et) => (
+                            <option key={et.id} value={et.id}>
+                              {et.name}
+                            </option>
+                          ))}
+                        </select>
+
+                        {notifAssignmentsLoading ? (
+                          <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
+                        ) : clients.length === 0 ? (
+                          <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any clients yet.</div>
+                        ) : (
+                          <div>
+                            {clients.map((c) => {
+                              const assignment = notifAssignmentsByClient[c.id];
+                              const eventType = eventTypes.find((et) => et.id === notifSelectedEventTypeId);
+                              const isOverride = !!(assignment && assignment.override_value);
+                              const effectiveValue = isOverride
+                                ? assignment.override_value
+                                : eventType
+                                ? eventType.default_value
+                                : null;
+                              const displayValue =
+                                eventType && eventType.condition_kind === "time"
+                                  ? (effectiveValue && effectiveValue.time) || "—"
+                                  : effectiveValue && effectiveValue.percent != null
+                                  ? `${effectiveValue.percent}%`
+                                  : "—";
+
+                              return (
+                                <div key={c.id} style={{ ...foodRowStyle, gap: 10 }}>
+                                  <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", flex: 1 }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={notifCheckedClientIds.includes(c.id)}
+                                      onChange={() => toggleNotifClientChecked(c.id)}
+                                      style={{ width: 16, height: 16, cursor: "pointer" }}
+                                    />
+                                    <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>
+                                      {c.name}
+                                    </span>
+                                  </label>
+
+                                  {notifOverrideEditingClientId === c.id ? (
+                                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                      <input
+                                        type={eventType && eventType.condition_kind === "time" ? "time" : "number"}
+                                        value={notifOverrideDraft}
+                                        onChange={(e) => setNotifOverrideDraft(e.target.value)}
+                                        style={{ ...smallInputStyle, width: 100 }}
+                                      />
+                                      <button onClick={() => saveOverride(c.id, eventType)} style={iconButtonStyle} aria-label="Save override">
+                                        <Check size={14} />
+                                      </button>
+                                      <button onClick={cancelEditOverride} style={iconButtonStyle} aria-label="Cancel">
+                                        <X size={14} />
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                      <span
+                                        style={{
+                                          padding: "3px 8px",
+                                          borderRadius: 4,
+                                          background: isOverride ? AMBER_SOFT : "#EEEEEC",
+                                          color: isOverride ? AMBER : INK_SOFT,
+                                          fontFamily: "'IBM Plex Mono', monospace",
+                                          fontSize: 11,
+                                          fontWeight: 600,
+                                        }}
+                                      >
+                                        {isOverride ? `Override — ${displayValue}` : `Default — ${displayValue}`}
+                                      </span>
+                                      <button
+                                        onClick={() =>
+                                          startEditOverride(
+                                            c.id,
+                                            isOverride ? effectiveValue.percent ?? effectiveValue.time : ""
+                                          )
+                                        }
+                                        style={{ ...iconButtonStyle, fontSize: 11, color: TEAL }}
+                                      >
+                                        edit
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        <button
+                          onClick={applyEventToSelectedClients}
+                          style={{ ...primaryButtonStyle, width: "auto", marginTop: 16 }}
+                          disabled={notifApplyBusy || notifCheckedClientIds.length === 0}
+                        >
+                          {notifApplyBusy ? "Applying…" : "Apply to selected"}
+                        </button>
+
+                        {notifApplyFlash && (
+                          <div style={{ marginTop: 10, padding: "8px 10px", background: GREEN_SOFT, color: GREEN, borderRadius: 4, fontSize: 12 }}>
+                            {notifApplyFlash}
+                          </div>
+                        )}
+                        {notifApplyError && (
+                          <div style={{ marginTop: 10, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                            {notifApplyError}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <div style={panelStyle}>
+                    <SectionTitle>Client's assigned events</SectionTitle>
+
+                    <label style={labelStyle}>Client</label>
+                    <select
+                      value={notifByClientSelectedId}
+                      onChange={(e) => setNotifByClientSelectedId(e.target.value)}
+                      style={inputStyle}
+                    >
+                      <option value="">Select a client…</option>
+                      {clients.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+
+                    {!notifByClientSelectedId ? (
+                      <div style={{ fontSize: 12, color: INK_SOFT }}>Pick a client to see their assigned events.</div>
+                    ) : notifByClientLoading ? (
+                      <div style={{ fontSize: 12, color: INK_SOFT }}>Loading…</div>
+                    ) : notifByClientRows.length === 0 ? (
+                      <div style={{ fontSize: 12, color: INK_SOFT }}>This client has no assigned events yet.</div>
+                    ) : (
+                      <div>
+                        {notifByClientRows.map((row) => {
+                          const isOverride = !!row.override_value;
+                          const effectiveValue = isOverride ? row.override_value : row.eventType.default_value;
+                          const displayValue =
+                            row.eventType.condition_kind === "time"
+                              ? (effectiveValue && effectiveValue.time) || "—"
+                              : effectiveValue && effectiveValue.percent != null
+                              ? `${effectiveValue.percent}%`
+                              : "—";
+                          return (
+                            <div key={row.eventType.id} style={foodRowStyle}>
+                              <div>
+                                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>
+                                  {row.eventType.name}
+                                </div>
+                                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                                  {row.eventType.condition_kind === "time" ? "Time" : "Threshold"} · {row.enabled ? "Enabled" : "Disabled"}
+                                </div>
+                              </div>
+                              <span
+                                style={{
+                                  padding: "3px 8px",
+                                  borderRadius: 4,
+                                  background: isOverride ? AMBER_SOFT : "#EEEEEC",
+                                  color: isOverride ? AMBER : INK_SOFT,
+                                  fontFamily: "'IBM Plex Mono', monospace",
+                                  fontSize: 11,
+                                  fontWeight: 600,
+                                }}
+                              >
+                                {isOverride ? `Override — ${displayValue}` : `Default — ${displayValue}`}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
@@ -6231,6 +7037,48 @@ export default function CalorieTrackerApp() {
                         </div>
                       ) : (
                         <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 4 }}>No measurements logged yet.</div>
+                      )}
+                    </div>
+
+                    <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
+                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                        Notifications
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                        <span
+                          style={{
+                            fontFamily: "'Space Grotesk', sans-serif",
+                            fontSize: 13,
+                            fontWeight: 600,
+                            color: clientDetail.telegramTarget ? GREEN : INK_SOFT,
+                          }}
+                        >
+                          {clientDetail.telegramTarget ? "Telegram: Connected ✓" : "Telegram: Not connected"}
+                        </span>
+                        {!clientDetail.telegramTarget && (
+                          <button
+                            onClick={() => copyClientTelegramInviteLink(clientDetail.id, clientDetail.telegramLinkCode)}
+                            style={secondaryButtonStyle}
+                            disabled={clientDetailCopyBusy}
+                          >
+                            Copy invite link
+                          </button>
+                        )}
+                      </div>
+                      {clientDetailCopyFlash && (
+                        <div
+                          style={{
+                            marginTop: 8,
+                            padding: "6px 10px",
+                            background: GREEN_SOFT,
+                            color: GREEN,
+                            borderRadius: 4,
+                            fontSize: 11.5,
+                            display: "inline-block",
+                          }}
+                        >
+                          {clientDetailCopyFlash}
+                        </div>
                       )}
                     </div>
 

@@ -619,6 +619,7 @@ export default function CalorieTrackerApp() {
   const [notifOverrideDraft, setNotifOverrideDraft] = useState("");
   const [notifOverrideBusy, setNotifOverrideBusy] = useState(false);
   const [notifOverrideError, setNotifOverrideError] = useState(null);
+  const [notifRemoveBusyId, setNotifRemoveBusyId] = useState(null);
 
   const [clientDetailCopyBusy, setClientDetailCopyBusy] = useState(false);
   const [clientDetailCopyFlash, setClientDetailCopyFlash] = useState(null);
@@ -2245,6 +2246,26 @@ export default function CalorieTrackerApp() {
     setNotifOverrideEditingId(null);
     setNotifOverrideDraft("");
     setNotifOverrideError(null);
+  }
+
+  async function removeAssignment(row, eventType, client) {
+    const confirmed = window.confirm(`Remove ${client.name} from "${eventType.name}"?`);
+    if (!confirmed) return;
+
+    setNotifRemoveBusyId(row.id);
+    setNotifDetailError(null);
+    try {
+      const { error } = await supabase.from("client_event_assignments").delete().eq("id", row.id);
+      if (error) throw error;
+      if (notifOverrideEditingId === row.id) cancelEditOverride();
+      // Refetch rather than filter locally so the grid reflects what's
+      // actually in the table (e.g. an RLS-blocked delete removes nothing).
+      loadNotifDetailRows();
+    } catch (err) {
+      setNotifDetailError(err && err.message ? err.message : "Couldn't remove this assignment.");
+    } finally {
+      setNotifRemoveBusyId(null);
+    }
   }
 
   async function saveOverride(row, eventType) {
@@ -6699,7 +6720,7 @@ export default function CalorieTrackerApp() {
                 ? activePlanClients.map((c) => ({ id: c.id, label: c.name }))
                 : eventTypes.map((et) => ({ id: et.id, label: et.name, sub: `${eventKindLabel(et.condition_kind)} · ${formatEventValue(et.condition_kind, et.default_value)}` }));
 
-              const renderValueCell = ({ row, eventType }) => {
+              const renderValueCell = ({ row, eventType, client }) => {
                 if (notifOverrideEditingId === row.id) {
                   return (
                     <div>
@@ -6749,6 +6770,13 @@ export default function CalorieTrackerApp() {
                     </span>
                     <button onClick={() => startEditOverride(row, eventType)} style={{ ...iconButtonStyle, fontSize: 11, color: TEAL }}>
                       edit
+                    </button>
+                    <button
+                      onClick={() => removeAssignment(row, eventType, client)}
+                      style={{ ...iconButtonStyle, fontSize: 11, color: RED }}
+                      disabled={notifRemoveBusyId === row.id}
+                    >
+                      {notifRemoveBusyId === row.id ? "removing…" : "remove"}
                     </button>
                   </div>
                 );

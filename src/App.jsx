@@ -319,6 +319,17 @@ function planStatusMeta(status) {
   return { label: "No status yet", color: INK_SOFT, soft: "#EEEEEC" };
 }
 
+function eventKindLabel(kind) {
+  return kind === "time" ? "Time" : "Threshold";
+}
+
+// Renders a coach_event_types default_value / client_event_assignments
+// override_value jsonb ({ time } or { percent }) for display.
+function formatEventValue(kind, value) {
+  if (kind === "time") return (value && value.time) || "—";
+  return value && value.percent != null ? `${value.percent}%` : "—";
+}
+
 function PlanStatusBadge({ status }) {
   const meta = planStatusMeta(status);
 
@@ -595,18 +606,19 @@ export default function CalorieTrackerApp() {
   const eventTypeMessageRef = useRef(null);
 
   const [notifView, setNotifView] = useState("byEvent");
-  const [notifSelectedEventTypeId, setNotifSelectedEventTypeId] = useState("");
-  const [notifAssignmentsByClient, setNotifAssignmentsByClient] = useState({});
-  const [notifAssignmentsLoading, setNotifAssignmentsLoading] = useState(false);
-  const [notifCheckedClientIds, setNotifCheckedClientIds] = useState([]);
-  const [notifApplyBusy, setNotifApplyBusy] = useState(false);
-  const [notifApplyError, setNotifApplyError] = useState(null);
-  const [notifApplyFlash, setNotifApplyFlash] = useState(null);
-  const [notifOverrideEditingClientId, setNotifOverrideEditingClientId] = useState(null);
+  const [notifDetailEventTypeId, setNotifDetailEventTypeId] = useState(null);
+  const [notifDetailClientId, setNotifDetailClientId] = useState(null);
+  const [notifDetailRows, setNotifDetailRows] = useState([]);
+  const [notifDetailLoading, setNotifDetailLoading] = useState(false);
+  const [notifDetailError, setNotifDetailError] = useState(null);
+  const [notifPickerOpen, setNotifPickerOpen] = useState(false);
+  const [notifPickerCheckedIds, setNotifPickerCheckedIds] = useState([]);
+  const [notifPickerBusy, setNotifPickerBusy] = useState(false);
+  const [notifPickerError, setNotifPickerError] = useState(null);
+  const [notifOverrideEditingId, setNotifOverrideEditingId] = useState(null);
   const [notifOverrideDraft, setNotifOverrideDraft] = useState("");
-  const [notifByClientSelectedId, setNotifByClientSelectedId] = useState("");
-  const [notifByClientRows, setNotifByClientRows] = useState([]);
-  const [notifByClientLoading, setNotifByClientLoading] = useState(false);
+  const [notifOverrideBusy, setNotifOverrideBusy] = useState(false);
+  const [notifOverrideError, setNotifOverrideError] = useState(null);
 
   const [clientDetailCopyBusy, setClientDetailCopyBusy] = useState(false);
   const [clientDetailCopyFlash, setClientDetailCopyFlash] = useState(null);
@@ -2139,128 +2151,130 @@ export default function CalorieTrackerApp() {
     }
   }
 
-  async function loadAssignmentsForEventType(eventTypeId) {
-    if (!session || !eventTypeId) return;
+  // Both Notifications lenses (By event / By client) read and write the same
+  // client_event_assignments rows; the detail screen just scopes them either
+  // to one event type or to one client.
+  async function loadNotifDetailRows() {
+    if (!session) return;
+    const byEvent = notifView === "byEvent";
+    const scopeId = byEvent ? notifDetailEventTypeId : notifDetailClientId;
+    if (!scopeId) return;
 
-    setNotifAssignmentsLoading(true);
+    setNotifDetailLoading(true);
+    setNotifDetailError(null);
     try {
       const { data, error } = await supabase
         .from("client_event_assignments")
         .select("*")
         .eq("coach_id", session.user.id)
-        .eq("event_type_id", eventTypeId);
+        .eq(byEvent ? "event_type_id" : "client_id", scopeId)
+        .order("created_at", { ascending: true });
       if (error) throw error;
-
-      const byClient = {};
-      (data || []).forEach((row) => {
-        byClient[row.client_id] = row;
-      });
-      setNotifAssignmentsByClient(byClient);
-      setNotifCheckedClientIds((data || []).filter((r) => r.enabled).map((r) => r.client_id));
+      setNotifDetailRows(data || []);
     } catch (err) {
-      console.error("Couldn't load client assignments:", err);
+      setNotifDetailError(err && err.message ? err.message : "Couldn't load assignments.");
     } finally {
-      setNotifAssignmentsLoading(false);
+      setNotifDetailLoading(false);
     }
   }
 
-  function toggleNotifClientChecked(clientId) {
-    setNotifCheckedClientIds((prev) =>
-      prev.includes(clientId) ? prev.filter((id) => id !== clientId) : [...prev, clientId]
-    );
+  function switchNotifView(nextView) {
+    setNotifView(nextView);
+    setNotifDetailEventTypeId(null);
+    setNotifDetailClientId(null);
   }
 
-  function startEditOverride(clientId, currentDraft) {
-    setNotifOverrideEditingClientId(clientId);
-    setNotifOverrideDraft(currentDraft !== null && currentDraft !== undefined ? String(currentDraft) : "");
+  function openNotifPicker() {
+    setNotifPickerCheckedIds([]);
+    setNotifPickerError(null);
+    setNotifPickerOpen(true);
+  }
+
+  function closeNotifPicker() {
+    setNotifPickerOpen(false);
+    setNotifPickerCheckedIds([]);
+    setNotifPickerError(null);
+  }
+
+  function toggleNotifPickerId(id) {
+    setNotifPickerCheckedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+
+  async function saveNotifPicker() {
+    if (notifPickerCheckedIds.length === 0) {
+      closeNotifPicker();
+      return;
+    }
+
+    const byEvent = notifView === "byEvent";
+    setNotifPickerBusy(true);
+    setNotifPickerError(null);
+    try {
+      const rows = notifPickerCheckedIds.map((id) => ({
+        coach_id: session.user.id,
+        client_id: byEvent ? id : notifDetailClientId,
+        event_type_id: byEvent ? notifDetailEventTypeId : id,
+        enabled: true,
+        override_value: null,
+      }));
+      // ignoreDuplicates: a row assigned meanwhile from the other lens keeps
+      // its existing override rather than being reset to the default.
+      const { error } = await supabase
+        .from("client_event_assignments")
+        .upsert(rows, { onConflict: "client_id,event_type_id", ignoreDuplicates: true });
+      if (error) throw error;
+      closeNotifPicker();
+      loadNotifDetailRows();
+    } catch (err) {
+      setNotifPickerError(err && err.message ? err.message : "Couldn't save assignments.");
+    } finally {
+      setNotifPickerBusy(false);
+    }
+  }
+
+  function startEditOverride(row, eventType) {
+    const effective = row.override_value || eventType.default_value || {};
+    const current = eventType.condition_kind === "time" ? effective.time : effective.percent;
+    setNotifOverrideEditingId(row.id);
+    setNotifOverrideDraft(current !== null && current !== undefined ? String(current) : "");
+    setNotifOverrideError(null);
   }
 
   function cancelEditOverride() {
-    setNotifOverrideEditingClientId(null);
+    setNotifOverrideEditingId(null);
     setNotifOverrideDraft("");
+    setNotifOverrideError(null);
   }
 
-  async function saveOverride(clientId, eventType) {
-    if (!eventType) return;
-    const value =
-      eventType.condition_kind === "time"
-        ? { time: notifOverrideDraft }
-        : { percent: Number(notifOverrideDraft) };
+  async function saveOverride(row, eventType) {
+    const isTime = eventType.condition_kind === "time";
+    const pct = Number(notifOverrideDraft);
+    if (!notifOverrideDraft || (!isTime && Number.isNaN(pct))) {
+      setNotifOverrideError(isTime ? "Pick a time." : "Enter a percent.");
+      return;
+    }
+    const value = isTime ? { time: notifOverrideDraft } : { percent: pct };
+    const defaults = eventType.default_value || {};
+    // Saving the event's own default clears the override instead of pinning
+    // the client to a copy of it (so later default changes still apply).
+    const matchesDefault = isTime ? defaults.time === value.time : Number(defaults.percent) === value.percent;
 
+    setNotifOverrideBusy(true);
+    setNotifOverrideError(null);
     try {
       const { data, error } = await supabase
         .from("client_event_assignments")
-        .upsert(
-          {
-            coach_id: session.user.id,
-            client_id: clientId,
-            event_type_id: eventType.id,
-            enabled: notifCheckedClientIds.includes(clientId),
-            override_value: value,
-          },
-          { onConflict: "client_id,event_type_id" }
-        )
+        .update({ override_value: matchesDefault ? null : value })
+        .eq("id", row.id)
         .select()
         .maybeSingle();
       if (error) throw error;
-      setNotifAssignmentsByClient((prev) => ({ ...prev, [clientId]: data }));
+      if (data) setNotifDetailRows((prev) => prev.map((r) => (r.id === data.id ? data : r)));
       cancelEditOverride();
     } catch (err) {
-      console.error("Couldn't save override:", err);
-    }
-  }
-
-  async function applyEventToSelectedClients() {
-    if (!notifSelectedEventTypeId || notifCheckedClientIds.length === 0) return;
-
-    setNotifApplyBusy(true);
-    setNotifApplyError(null);
-    setNotifApplyFlash(null);
-
-    try {
-      const rows = notifCheckedClientIds.map((clientId) => ({
-        coach_id: session.user.id,
-        client_id: clientId,
-        event_type_id: notifSelectedEventTypeId,
-        enabled: true,
-        override_value: notifAssignmentsByClient[clientId] ? notifAssignmentsByClient[clientId].override_value : null,
-      }));
-
-      const { error } = await supabase
-        .from("client_event_assignments")
-        .upsert(rows, { onConflict: "client_id,event_type_id" });
-      if (error) throw error;
-
-      setNotifApplyFlash("Applied to selected clients.");
-      loadAssignmentsForEventType(notifSelectedEventTypeId);
-    } catch (err) {
-      setNotifApplyError(err && err.message ? err.message : "Couldn't apply changes.");
+      setNotifOverrideError(err && err.message ? err.message : "Couldn't save this value.");
     } finally {
-      setNotifApplyBusy(false);
-    }
-  }
-
-  async function loadAssignmentsForClient(clientId) {
-    if (!session || !clientId) return;
-
-    setNotifByClientLoading(true);
-    try {
-      const { data, error } = await supabase
-        .from("client_event_assignments")
-        .select("*, coach_event_types(*)")
-        .eq("coach_id", session.user.id)
-        .eq("client_id", clientId);
-      if (error) throw error;
-
-      setNotifByClientRows(
-        (data || [])
-          .filter((row) => row.coach_event_types)
-          .map((row) => ({ ...row, eventType: row.coach_event_types }))
-      );
-    } catch (err) {
-      console.error("Couldn't load client's assignments:", err);
-    } finally {
-      setNotifByClientLoading(false);
+      setNotifOverrideBusy(false);
     }
   }
 
@@ -2351,26 +2365,14 @@ export default function CalorieTrackerApp() {
   }, [view, roleId, session]);
 
   useEffect(() => {
-    if (eventTypes.length > 0 && !notifSelectedEventTypeId) {
-      setNotifSelectedEventTypeId(eventTypes[0].id);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eventTypes]);
-
-  useEffect(() => {
-    if (roleId === 2 && view === "notifications" && notifView === "byEvent" && notifSelectedEventTypeId) {
+    if (roleId === 2 && view === "notifications") {
+      closeNotifPicker();
       cancelEditOverride();
-      loadAssignmentsForEventType(notifSelectedEventTypeId);
+      setNotifDetailRows([]);
+      loadNotifDetailRows();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, roleId, notifView, notifSelectedEventTypeId, session]);
-
-  useEffect(() => {
-    if (roleId === 2 && view === "notifications" && notifView === "byClient" && notifByClientSelectedId) {
-      loadAssignmentsForClient(notifByClientSelectedId);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, roleId, notifView, notifByClientSelectedId, session]);
+  }, [view, roleId, notifView, notifDetailEventTypeId, notifDetailClientId, session]);
 
   useEffect(() => {
     if (roleId === 2 && view === "plans" && planBuilderClientId) {
@@ -6677,226 +6679,294 @@ export default function CalorieTrackerApp() {
               </div>
             )}
 
-            {view === "notifications" && (
-              <div style={{ display: "grid", gap: 20 }}>
-                <div style={{ display: "flex", gap: 4 }}>
-                  {[{ id: "byEvent", label: "By event" }, { id: "byClient", label: "By client" }].map((t) => (
-                    <button
-                      key={t.id}
-                      onClick={() => setNotifView(t.id)}
+            {view === "notifications" && (() => {
+              const byEvent = notifView === "byEvent";
+              const detailEventType = byEvent ? eventTypes.find((et) => et.id === notifDetailEventTypeId) : null;
+              const detailClient = byEvent ? null : clients.find((c) => c.id === notifDetailClientId);
+
+              // Each assignment row joined with the "other side" of the lens:
+              // the client (By event) or the event type (By client).
+              const detailRows = notifDetailRows
+                .map((row) => ({
+                  row,
+                  eventType: byEvent ? detailEventType : eventTypes.find((et) => et.id === row.event_type_id),
+                  client: byEvent ? clients.find((c) => c.id === row.client_id) : detailClient,
+                }))
+                .filter((r) => r.eventType && r.client);
+              const assignedIds = new Set(notifDetailRows.map((row) => (byEvent ? row.client_id : row.event_type_id)));
+              const pickerCandidates = byEvent
+                ? activePlanClients.map((c) => ({ id: c.id, label: c.name }))
+                : eventTypes.map((et) => ({ id: et.id, label: et.name, sub: `${eventKindLabel(et.condition_kind)} · ${formatEventValue(et.condition_kind, et.default_value)}` }));
+
+              const renderValueCell = ({ row, eventType }) => {
+                if (notifOverrideEditingId === row.id) {
+                  return (
+                    <div>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <input
+                          type={eventType.condition_kind === "time" ? "time" : "number"}
+                          value={notifOverrideDraft}
+                          onChange={(e) => setNotifOverrideDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") saveOverride(row, eventType);
+                            if (e.key === "Escape") cancelEditOverride();
+                          }}
+                          style={{ ...smallInputStyle, width: 110 }}
+                          disabled={notifOverrideBusy}
+                          autoFocus
+                        />
+                        {eventType.condition_kind !== "time" && <span style={{ fontSize: 12, color: INK_SOFT }}>%</span>}
+                        <button onClick={() => saveOverride(row, eventType)} style={iconButtonStyle} aria-label="Save value" disabled={notifOverrideBusy}>
+                          <Check size={14} />
+                        </button>
+                        <button onClick={cancelEditOverride} style={iconButtonStyle} aria-label="Cancel" disabled={notifOverrideBusy}>
+                          <X size={14} />
+                        </button>
+                      </div>
+                      {notifOverrideError && <div style={{ marginTop: 4, fontSize: 11, color: RED }}>{notifOverrideError}</div>}
+                    </div>
+                  );
+                }
+
+                const isOverride = !!row.override_value;
+                const displayValue = formatEventValue(eventType.condition_kind, isOverride ? row.override_value : eventType.default_value);
+                return (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span
                       style={{
-                        padding: "7px 14px",
+                        padding: "3px 8px",
                         borderRadius: 4,
-                        border: `1px solid ${notifView === t.id ? TEAL : GRID}`,
-                        background: notifView === t.id ? TEAL_SOFT : PANEL,
-                        color: notifView === t.id ? TEAL : INK_SOFT,
-                        fontFamily: "'Space Grotesk', sans-serif",
-                        fontSize: 12.5,
+                        background: isOverride ? AMBER_SOFT : "#EEEEEC",
+                        color: isOverride ? AMBER : INK_SOFT,
+                        fontFamily: "'IBM Plex Mono', monospace",
+                        fontSize: 11,
                         fontWeight: 600,
-                        cursor: "pointer",
+                        whiteSpace: "nowrap",
                       }}
                     >
-                      {t.label}
+                      {isOverride ? `Override — ${displayValue}` : `Default — ${displayValue}`}
+                    </span>
+                    <button onClick={() => startEditOverride(row, eventType)} style={{ ...iconButtonStyle, fontSize: 11, color: TEAL }}>
+                      edit
                     </button>
-                  ))}
-                </div>
-
-                {notifView === "byEvent" ? (
-                  <div style={panelStyle}>
-                    <SectionTitle>Assign event to clients</SectionTitle>
-
-                    {eventTypes.length === 0 ? (
-                      <div style={{ fontSize: 12, color: INK_SOFT }}>
-                        Define a notification event type first, under Administration → Notification.
-                      </div>
-                    ) : (
-                      <>
-                        <label style={labelStyle}>Event type</label>
-                        <select
-                          value={notifSelectedEventTypeId}
-                          onChange={(e) => setNotifSelectedEventTypeId(e.target.value)}
-                          style={inputStyle}
-                        >
-                          {eventTypes.map((et) => (
-                            <option key={et.id} value={et.id}>
-                              {et.name}
-                            </option>
-                          ))}
-                        </select>
-
-                        {notifAssignmentsLoading ? (
-                          <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
-                        ) : clients.length === 0 ? (
-                          <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any clients yet.</div>
-                        ) : (
-                          <div>
-                            {clients.map((c) => {
-                              const assignment = notifAssignmentsByClient[c.id];
-                              const eventType = eventTypes.find((et) => et.id === notifSelectedEventTypeId);
-                              const isOverride = !!(assignment && assignment.override_value);
-                              const effectiveValue = isOverride
-                                ? assignment.override_value
-                                : eventType
-                                ? eventType.default_value
-                                : null;
-                              const displayValue =
-                                eventType && eventType.condition_kind === "time"
-                                  ? (effectiveValue && effectiveValue.time) || "—"
-                                  : effectiveValue && effectiveValue.percent != null
-                                  ? `${effectiveValue.percent}%`
-                                  : "—";
-
-                              return (
-                                <div key={c.id} style={{ ...foodRowStyle, gap: 10 }}>
-                                  <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", flex: 1 }}>
-                                    <input
-                                      type="checkbox"
-                                      checked={notifCheckedClientIds.includes(c.id)}
-                                      onChange={() => toggleNotifClientChecked(c.id)}
-                                      style={{ width: 16, height: 16, cursor: "pointer" }}
-                                    />
-                                    <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>
-                                      {c.name}
-                                    </span>
-                                  </label>
-
-                                  {notifOverrideEditingClientId === c.id ? (
-                                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                                      <input
-                                        type={eventType && eventType.condition_kind === "time" ? "time" : "number"}
-                                        value={notifOverrideDraft}
-                                        onChange={(e) => setNotifOverrideDraft(e.target.value)}
-                                        style={{ ...smallInputStyle, width: 100 }}
-                                      />
-                                      <button onClick={() => saveOverride(c.id, eventType)} style={iconButtonStyle} aria-label="Save override">
-                                        <Check size={14} />
-                                      </button>
-                                      <button onClick={cancelEditOverride} style={iconButtonStyle} aria-label="Cancel">
-                                        <X size={14} />
-                                      </button>
-                                    </div>
-                                  ) : (
-                                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                      <span
-                                        style={{
-                                          padding: "3px 8px",
-                                          borderRadius: 4,
-                                          background: isOverride ? AMBER_SOFT : "#EEEEEC",
-                                          color: isOverride ? AMBER : INK_SOFT,
-                                          fontFamily: "'IBM Plex Mono', monospace",
-                                          fontSize: 11,
-                                          fontWeight: 600,
-                                        }}
-                                      >
-                                        {isOverride ? `Override — ${displayValue}` : `Default — ${displayValue}`}
-                                      </span>
-                                      <button
-                                        onClick={() =>
-                                          startEditOverride(
-                                            c.id,
-                                            isOverride ? effectiveValue.percent ?? effectiveValue.time : ""
-                                          )
-                                        }
-                                        style={{ ...iconButtonStyle, fontSize: 11, color: TEAL }}
-                                      >
-                                        edit
-                                      </button>
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-
-                        <button
-                          onClick={applyEventToSelectedClients}
-                          style={{ ...primaryButtonStyle, width: "auto", marginTop: 16 }}
-                          disabled={notifApplyBusy || notifCheckedClientIds.length === 0}
-                        >
-                          {notifApplyBusy ? "Applying…" : "Apply to selected"}
-                        </button>
-
-                        {notifApplyFlash && (
-                          <div style={{ marginTop: 10, padding: "8px 10px", background: GREEN_SOFT, color: GREEN, borderRadius: 4, fontSize: 12 }}>
-                            {notifApplyFlash}
-                          </div>
-                        )}
-                        {notifApplyError && (
-                          <div style={{ marginTop: 10, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                            {notifApplyError}
-                          </div>
-                        )}
-                      </>
-                    )}
                   </div>
-                ) : (
-                  <div style={panelStyle}>
-                    <SectionTitle>Client's assigned events</SectionTitle>
+                );
+              };
 
-                    <label style={labelStyle}>Client</label>
-                    <select
-                      value={notifByClientSelectedId}
-                      onChange={(e) => setNotifByClientSelectedId(e.target.value)}
-                      style={inputStyle}
-                    >
-                      <option value="">Select a client…</option>
-                      {clients.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
+              return (
+                <div style={{ display: "grid", gap: 20 }}>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    {[{ id: "byEvent", label: "By event" }, { id: "byClient", label: "By client" }].map((t) => (
+                      <button key={t.id} onClick={() => switchNotifView(t.id)} style={toggleStyle(notifView === t.id)}>
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
 
-                    {!notifByClientSelectedId ? (
-                      <div style={{ fontSize: 12, color: INK_SOFT }}>Pick a client to see their assigned events.</div>
-                    ) : notifByClientLoading ? (
-                      <div style={{ fontSize: 12, color: INK_SOFT }}>Loading…</div>
-                    ) : notifByClientRows.length === 0 ? (
-                      <div style={{ fontSize: 12, color: INK_SOFT }}>This client has no assigned events yet.</div>
-                    ) : (
-                      <div>
-                        {notifByClientRows.map((row) => {
-                          const isOverride = !!row.override_value;
-                          const effectiveValue = isOverride ? row.override_value : row.eventType.default_value;
-                          const displayValue =
-                            row.eventType.condition_kind === "time"
-                              ? (effectiveValue && effectiveValue.time) || "—"
-                              : effectiveValue && effectiveValue.percent != null
-                              ? `${effectiveValue.percent}%`
-                              : "—";
-                          return (
-                            <div key={row.eventType.id} style={foodRowStyle}>
-                              <div>
-                                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>
-                                  {row.eventType.name}
-                                </div>
-                                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                                  {row.eventType.condition_kind === "time" ? "Time" : "Threshold"} · {row.enabled ? "Enabled" : "Disabled"}
-                                </div>
-                              </div>
-                              <span
-                                style={{
-                                  padding: "3px 8px",
-                                  borderRadius: 4,
-                                  background: isOverride ? AMBER_SOFT : "#EEEEEC",
-                                  color: isOverride ? AMBER : INK_SOFT,
-                                  fontFamily: "'IBM Plex Mono', monospace",
-                                  fontSize: 11,
-                                  fontWeight: 600,
-                                }}
-                              >
-                                {isOverride ? `Override — ${displayValue}` : `Default — ${displayValue}`}
-                              </span>
+                  {byEvent && !detailEventType && (
+                    <div style={panelStyle}>
+                      <SectionTitle>Notification events</SectionTitle>
+                      {eventTypesLoading ? (
+                        <div style={{ fontSize: 12, color: INK_SOFT }}>Loading events…</div>
+                      ) : eventTypesError ? (
+                        <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>{eventTypesError}</div>
+                      ) : eventTypes.length === 0 ? (
+                        <div style={{ fontSize: 12, color: INK_SOFT }}>
+                          Define a notification event type first, under Administration → Notification.
+                        </div>
+                      ) : (
+                        <div style={{ overflowX: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                            <thead>
+                              <tr>
+                                <th style={thStyle}>Event</th>
+                                <th style={thStyle}>Kind</th>
+                                <th style={thStyle}>Default</th>
+                                <th style={thStyle}></th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {eventTypes.map((et) => (
+                                <tr key={et.id} style={{ borderTop: `1px solid ${GRID}` }}>
+                                  <td style={tdStyle}>{et.name}</td>
+                                  <td style={tdStyle}>{eventKindLabel(et.condition_kind)}</td>
+                                  <td style={tdStyle}>{formatEventValue(et.condition_kind, et.default_value)}</td>
+                                  <td style={{ ...tdStyle, textAlign: "right" }}>
+                                    <button onClick={() => setNotifDetailEventTypeId(et.id)} style={{ ...secondaryButtonStyle, display: "inline-flex" }}>
+                                      View details
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {!byEvent && !detailClient && (
+                    <div style={panelStyle}>
+                      <SectionTitle>Clients</SectionTitle>
+                      {clientsLoading && clients.length === 0 ? (
+                        <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
+                      ) : clientsError ? (
+                        <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>{clientsError}</div>
+                      ) : activePlanClients.length === 0 ? (
+                        <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any active clients yet.</div>
+                      ) : (
+                        <div style={{ overflowX: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                            <thead>
+                              <tr>
+                                <th style={thStyle}>Client</th>
+                                <th style={thStyle}></th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {activePlanClients.map((c) => (
+                                <tr key={c.id} style={{ borderTop: `1px solid ${GRID}` }}>
+                                  <td style={tdStyle}>{c.name}</td>
+                                  <td style={{ ...tdStyle, textAlign: "right" }}>
+                                    <button onClick={() => setNotifDetailClientId(c.id)} style={{ ...secondaryButtonStyle, display: "inline-flex" }}>
+                                      Assign event
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {(detailEventType || detailClient) && (
+                    <div style={panelStyle}>
+                      <button
+                        onClick={() => (byEvent ? setNotifDetailEventTypeId(null) : setNotifDetailClientId(null))}
+                        style={{ ...secondaryButtonStyle, width: "auto", display: "inline-flex", marginBottom: 14 }}
+                      >
+                        {byEvent ? "← Back to events" : "← Back to clients"}
+                      </button>
+
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+                        <div>
+                          <SectionTitle>{byEvent ? detailEventType.name : detailClient.name}</SectionTitle>
+                          {byEvent && (
+                            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT, marginTop: -6 }}>
+                              {eventKindLabel(detailEventType.condition_kind)} · Default {formatEventValue(detailEventType.condition_kind, detailEventType.default_value)}
                             </div>
-                          );
-                        })}
+                          )}
+                        </div>
+                        <button onClick={openNotifPicker} style={primaryButtonStyle}>
+                          <Plus size={14} /> {byEvent ? "Assign client" : "Assign event"}
+                        </button>
                       </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+
+                      <div style={labelStyle}>{byEvent ? "Assigned clients" : "Assigned events"}</div>
+                      {notifDetailLoading && notifDetailRows.length === 0 ? (
+                        <div style={{ fontSize: 12, color: INK_SOFT }}>Loading…</div>
+                      ) : notifDetailError ? (
+                        <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>{notifDetailError}</div>
+                      ) : detailRows.length === 0 ? (
+                        <div style={{ fontSize: 12, color: INK_SOFT }}>
+                          {byEvent ? "No clients are assigned to this event yet." : "This client has no assigned events yet."}
+                        </div>
+                      ) : (
+                        <div style={{ border: `1px solid ${GRID}`, borderRadius: 4, overflowX: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                            <thead>
+                              <tr>
+                                <th style={thStyle}>{byEvent ? "Client" : "Event"}</th>
+                                <th style={thStyle}>Value</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {detailRows.map((r) => (
+                                <tr key={r.row.id} style={{ borderTop: `1px solid ${GRID}` }}>
+                                  <td style={tdStyle}>
+                                    {byEvent ? r.client.name : r.eventType.name}
+                                    {!byEvent && (
+                                      <div style={{ fontSize: 11, color: INK_SOFT }}>{eventKindLabel(r.eventType.condition_kind)}</div>
+                                    )}
+                                  </td>
+                                  <td style={tdStyle}>{renderValueCell(r)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {notifPickerOpen && (detailEventType || detailClient) && (
+                    <div
+                      style={{
+                        position: "fixed",
+                        inset: 0,
+                        background: "rgba(27, 36, 48, 0.5)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        padding: 16,
+                        zIndex: 1000,
+                      }}
+                      onClick={() => !notifPickerBusy && closeNotifPicker()}
+                    >
+                      <div style={{ ...panelStyle, maxWidth: 420, width: "100%", maxHeight: "80vh", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
+                        <SectionTitle>{byEvent ? `Assign clients to ${detailEventType.name}` : `Assign events to ${detailClient.name}`}</SectionTitle>
+
+                        <div style={{ overflowY: "auto", marginBottom: 16 }}>
+                          {pickerCandidates.length === 0 ? (
+                            <div style={{ fontSize: 12, color: INK_SOFT }}>
+                              {byEvent ? "You don't have any active clients yet." : "Define a notification event type first, under Administration → Notification."}
+                            </div>
+                          ) : (
+                            pickerCandidates.map((item) => {
+                              const alreadyAssigned = assignedIds.has(item.id);
+                              return (
+                                <label
+                                  key={item.id}
+                                  style={{ ...foodRowStyle, justifyContent: "flex-start", gap: 10, cursor: alreadyAssigned ? "default" : "pointer", opacity: alreadyAssigned ? 0.6 : 1 }}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={alreadyAssigned || notifPickerCheckedIds.includes(item.id)}
+                                    onChange={() => toggleNotifPickerId(item.id)}
+                                    disabled={alreadyAssigned || notifPickerBusy}
+                                    style={{ width: 16, height: 16, cursor: alreadyAssigned ? "default" : "pointer" }}
+                                  />
+                                  <span style={{ flex: 1 }}>
+                                    <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{item.label}</span>
+                                    {item.sub && <span style={{ display: "block", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>{item.sub}</span>}
+                                  </span>
+                                  {alreadyAssigned && <span style={{ fontSize: 11, color: INK_SOFT }}>Assigned</span>}
+                                </label>
+                              );
+                            })
+                          )}
+                        </div>
+
+                        {notifPickerError && (
+                          <div style={{ marginBottom: 12, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>{notifPickerError}</div>
+                        )}
+
+                        <div style={{ display: "flex", gap: 10 }}>
+                          <button onClick={saveNotifPicker} style={primaryButtonStyle} disabled={notifPickerBusy}>
+                            {notifPickerBusy ? "Saving…" : "Save"}
+                          </button>
+                          <button onClick={closeNotifPicker} style={secondaryButtonStyle} disabled={notifPickerBusy}>
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {view === "account" && accountScreenContent}
 

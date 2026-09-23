@@ -2304,12 +2304,35 @@ export default function CalorieTrackerApp() {
     setClientDetailCopyBusy(true);
     try {
       let code = existingCode;
+      // TEMP DEBUG: remove once the invite-link upsert issue is diagnosed.
+      console.log("[invite-link debug] handler fired", {
+        clientId,
+        sessionUserId: session && session.user ? session.user.id : "(no session)",
+        clientIdIsSessionUser: !!(session && session.user && clientId === session.user.id),
+        existingCode: existingCode || null,
+        willUpsert: !code,
+      });
       if (!code) {
         code = generateLinkCode();
-        const { error } = await supabase
+        const payload = { user_id: clientId, link_code: code };
+        // TEMP DEBUG
+        console.log("[invite-link debug] upserting notification_settings", payload);
+        const { error, status } = await supabase
           .from("notification_settings")
-          .upsert({ user_id: clientId, link_code: code }, { onConflict: "user_id" });
-        if (error) throw error;
+          .upsert(payload, { onConflict: "user_id" });
+        // TEMP DEBUG
+        console.log("[invite-link debug] upsert result", { status, error });
+        if (error) {
+          // TEMP DEBUG: surface every field Postgres/PostgREST returns.
+          console.error("[invite-link debug] upsert failed", {
+            message: error.message,
+            code: error.code,
+            details: error.details,
+            hint: error.hint,
+            full: error,
+          });
+          throw error;
+        }
         setClientDetail((prev) => (prev ? { ...prev, telegramLinkCode: code } : prev));
       }
       await navigator.clipboard.writeText(`https://t.me/Mmadboly_bot?start=${code}`);

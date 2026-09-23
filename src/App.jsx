@@ -6830,7 +6830,7 @@ export default function CalorieTrackerApp() {
                                   <td style={tdStyle}>{c.name}</td>
                                   <td style={{ ...tdStyle, textAlign: "right" }}>
                                     <button onClick={() => setNotifDetailClientId(c.id)} style={{ ...secondaryButtonStyle, display: "inline-flex" }}>
-                                      Assign event
+                                      View details
                                     </button>
                                   </td>
                                 </tr>

@@ -1748,9 +1748,9 @@ export default function CalorieTrackerApp() {
 
       const { data: assignments, error } = await supabase
         .from("client_event_assignments")
-        .select("id, override_value, last_sent_date, coach_event_types!inner(name, condition_kind, message_template, default_value)")
+        .select("id, override_value, last_sent_date, coach_event_types!inner(coach_id, name, condition_kind, message_template, default_value)")
         .eq("client_id", userId)
-        .eq("coach_id", coachId)
+        .eq("coach_event_types.coach_id", coachId)
         .eq("enabled", true)
         .eq("coach_event_types.condition_kind", "threshold");
       if (error || !assignments || assignments.length === 0) return;
@@ -2165,8 +2165,8 @@ export default function CalorieTrackerApp() {
     try {
       const { data, error } = await supabase
         .from("client_event_assignments")
-        .select("*")
-        .eq("coach_id", session.user.id)
+        .select("*, coach_event_types!inner(coach_id)")
+        .eq("coach_event_types.coach_id", session.user.id)
         .eq(byEvent ? "event_type_id" : "client_id", scopeId)
         .order("created_at", { ascending: true });
       if (error) throw error;
@@ -2210,8 +2210,9 @@ export default function CalorieTrackerApp() {
     setNotifPickerBusy(true);
     setNotifPickerError(null);
     try {
+      // client_event_assignments has no coach_id column; the coach is derived
+      // through event_type_id -> coach_event_types.coach_id.
       const rows = notifPickerCheckedIds.map((id) => ({
-        coach_id: session.user.id,
         client_id: byEvent ? id : notifDetailClientId,
         event_type_id: byEvent ? notifDetailEventTypeId : id,
         enabled: true,

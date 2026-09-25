@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X, Send, User } from "lucide-react";
+import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X, Send, User, StickyNote, Clock, Search } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const INK = "#1B2430";
@@ -649,6 +649,21 @@ export default function CalorieTrackerApp() {
   const [homePending, setHomePending] = useState({ status: "loading", data: null, error: null });
   const [homeUnread, setHomeUnread] = useState({ status: "loading", data: null, error: null });
   const [homeActivity, setHomeActivity] = useState({ status: "loading", data: null, error: null });
+  const [homeReminders, setHomeReminders] = useState({ status: "loading", data: null, error: null });
+
+  // Coach Notes tab (coach_notes table).
+  const [notes, setNotes] = useState([]);
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [notesError, setNotesError] = useState(null);
+  const [notesSearch, setNotesSearch] = useState("");
+  const [notesView, setNotesView] = useState("list");
+  const [editingNote, setEditingNote] = useState(null);
+  const [noteFormTitle, setNoteFormTitle] = useState("");
+  const [noteFormContent, setNoteFormContent] = useState("");
+  const [noteFormReminderOn, setNoteFormReminderOn] = useState(false);
+  const [noteFormReminderAt, setNoteFormReminderAt] = useState("");
+  const [noteFormBusy, setNoteFormBusy] = useState(false);
+  const [noteFormError, setNoteFormError] = useState(null);
   // Set right before navigating to Plans so the "reset Plans to list" effect
   // opens the builder for this client instead.
   const pendingPlanBuilderClientIdRef = useRef(null);
@@ -2046,6 +2061,11 @@ export default function CalorieTrackerApp() {
     setHomePending(markLoading);
     setHomeUnread(markLoading);
     setHomeActivity(markLoading);
+    setHomeReminders(markLoading);
+
+    // Reminders only depend on the coach's own notes, so they load alongside
+    // (not after) the shared client fetch and survive it failing.
+    const remindersPromise = loadHomeReminders();
 
     let base;
     try {
@@ -2081,6 +2101,7 @@ export default function CalorieTrackerApp() {
       setHomePending(failed);
       setHomeUnread(failed);
       setHomeActivity(failed);
+      await remindersPromise;
       return;
     }
 
@@ -2089,6 +2110,7 @@ export default function CalorieTrackerApp() {
       loadHomePending(base),
       loadHomeUnread(base),
       loadHomeActivity(base),
+      remindersPromise,
     ]);
   }
 
@@ -2346,6 +2368,168 @@ export default function CalorieTrackerApp() {
     setClientsView("grid");
     setClientsPage(1);
     setView("clients");
+  }
+
+  // Non-dismissed reminders due within the next 48 hours, plus any already
+  // overdue (no lower bound on reminder_at).
+  async function loadHomeReminders() {
+    try {
+      const horizon = new Date(Date.now() + REMINDER_WINDOW_MS).toISOString();
+      const { data, error } = await supabase
+        .from("coach_notes")
+        .select("*")
+        .eq("coach_id", session.user.id)
+        .eq("reminder_dismissed", false)
+        .not("reminder_at", "is", null)
+        .lte("reminder_at", horizon)
+        .order("reminder_at", { ascending: true })
+        .limit(5);
+      if (error) throw error;
+      setHomeReminders({ status: "ready", data: data || [], error: null });
+    } catch (err) {
+      setHomeReminders({ status: "error", data: null, error: err && err.message ? err.message : "Couldn't load reminders." });
+    }
+  }
+
+  async function dismissReminder(noteId) {
+    // Optimistic: drop the row right away, resync from the server on failure.
+    setHomeReminders((prev) => (prev.data ? { ...prev, data: prev.data.filter((n) => n.id !== noteId) } : prev));
+
+    const { error } = await supabase.from("coach_notes").update({ reminder_dismissed: true }).eq("id", noteId);
+    if (error) {
+      console.error("Couldn't dismiss reminder:", error);
+      loadHomeReminders();
+      return;
+    }
+    setNotes((prev) => prev.map((n) => (n.id === noteId ? { ...n, reminder_dismissed: true } : n)));
+  }
+
+  function openNoteFromHome(note) {
+    startEditNote(note);
+    setView("notes");
+  }
+
+  async function loadNotes() {
+    if (!session) return;
+
+    setNotesLoading(true);
+    setNotesError(null);
+
+    try {
+      const { data, error } = await supabase
+        .from("coach_notes")
+        .select("*")
+        .eq("coach_id", session.user.id)
+        .order("updated_at", { ascending: false, nullsFirst: false })
+        .order("created_at", { ascending: false });
+      if (error) throw error;
+      setNotes(data || []);
+    } catch (err) {
+      setNotesError(err && err.message ? err.message : "Couldn't load your notes.");
+    } finally {
+      setNotesLoading(false);
+    }
+  }
+
+  function startNewNote() {
+    setEditingNote(null);
+    setNoteFormTitle("");
+    setNoteFormContent("");
+    setNoteFormReminderOn(false);
+    setNoteFormReminderAt("");
+    setNoteFormError(null);
+    setNotesView("form");
+  }
+
+  function startEditNote(note) {
+    setEditingNote(note);
+    setNoteFormTitle(note.title || "");
+    setNoteFormContent(note.content || "");
+    setNoteFormReminderOn(!!note.reminder_at);
+    setNoteFormReminderAt(note.reminder_at ? toDateTimeLocalValue(new Date(note.reminder_at)) : "");
+    setNoteFormError(null);
+    setNotesView("form");
+  }
+
+  function cancelNoteForm() {
+    setEditingNote(null);
+    setNoteFormError(null);
+    setNotesView("list");
+  }
+
+  function toggleNoteFormReminder(on) {
+    setNoteFormReminderOn(on);
+    if (on && !noteFormReminderAt) {
+      const tomorrowMorning = new Date();
+      tomorrowMorning.setDate(tomorrowMorning.getDate() + 1);
+      tomorrowMorning.setHours(9, 0, 0, 0);
+      setNoteFormReminderAt(toDateTimeLocalValue(tomorrowMorning));
+    }
+  }
+
+  async function submitNoteForm() {
+    const content = noteFormContent.trim();
+    if (!content) {
+      setNoteFormError("Write something in the note first.");
+      return;
+    }
+
+    let reminderAt = null;
+    if (noteFormReminderOn) {
+      // A datetime-local value has no offset, so Date parses it as local time.
+      const parsed = noteFormReminderAt ? new Date(noteFormReminderAt) : null;
+      if (!parsed || Number.isNaN(parsed.getTime())) {
+        setNoteFormError("Pick a date and time for the reminder, or turn it off.");
+        return;
+      }
+      reminderAt = parsed.toISOString();
+    }
+
+    const fields = { title: noteFormTitle.trim() || null, content, reminder_at: reminderAt };
+
+    setNoteFormBusy(true);
+    setNoteFormError(null);
+
+    try {
+      if (editingNote) {
+        const previousMs = editingNote.reminder_at ? new Date(editingNote.reminder_at).getTime() : null;
+        const nextMs = reminderAt ? new Date(reminderAt).getTime() : null;
+        const update = { ...fields, updated_at: new Date().toISOString() };
+        // A new or changed reminder should fire again even if the old one
+        // had been dismissed.
+        if (previousMs !== nextMs) update.reminder_dismissed = false;
+
+        const { error } = await supabase.from("coach_notes").update(update).eq("id", editingNote.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase
+          .from("coach_notes")
+          .insert({ ...fields, coach_id: session.user.id, reminder_dismissed: false });
+        if (error) throw error;
+      }
+
+      setEditingNote(null);
+      setNotesView("list");
+      loadNotes();
+    } catch (err) {
+      setNoteFormError(err && err.message ? err.message : "Couldn't save that note.");
+    } finally {
+      setNoteFormBusy(false);
+    }
+  }
+
+  async function deleteNote(note) {
+    const confirmed = window.confirm(`Delete "${noteDisplayTitle(note)}"? This can't be undone.`);
+    if (!confirmed) return;
+
+    const { error } = await supabase.from("coach_notes").delete().eq("id", note.id);
+    if (error) {
+      window.alert(`Couldn't delete the note: ${error.message}`);
+      return;
+    }
+
+    setNotes((prev) => prev.filter((n) => n.id !== note.id));
+    if (editingNote && editingNote.id === note.id) cancelNoteForm();
   }
 
   async function loadEventTypes() {
@@ -2725,6 +2909,23 @@ export default function CalorieTrackerApp() {
   useEffect(() => {
     if (view !== "clients") {
       setClientsIdFilter(null);
+    }
+  }, [view]);
+
+  useEffect(() => {
+    if (roleId === 2 && view === "notes") {
+      loadNotes();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, session]);
+
+  // Leaving Notes always returns it to the list; entering it keeps whatever
+  // openNoteFromHome set up (same pattern as the Chat selection).
+  useEffect(() => {
+    if (view !== "notes") {
+      setNotesView("list");
+      setEditingNote(null);
+      setNotesSearch("");
     }
   }, [view]);
 
@@ -4475,6 +4676,7 @@ export default function CalorieTrackerApp() {
             {view === "administration" && "Administration"}
             {view === "chat" && "Chat"}
             {view === "notifications" && "Notifications"}
+            {view === "notes" && "Notes"}
             {view === "account" && "Account"}
             {view === "client-detail" && "Client details"}
           </h1>
@@ -5855,6 +6057,7 @@ export default function CalorieTrackerApp() {
               { id: "administration", label: "Administration", icon: Settings },
               { id: "chat", label: "Chat", icon: MessageSquare },
               { id: "notifications", label: "Notifications", icon: Bell },
+              { id: "notes", label: "Notes", icon: StickyNote },
               { id: "account", label: "Account", icon: User },
             ].map((t) => (
               <button
@@ -6112,7 +6315,287 @@ export default function CalorieTrackerApp() {
                       )
                     }
                   </HomeCard>
+
+                  <HomeCard
+                    title="🔔 Upcoming reminders"
+                    accent={
+                      !homeReminders.data || homeReminders.data.length === 0
+                        ? GREEN
+                        : homeReminders.data.some((n) => new Date(n.reminder_at).getTime() < Date.now())
+                        ? RED
+                        : AMBER
+                    }
+                    state={homeReminders}
+                  >
+                    {(reminders) =>
+                      reminders.length === 0 ? (
+                        <HomeEmptyState>No upcoming reminders.</HomeEmptyState>
+                      ) : (
+                        reminders.map((note) => (
+                          <HomeRow key={note.id}>
+                            <button
+                              onClick={() => openNoteFromHome(note)}
+                              style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                flex: 1,
+                                minWidth: 0,
+                                border: "none",
+                                background: "transparent",
+                                padding: 0,
+                                cursor: "pointer",
+                                textAlign: "left",
+                              }}
+                            >
+                              <span style={{ ...homeRowNameStyle, maxWidth: "100%" }}>{noteDisplayTitle(note)}</span>
+                              <span
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 4,
+                                  fontFamily: "'IBM Plex Mono', monospace",
+                                  fontSize: 11,
+                                  color: reminderColor(note.reminder_at),
+                                  fontWeight: new Date(note.reminder_at).getTime() < Date.now() ? 700 : 400,
+                                }}
+                              >
+                                <Clock size={11} />
+                                {formatReminderLabel(note.reminder_at)}
+                              </span>
+                            </button>
+                            <button
+                              onClick={() => dismissReminder(note.id)}
+                              title="Dismiss reminder"
+                              aria-label={`Dismiss reminder for ${noteDisplayTitle(note)}`}
+                              style={{ ...iconButtonStyle, border: `1px solid ${GRID}`, borderRadius: 4, padding: 5, color: GREEN }}
+                            >
+                              <Check size={14} />
+                            </button>
+                          </HomeRow>
+                        ))
+                      )
+                    }
+                  </HomeCard>
                 </div>
+              </div>
+            )}
+
+            {view === "notes" && (
+              <div>
+                {notesView === "form" ? (
+                  <div style={{ ...panelStyle, maxWidth: 640 }}>
+                    <SectionTitle>{editingNote ? "Edit note" : "New note"}</SectionTitle>
+
+                    <label style={labelStyle}>Title (optional)</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Check in with Sara about carbs"
+                      value={noteFormTitle}
+                      onChange={(e) => setNoteFormTitle(e.target.value)}
+                      style={inputStyle}
+                      disabled={noteFormBusy}
+                    />
+
+                    <label style={labelStyle}>Note</label>
+                    <textarea
+                      placeholder="Write your note…"
+                      value={noteFormContent}
+                      onChange={(e) => setNoteFormContent(e.target.value)}
+                      rows={8}
+                      style={{ ...inputStyle, resize: "vertical", fontFamily: "'IBM Plex Mono', monospace" }}
+                      disabled={noteFormBusy}
+                    />
+
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 13, cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={noteFormReminderOn}
+                        onChange={(e) => toggleNoteFormReminder(e.target.checked)}
+                        disabled={noteFormBusy}
+                      />
+                      <Clock size={14} color={TEAL} />
+                      Remind me
+                    </label>
+                    {noteFormReminderOn && (
+                      <input
+                        type="datetime-local"
+                        value={noteFormReminderAt}
+                        onChange={(e) => setNoteFormReminderAt(e.target.value)}
+                        style={{ ...inputStyle, maxWidth: 260 }}
+                        disabled={noteFormBusy}
+                      />
+                    )}
+                    {editingNote && editingNote.reminder_dismissed && editingNote.reminder_at && noteFormReminderOn && (
+                      <div style={{ fontSize: 11.5, color: INK_SOFT, marginTop: -8, marginBottom: 14 }}>
+                        This reminder was dismissed. Change the time to turn it back on.
+                      </div>
+                    )}
+
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <button onClick={submitNoteForm} style={primaryButtonStyle} disabled={noteFormBusy}>
+                        {noteFormBusy ? "Saving…" : "Save note"}
+                      </button>
+                      <button onClick={cancelNoteForm} style={secondaryButtonStyle} disabled={noteFormBusy}>
+                        Cancel
+                      </button>
+                      {editingNote && (
+                        <button
+                          onClick={() => deleteNote(editingNote)}
+                          style={{ ...secondaryButtonStyle, marginLeft: "auto", color: RED }}
+                          disabled={noteFormBusy}
+                        >
+                          <Trash2 size={13} /> Delete
+                        </button>
+                      )}
+                    </div>
+
+                    {noteFormError && (
+                      <div style={{ marginTop: 12, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                        {noteFormError}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  (() => {
+                    const query = notesSearch.trim().toLowerCase();
+                    const visibleNotes = query
+                      ? notes.filter((n) => `${n.title || ""}\n${n.content || ""}`.toLowerCase().includes(query))
+                      : notes;
+
+                    return (
+                      <div>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 16 }}>
+                          <div style={{ position: "relative", flex: 1, maxWidth: 320 }}>
+                            <Search size={14} color={INK_SOFT} style={{ position: "absolute", left: 10, top: 10 }} />
+                            <input
+                              type="text"
+                              placeholder="Search notes"
+                              value={notesSearch}
+                              onChange={(e) => setNotesSearch(e.target.value)}
+                              style={{ ...inputStyle, marginBottom: 0, paddingLeft: 30 }}
+                            />
+                          </div>
+                          <button onClick={startNewNote} style={primaryButtonStyle}>
+                            + New note
+                          </button>
+                        </div>
+
+                        {notesLoading && notes.length === 0 ? (
+                          <div style={{ fontSize: 12, color: INK_SOFT }}>Loading notes…</div>
+                        ) : notesError ? (
+                          <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                            {notesError}
+                          </div>
+                        ) : notes.length === 0 ? (
+                          <div style={{ ...panelStyle, textAlign: "center" }}>
+                            <div style={{ fontSize: 13, color: INK_SOFT, marginBottom: 16 }}>No notes yet</div>
+                            <button onClick={startNewNote} style={{ ...primaryButtonStyle, display: "inline-flex" }}>
+                              + New note
+                            </button>
+                          </div>
+                        ) : visibleNotes.length === 0 ? (
+                          <div style={{ fontSize: 12.5, color: INK_SOFT }}>No notes match "{notesSearch.trim()}".</div>
+                        ) : (
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
+                            {visibleNotes.map((note) => {
+                              const active = isActiveReminder(note);
+                              const edited = note.updated_at && new Date(note.updated_at).getTime() - new Date(note.created_at).getTime() > 1000;
+                              return (
+                                <div
+                                  key={note.id}
+                                  role="button"
+                                  tabIndex={0}
+                                  onClick={() => startEditNote(note)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") startEditNote(note);
+                                  }}
+                                  style={{
+                                    ...panelStyle,
+                                    padding: "0.9rem 1rem",
+                                    cursor: "pointer",
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: 6,
+                                    borderLeft: `3px solid ${active ? reminderColor(note.reminder_at) : GRID}`,
+                                  }}
+                                >
+                                  <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                                    <div style={{ ...homeRowNameStyle, flex: 1, minWidth: 0 }}>{noteDisplayTitle(note)}</div>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        deleteNote(note);
+                                      }}
+                                      aria-label={`Delete ${noteDisplayTitle(note)}`}
+                                      style={{ ...iconButtonStyle, color: INK_SOFT, padding: 2 }}
+                                    >
+                                      <Trash2 size={13} />
+                                    </button>
+                                  </div>
+
+                                  {note.title && note.title.trim() && (
+                                    <div
+                                      style={{
+                                        fontSize: 12.5,
+                                        color: INK_SOFT,
+                                        whiteSpace: "pre-wrap",
+                                        overflow: "hidden",
+                                        display: "-webkit-box",
+                                        WebkitLineClamp: 3,
+                                        WebkitBoxOrient: "vertical",
+                                      }}
+                                    >
+                                      {note.content}
+                                    </div>
+                                  )}
+
+                                  {note.reminder_at && (
+                                    <div
+                                      style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 4,
+                                        fontFamily: "'IBM Plex Mono', monospace",
+                                        fontSize: 11,
+                                        color: active ? reminderColor(note.reminder_at) : INK_SOFT,
+                                        textDecoration: active ? "none" : "line-through",
+                                      }}
+                                      title={active ? "Active reminder" : "Reminder dismissed"}
+                                    >
+                                      <Clock size={11} />
+                                      {formatNoteTimestamp(note.reminder_at)}
+                                      {active && (
+                                        <span
+                                          style={{
+                                            marginLeft: 4,
+                                            padding: "1px 6px",
+                                            borderRadius: 999,
+                                            background: reminderColor(note.reminder_at) === RED ? RED_SOFT : reminderColor(note.reminder_at) === AMBER ? AMBER_SOFT : TEAL_SOFT,
+                                            fontFamily: "'Space Grotesk', sans-serif",
+                                            fontSize: 10,
+                                            fontWeight: 700,
+                                            textTransform: "uppercase",
+                                            letterSpacing: 0.4,
+                                          }}
+                                        >
+                                          {reminderColor(note.reminder_at) === RED ? "Due" : "Reminder"}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT, marginTop: "auto" }}>
+                                    {edited ? `Updated ${formatNoteTimestamp(note.updated_at)}` : `Created ${formatNoteTimestamp(note.created_at)}`}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()
+                )}
               </div>
             )}
 
@@ -7846,6 +8329,54 @@ function formatRelativeTime(isoString) {
   const days = Math.floor(hours / 24);
   if (days < 30) return `${days}d ago`;
   return new Date(isoString).toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+const REMINDER_WINDOW_MS = 48 * 60 * 60 * 1000;
+
+// "YYYY-MM-DDTHH:MM" in local time, the format <input type="datetime-local"> expects.
+function toDateTimeLocalValue(d) {
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${localDateStr(d)}T${hh}:${mm}`;
+}
+
+function noteDisplayTitle(note) {
+  if (note.title && note.title.trim()) return note.title.trim();
+  const firstLine = (note.content || "").trim().split("\n")[0];
+  return firstLine.length > 40 ? `${firstLine.slice(0, 40)}…` : firstLine || "Untitled note";
+}
+
+function isActiveReminder(note) {
+  return !!note.reminder_at && !note.reminder_dismissed;
+}
+
+// "Overdue", "Today 3:00 PM", "Tomorrow 9:00 AM", or "Sat 9:00 AM" /
+// "Oct 3, 9:00 AM" further out.
+function formatReminderLabel(isoString) {
+  const d = new Date(isoString);
+  if (Number.isNaN(d.getTime())) return "";
+  if (d.getTime() < Date.now()) return "Overdue";
+
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const dayDiff = daysBetweenDateStrs(todayStr(), localDateStr(d));
+  if (dayDiff === 0) return `Today ${time}`;
+  if (dayDiff === 1) return `Tomorrow ${time}`;
+  if (dayDiff < 7) return `${d.toLocaleDateString([], { weekday: "short" })} ${time}`;
+  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
+}
+
+function reminderColor(isoString) {
+  const ms = new Date(isoString).getTime() - Date.now();
+  if (ms < 0) return RED;
+  if (ms <= REMINDER_WINDOW_MS) return AMBER;
+  return TEAL;
+}
+
+function formatNoteTimestamp(isoString) {
+  if (!isoString) return "";
+  const d = new Date(isoString);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 function formatChatTime(isoString) {

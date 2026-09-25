@@ -379,7 +379,9 @@ function UnreadBadge({ count }) {
   );
 }
 
-function describeAddClientError(reason) {
+// Maps a create-user `reason` to a message. roleLabel is the kind of
+// account being created ("client", "coach") for the generic fallback.
+function describeCreateUserError(reason, roleLabel) {
   switch (reason) {
     case "not_a_coach":
       return "Your account isn't set up as a coach, so you can't add clients.";
@@ -388,8 +390,15 @@ function describeAddClientError(reason) {
     case "email_required":
       return "Enter an email address.";
     default:
-      return reason ? `Couldn't add client: ${reason}` : "Couldn't add client. Please try again.";
+      return reason ? `Couldn't add ${roleLabel}: ${reason}` : `Couldn't add ${roleLabel}. Please try again.`;
   }
+}
+
+// The screen each role lands on after login (and after the forced
+// password change). Clients and standalone users start on "setup".
+function homeViewForRole(roleId) {
+  if (roleId === 2 || roleId === 4) return "home";
+  return "setup";
 }
 
 // Total calories for a list of meal_logs entries. Shared by the client's
@@ -686,6 +695,18 @@ export default function CalorieTrackerApp() {
   const [addClientBusy, setAddClientBusy] = useState(false);
   const [addClientMessage, setAddClientMessage] = useState(null);
   const [createdClientCredentials, setCreatedClientCredentials] = useState(null);
+
+  // Owner Home / Users: this owner's coaches (owner_coaches), same
+  // { status, data, error } shape as the coach Home cards.
+  const [ownerCoaches, setOwnerCoaches] = useState({ status: "loading", data: null, error: null });
+  const [newCoachFormOpen, setNewCoachFormOpen] = useState(false);
+  const [newCoachName, setNewCoachName] = useState("");
+  const [newCoachEmail, setNewCoachEmail] = useState("");
+  const [newCoachPhoneCountryCode, setNewCoachPhoneCountryCode] = useState("+20");
+  const [newCoachPhoneNumber, setNewCoachPhoneNumber] = useState("");
+  const [newCoachBusy, setNewCoachBusy] = useState(false);
+  const [newCoachError, setNewCoachError] = useState(null);
+  const [createdCoachCredentials, setCreatedCoachCredentials] = useState(null);
   const [editingClientId, setEditingClientId] = useState(null);
 
   const [clientDetail, setClientDetail] = useState(null);
@@ -794,6 +815,26 @@ export default function CalorieTrackerApp() {
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [passwordError, setPasswordError] = useState(null);
   const [passwordFlash, setPasswordFlash] = useState(false);
+
+  // Forced password change (user_info.must_change_password), checked by
+  // load() on every login. Keyed by user id and "unknown" until that read
+  // succeeds — the render gate fails closed, so the app stays hidden until
+  // it's "clear" for the user who is actually signed in.
+  const [passwordGate, setPasswordGate] = useState({ userId: null, status: "unknown" });
+  const [forcedPassword, setForcedPassword] = useState("");
+  const [forcedPasswordConfirm, setForcedPasswordConfirm] = useState("");
+  const [forcedPasswordBusy, setForcedPasswordBusy] = useState(false);
+  const [forcedPasswordError, setForcedPasswordError] = useState(null);
+  // Set once auth.updateUser succeeds, so a retry after the flag update
+  // failed doesn't re-submit the password (Supabase rejects an unchanged one).
+  const forcedPasswordUpdatedRef = useRef(false);
+
+  // Owner's organization name (user_info.organization_name), Account screen.
+  const [organizationName, setOrganizationName] = useState("");
+  const [organizationNameDraft, setOrganizationNameDraft] = useState("");
+  const [organizationNameSaving, setOrganizationNameSaving] = useState(false);
+  const [organizationNameFlash, setOrganizationNameFlash] = useState(false);
+  const [organizationNameError, setOrganizationNameError] = useState(null);
 
   const [goal, setGoal] = useState({ type: "maintain", rate: "moderate" });
   const [planOverride, setPlanOverride] = useState(null);
@@ -918,7 +959,25 @@ export default function CalorieTrackerApp() {
     async function load() {
       const userId = session.user.id;
 
+      setLoaded(false);
+      setPasswordGate({ userId, status: "unknown" });
+      setForcedPassword("");
+      setForcedPasswordConfirm("");
+      setForcedPasswordError(null);
+      forcedPasswordUpdatedRef.current = false;
+
       try {
+        // Read before anything else so a later load failure can't leave the
+        // gate open. A missing user_info row (legacy standalone user) means
+        // no forced change; a query error leaves the gate "unknown".
+        const { data: gateRow, error: gateErr } = await supabase
+          .from("user_info")
+          .select("must_change_password")
+          .eq("id", userId)
+          .maybeSingle();
+        if (gateErr) throw gateErr;
+        setPasswordGate({ userId, status: gateRow && gateRow.must_change_password ? "required" : "clear" });
+
         let { data: profileRow, error: profileErr } = await supabase
           .from("profile")
           .select("*")
@@ -983,7 +1042,7 @@ export default function CalorieTrackerApp() {
 
         const { data: userInfoRow, error: userInfoErr } = await supabase
           .from("user_info")
-          .select("role_id, first_login_at, name, email, phone, avatar_path, language_preference")
+          .select("role_id, first_login_at, name, email, phone, avatar_path, language_preference, organization_name")
           .eq("id", userId)
           .maybeSingle();
 
@@ -994,6 +1053,8 @@ export default function CalorieTrackerApp() {
 
         setAccountEmail(userInfoRow?.email || "");
         setLanguagePreference(userInfoRow?.language_preference || "en");
+        setOrganizationName(userInfoRow?.organization_name || "");
+        setOrganizationNameDraft(userInfoRow?.organization_name || "");
         setAvatarPath(userInfoRow?.avatar_path || null);
         if (userInfoRow?.avatar_path) {
           const { data: avatarSigned, error: avatarSignedErr } = await supabase.storage
@@ -1695,6 +1756,77 @@ export default function CalorieTrackerApp() {
     }
   }
 
+  async function submitForcedPasswordChange() {
+    if (!session || !session.user) return;
+    setForcedPasswordError(null);
+
+    if (!forcedPasswordUpdatedRef.current) {
+      const strengthError = passwordStrengthError(forcedPassword);
+      if (strengthError) {
+        setForcedPasswordError(strengthError);
+        return;
+      }
+      if (forcedPassword !== forcedPasswordConfirm) {
+        setForcedPasswordError("Passwords don't match.");
+        return;
+      }
+    }
+
+    setForcedPasswordBusy(true);
+
+    try {
+      if (!forcedPasswordUpdatedRef.current) {
+        const { error } = await supabase.auth.updateUser({ password: forcedPassword });
+        if (error) throw error;
+        forcedPasswordUpdatedRef.current = true;
+      }
+
+      const { error: flagErr } = await supabase
+        .from("user_info")
+        .update({ must_change_password: false })
+        .eq("id", session.user.id);
+      if (flagErr) throw flagErr;
+
+      forcedPasswordUpdatedRef.current = false;
+      setForcedPassword("");
+      setForcedPasswordConfirm("");
+      setView(homeViewForRole(roleId));
+      setPasswordGate({ userId: session.user.id, status: "clear" });
+    } catch (err) {
+      setForcedPasswordError(
+        forcedPasswordUpdatedRef.current
+          ? "Your password was changed, but we couldn't finish setting up your account. Please try again."
+          : err && err.message ? err.message : "Couldn't change your password."
+      );
+    } finally {
+      setForcedPasswordBusy(false);
+    }
+  }
+
+  async function saveOrganizationName() {
+    if (!session || !session.user) return;
+
+    const next = organizationNameDraft.trim();
+    setOrganizationNameSaving(true);
+    setOrganizationNameError(null);
+
+    try {
+      const { error } = await supabase
+        .from("user_info")
+        .update({ organization_name: next || null })
+        .eq("id", session.user.id);
+      if (error) throw error;
+      setOrganizationName(next);
+      setOrganizationNameDraft(next);
+      setOrganizationNameFlash(true);
+      setTimeout(() => setOrganizationNameFlash(false), 2500);
+    } catch (err) {
+      setOrganizationNameError(err && err.message ? err.message : "Couldn't save your organization name.");
+    } finally {
+      setOrganizationNameSaving(false);
+    }
+  }
+
   async function updateNotificationSettings(patch) {
     if (!notificationSettings) return;
     const next = { ...notificationSettings, ...patch };
@@ -2058,6 +2190,115 @@ export default function CalorieTrackerApp() {
       setClientsError(err && err.message ? err.message : "Couldn't load your clients.");
     } finally {
       setClientsLoading(false);
+    }
+  }
+
+  // Owner Home / Users: this owner's coaches with their name, owner_coaches
+  // status, and number of active clients (coach_clients status "active").
+  async function loadOwnerCoaches() {
+    if (!session) return;
+
+    setOwnerCoaches((prev) => ({ status: "loading", data: prev.data, error: null }));
+
+    try {
+      const { data: links, error: linksErr } = await supabase
+        .from("owner_coaches")
+        .select("coach_id, status")
+        .eq("owner_id", session.user.id);
+      if (linksErr) throw linksErr;
+
+      const coachIds = (links || []).map((l) => l.coach_id);
+      if (coachIds.length === 0) {
+        setOwnerCoaches({ status: "ready", data: [], error: null });
+        return;
+      }
+
+      const [infosRes, clientLinksRes] = await Promise.all([
+        supabase.from("user_info").select("id, name").in("id", coachIds),
+        supabase.from("coach_clients").select("coach_id").in("coach_id", coachIds).eq("status", "active"),
+      ]);
+      if (infosRes.error) throw infosRes.error;
+      if (clientLinksRes.error) throw clientLinksRes.error;
+
+      const nameById = {};
+      (infosRes.data || []).forEach((row) => {
+        nameById[row.id] = row.name;
+      });
+      const clientCountByCoach = {};
+      (clientLinksRes.data || []).forEach((row) => {
+        clientCountByCoach[row.coach_id] = (clientCountByCoach[row.coach_id] || 0) + 1;
+      });
+
+      setOwnerCoaches({
+        status: "ready",
+        data: links
+          .map((l) => ({
+            id: l.coach_id,
+            name: nameById[l.coach_id] || "(name unavailable)",
+            active: l.status === "active",
+            clientCount: clientCountByCoach[l.coach_id] || 0,
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name)),
+        error: null,
+      });
+    } catch (err) {
+      setOwnerCoaches({ status: "error", data: null, error: err && err.message ? err.message : "Couldn't load your coaches." });
+    }
+  }
+
+  function startNewCoach() {
+    setNewCoachName("");
+    setNewCoachEmail("");
+    setNewCoachPhoneCountryCode("+20");
+    setNewCoachPhoneNumber("");
+    setNewCoachError(null);
+    setNewCoachFormOpen(true);
+  }
+
+  async function submitNewCoach() {
+    setNewCoachError(null);
+    const name = newCoachName.trim();
+    const email = newCoachEmail.trim();
+
+    if (!name) {
+      setNewCoachError("Enter the coach's name.");
+      return;
+    }
+    if (!email) {
+      setNewCoachError(describeCreateUserError("email_required", "coach"));
+      return;
+    }
+
+    setNewCoachBusy(true);
+
+    const phoneNumber = newCoachPhoneNumber.trim();
+    const combinedPhone = phoneNumber ? `${newCoachPhoneCountryCode}${phoneNumber}` : null;
+
+    try {
+      const { data, error } = await supabase.functions.invoke("create-user", {
+        body: {
+          target_role: "coach",
+          email,
+          name,
+          phone: combinedPhone,
+        },
+      });
+      if (error) throw error;
+
+      if (data && data.ok) {
+        setCreatedCoachCredentials({
+          email: data.email || email,
+          tempPassword: data.temp_password,
+        });
+        setNewCoachFormOpen(false);
+        loadOwnerCoaches();
+      } else {
+        setNewCoachError(describeCreateUserError(data && data.reason, "coach"));
+      }
+    } catch (err) {
+      setNewCoachError("Couldn't create the coach. Please try again.");
+    } finally {
+      setNewCoachBusy(false);
     }
   }
 
@@ -2971,11 +3212,22 @@ export default function CalorieTrackerApp() {
   }
 
   useEffect(() => {
-    if (roleId === 2) {
-      setView("home");
+    if (roleId === 2 || roleId === 4) {
+      setView(homeViewForRole(roleId));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roleId]);
+
+  useEffect(() => {
+    if (roleId === 4 && (view === "home" || view === "users")) {
+      loadOwnerCoaches();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, session]);
+
+  useEffect(() => {
+    if (view !== "users") setNewCoachFormOpen(false);
+  }, [view]);
 
   useEffect(() => {
     if (roleId === 2 && (view === "home" || (view === "clients" && clientsView === "grid") || view === "plans" || view === "chat" || view === "notifications")) {
@@ -3457,7 +3709,7 @@ export default function CalorieTrackerApp() {
       return;
     }
     if (!email) {
-      setAddClientMessage({ type: "error", text: describeAddClientError("email_required") });
+      setAddClientMessage({ type: "error", text: describeCreateUserError("email_required", "client") });
       return;
     }
 
@@ -3488,7 +3740,7 @@ export default function CalorieTrackerApp() {
         loadClientDetail(clientId);
         loadClients();
       } else {
-        setAddClientMessage({ type: "error", text: describeAddClientError(data && data.reason) });
+        setAddClientMessage({ type: "error", text: describeCreateUserError(data && data.reason, "client") });
       }
     } catch (err) {
       setAddClientMessage({ type: "error", text: "Couldn't update the client. Please try again." });
@@ -3552,7 +3804,7 @@ export default function CalorieTrackerApp() {
       return;
     }
     if (!email) {
-      setAddClientMessage({ type: "error", text: describeAddClientError("email_required") });
+      setAddClientMessage({ type: "error", text: describeCreateUserError("email_required", "client") });
       return;
     }
 
@@ -3562,8 +3814,9 @@ export default function CalorieTrackerApp() {
     const combinedPhone = phoneNumber ? `${addClientPhoneCountryCode}${phoneNumber}` : null;
 
     try {
-      const { data, error } = await supabase.functions.invoke("create-client", {
+      const { data, error } = await supabase.functions.invoke("create-user", {
         body: {
+          target_role: "client",
           email,
           name,
           phone: combinedPhone,
@@ -3585,7 +3838,7 @@ export default function CalorieTrackerApp() {
         setClientsView("grid");
         loadClients();
       } else {
-        setAddClientMessage({ type: "error", text: describeAddClientError(data && data.reason) });
+        setAddClientMessage({ type: "error", text: describeCreateUserError(data && data.reason, "client") });
       }
     } catch (err) {
       setAddClientMessage({ type: "error", text: "Couldn't send the invite. Please try again." });
@@ -4328,10 +4581,97 @@ export default function CalorieTrackerApp() {
     );
   }
 
-  if (!loaded) {
+  if (!loaded || passwordGate.userId !== session.user.id) {
     return (
       <div style={{ fontFamily: "'Inter', sans-serif", padding: "3rem", textAlign: "center", color: INK_SOFT }}>
         Loading your data…
+      </div>
+    );
+  }
+
+  // Forced password change gate. Every screen of the app renders below this
+  // point, so nothing past here (nav, views, deep links into a `view`) is
+  // reachable until user_info.must_change_password is confirmed false for
+  // the signed-in user (the check above already holds back a gate that
+  // belongs to a previous user).
+  const passwordGateStatus = passwordGate.status;
+  if (passwordGateStatus !== "clear") {
+    return (
+      <div style={{ fontFamily: "'Inter', sans-serif", background: PAPER, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link
+          href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+          rel="stylesheet"
+        />
+        <div style={{ background: PANEL, border: `1px solid ${GRID}`, borderRadius: 6, padding: "2rem", width: "100%", maxWidth: 360 }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 6 }}>
+            nutrition tracker
+          </div>
+          {passwordGateStatus === "required" ? (
+            <>
+              <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px 0" }}>
+                Set new password
+              </h1>
+              <div style={{ fontSize: 12.5, color: INK_SOFT, marginBottom: 18, lineHeight: 1.5 }}>
+                You signed in with a temporary password. Choose a new one to continue.
+              </div>
+
+              <label style={labelStyle}>New password</label>
+              <input
+                type="password"
+                value={forcedPassword}
+                onChange={(e) => setForcedPassword(e.target.value)}
+                style={inputStyle}
+                autoComplete="new-password"
+                disabled={forcedPasswordBusy}
+              />
+              <label style={labelStyle}>Confirm password</label>
+              <input
+                type="password"
+                value={forcedPasswordConfirm}
+                onChange={(e) => setForcedPasswordConfirm(e.target.value)}
+                style={inputStyle}
+                autoComplete="new-password"
+                disabled={forcedPasswordBusy}
+              />
+              <div style={{ marginTop: -10, marginBottom: 14, fontSize: 11, color: INK_SOFT, lineHeight: 1.4 }}>
+                At least 8 characters, with an uppercase letter, lowercase letter, number, and special character.
+              </div>
+
+              <button
+                onClick={submitForcedPasswordChange}
+                disabled={forcedPasswordBusy}
+                style={{ ...primaryButtonStyle, width: "100%", marginTop: 4, opacity: forcedPasswordBusy ? 0.6 : 1 }}
+              >
+                {forcedPasswordBusy ? "Please wait…" : "Set password"}
+              </button>
+
+              {forcedPasswordError && (
+                <div style={{ marginTop: 10, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                  {forcedPasswordError}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px 0" }}>
+                Couldn't load your account
+              </h1>
+              <div style={{ fontSize: 12.5, color: INK_SOFT, marginBottom: 18, lineHeight: 1.5 }}>
+                {saveError || "Something went wrong while signing you in."}
+              </div>
+              <button onClick={() => window.location.reload()} style={{ ...primaryButtonStyle, width: "100%" }}>
+                Try again
+              </button>
+            </>
+          )}
+
+          <div style={{ marginTop: 16, textAlign: "center" }}>
+            <button onClick={handleLogout} style={{ ...linkButtonStyle, fontSize: 12.5 }}>
+              Log out
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -4685,6 +5025,36 @@ export default function CalorieTrackerApp() {
         )}
       </div>
 
+      {roleId === 4 && (
+        <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
+          <label style={labelStyle}>Organization name</label>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+            <input
+              type="text"
+              placeholder="Your organization"
+              value={organizationNameDraft}
+              onChange={(e) => setOrganizationNameDraft(e.target.value)}
+              style={{ ...inputStyle, width: 280, marginBottom: 0 }}
+              disabled={organizationNameSaving}
+            />
+            <button
+              onClick={saveOrganizationName}
+              disabled={organizationNameSaving || organizationNameDraft.trim() === organizationName}
+              style={{ ...primaryButtonStyle, width: "auto", background: GREEN, border: `1px solid ${GREEN}`, opacity: organizationNameSaving || organizationNameDraft.trim() === organizationName ? 0.6 : 1 }}
+            >
+              <Save size={14} strokeWidth={2.5} />
+              {organizationNameSaving ? "Saving…" : "Save"}
+            </button>
+          </div>
+          {organizationNameFlash && <div style={{ fontSize: 11, color: GREEN, marginTop: 4 }}>Saved</div>}
+          {organizationNameError && (
+            <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+              {organizationNameError}
+            </div>
+          )}
+        </div>
+      )}
+
       <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
         <label style={labelStyle}>Language</label>
         <select
@@ -4765,6 +5135,7 @@ export default function CalorieTrackerApp() {
             {view === "log" && "Daily log"}
             {view === "history" && "History"}
             {view === "home" && "Home"}
+            {view === "users" && "Users"}
             {view === "clients" && "Clients"}
             {view === "plans" && "Plans"}
             {view === "administration" && "Administration"}
@@ -4823,7 +5194,7 @@ export default function CalorieTrackerApp() {
         </div>
       </div>
 
-      {roleId !== 2 && (
+      {roleId !== 2 && roleId !== 4 && (
       <>
       <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
         {[
@@ -6144,42 +6515,20 @@ export default function CalorieTrackerApp() {
 
       {roleId === 2 && (
         <div style={{ display: "flex", gap: 24, alignItems: "flex-start" }}>
-          <div style={{ width: 200, flexShrink: 0, display: "flex", flexDirection: "column", gap: 4 }}>
-            {[
+          <SidebarNav
+            items={[
               { id: "home", label: "Home", icon: Home },
               { id: "clients", label: "Clients", icon: Users },
               { id: "plans", label: "Plans", icon: ClipboardList },
               { id: "administration", label: "Administration", icon: Settings },
-              { id: "chat", label: "Chat", icon: MessageSquare },
+              { id: "chat", label: "Chat", icon: MessageSquare, badge: chatUnreadTotal },
               { id: "notifications", label: "Notifications", icon: Bell },
               { id: "notes", label: "Notes", icon: StickyNote },
               { id: "account", label: "Account", icon: User },
-            ].map((t) => (
-              <button
-                key={t.id}
-                onClick={() => setView(t.id)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "9px 12px",
-                  borderRadius: 4,
-                  border: `1px solid ${view === t.id ? TEAL : GRID}`,
-                  background: view === t.id ? TEAL_SOFT : PANEL,
-                  color: view === t.id ? TEAL : INK_SOFT,
-                  fontFamily: "'Space Grotesk', sans-serif",
-                  fontSize: 13,
-                  fontWeight: 600,
-                  cursor: "pointer",
-                  textAlign: "left",
-                }}
-              >
-                <t.icon size={16} />
-                {t.label}
-                {t.id === "chat" && chatUnreadTotal > 0 && <UnreadBadge count={chatUnreadTotal} />}
-              </button>
-            ))}
-          </div>
+            ]}
+            view={view}
+            onSelect={setView}
+          />
 
           <div style={{ flex: 1, minWidth: 0 }}>
             {view === "home" && (
@@ -6697,46 +7046,11 @@ export default function CalorieTrackerApp() {
             {view === "clients" && (
               <div>
                 {createdClientCredentials && (
-                  <div
-                    style={{
-                      position: "fixed",
-                      inset: 0,
-                      background: "rgba(27, 36, 48, 0.5)",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      padding: 20,
-                      zIndex: 1000,
-                    }}
-                  >
-                    <div style={{ ...panelStyle, maxWidth: 420, width: "100%" }}>
-                      <SectionTitle>Client created</SectionTitle>
-                      <div style={{ fontSize: 13, marginBottom: 12 }}>
-                        Client created — share these login details with them:
-                      </div>
-                      <div
-                        style={{
-                          fontFamily: "'IBM Plex Mono', monospace",
-                          fontSize: 13,
-                          background: PAPER,
-                          border: `1px solid ${GRID}`,
-                          borderRadius: 4,
-                          padding: "10px 12px",
-                          marginBottom: 10,
-                          lineHeight: 1.8,
-                        }}
-                      >
-                        <div>Email: {createdClientCredentials.email}</div>
-                        <div>Temp password: {createdClientCredentials.tempPassword}</div>
-                      </div>
-                      <div style={{ fontSize: 11.5, color: INK_SOFT, marginBottom: 16 }}>
-                        They'll need to change this password after logging in.
-                      </div>
-                      <button onClick={() => setCreatedClientCredentials(null)} style={primaryButtonStyle}>
-                        Done
-                      </button>
-                    </div>
-                  </div>
+                  <CreatedCredentialsModal
+                    roleLabel="Client"
+                    credentials={createdClientCredentials}
+                    onDone={() => setCreatedClientCredentials(null)}
+                  />
                 )}
 
                 {addClientMessage && (
@@ -8352,6 +8666,161 @@ export default function CalorieTrackerApp() {
           </div>
         </div>
       )}
+
+      {roleId === 4 && (
+        <div style={{ display: "flex", gap: 24, alignItems: "flex-start" }}>
+          <SidebarNav
+            items={[
+              { id: "home", label: "Home", icon: Home },
+              { id: "users", label: "Users", icon: Users },
+              { id: "account", label: "Account", icon: User },
+            ]}
+            view={view}
+            onSelect={setView}
+          />
+
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {view === "home" && (
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                  <SectionTitle>Your coaches</SectionTitle>
+                </div>
+                <OwnerCoachList state={ownerCoaches} emptyText="You don't have any coaches yet. Add one from Users." />
+              </div>
+            )}
+
+            {view === "users" && (
+              <div>
+                {createdCoachCredentials && (
+                  <CreatedCredentialsModal
+                    roleLabel="Coach"
+                    credentials={createdCoachCredentials}
+                    onDone={() => setCreatedCoachCredentials(null)}
+                  />
+                )}
+
+                {newCoachFormOpen ? (
+                  <div style={panelStyle}>
+                    <SectionTitle>New coach</SectionTitle>
+
+                    <label style={labelStyle}>Coach name</label>
+                    <input
+                      type="text"
+                      placeholder="Jane Doe"
+                      value={newCoachName}
+                      onChange={(e) => setNewCoachName(e.target.value)}
+                      style={inputStyle}
+                      disabled={newCoachBusy}
+                    />
+
+                    <label style={labelStyle}>Email</label>
+                    <input
+                      type="email"
+                      placeholder="coach@example.com"
+                      value={newCoachEmail}
+                      onChange={(e) => setNewCoachEmail(e.target.value)}
+                      style={inputStyle}
+                      disabled={newCoachBusy}
+                    />
+
+                    <label style={labelStyle}>Phone number (optional)</label>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <select
+                        value={newCoachPhoneCountryCode}
+                        onChange={(e) => setNewCoachPhoneCountryCode(e.target.value)}
+                        style={{ ...inputStyle, flex: "0 0 auto", width: 200 }}
+                        disabled={newCoachBusy}
+                      >
+                        {COUNTRY_DIAL_CODES.map((c) => (
+                          <option key={c.label} value={c.code}>
+                            {c.label} ({c.code})
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="tel"
+                        placeholder="1012345678"
+                        value={newCoachPhoneNumber}
+                        onChange={(e) => setNewCoachPhoneNumber(e.target.value.replace(/\D/g, ""))}
+                        style={{ ...inputStyle, flex: 1 }}
+                        disabled={newCoachBusy}
+                      />
+                    </div>
+
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <button onClick={submitNewCoach} style={primaryButtonStyle} disabled={newCoachBusy}>
+                        {newCoachBusy ? "Saving…" : "Save"}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setNewCoachError(null);
+                          setNewCoachFormOpen(false);
+                        }}
+                        style={secondaryButtonStyle}
+                        disabled={newCoachBusy}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+
+                    {newCoachError && (
+                      <div style={{ marginTop: 12, padding: "10px 12px", borderRadius: 4, fontSize: 12.5, background: RED_SOFT, color: RED }}>
+                        {newCoachError}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                      <SectionTitle>Coaches</SectionTitle>
+                      <button onClick={startNewCoach} style={primaryButtonStyle}>
+                        + New coach
+                      </button>
+                    </div>
+                    <OwnerCoachList state={ownerCoaches} emptyText="There are no coaches added yet" />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {view === "account" && accountScreenContent}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Left-hand nav used by the coach and owner layouts. An item's optional
+// `badge` is an unread count shown next to its label.
+function SidebarNav({ items, view, onSelect }) {
+  return (
+    <div style={{ width: 200, flexShrink: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+      {items.map((t) => (
+        <button
+          key={t.id}
+          onClick={() => onSelect(t.id)}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "9px 12px",
+            borderRadius: 4,
+            border: `1px solid ${view === t.id ? TEAL : GRID}`,
+            background: view === t.id ? TEAL_SOFT : PANEL,
+            color: view === t.id ? TEAL : INK_SOFT,
+            fontFamily: "'Space Grotesk', sans-serif",
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: "pointer",
+            textAlign: "left",
+          }}
+        >
+          <t.icon size={16} />
+          {t.label}
+          {t.badge > 0 && <UnreadBadge count={t.badge} />}
+        </button>
+      ))}
     </div>
   );
 }
@@ -8366,6 +8835,115 @@ function SectionTitle({ children }) {
 
 // A coach Home dashboard card. `state` is { status, data, error }; children
 // is a render function called with `data` once the card has loaded.
+// "<Role> created" modal with the email + temp password returned by
+// create-user. Shared by the coach's Add client and the owner's New coach.
+function CreatedCredentialsModal({ roleLabel, credentials, onDone }) {
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(27, 36, 48, 0.5)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 20,
+        zIndex: 1000,
+      }}
+    >
+      <div style={{ ...panelStyle, maxWidth: 420, width: "100%" }}>
+        <SectionTitle>{roleLabel} created</SectionTitle>
+        <div style={{ fontSize: 13, marginBottom: 12 }}>
+          {roleLabel} created — share these login details with them:
+        </div>
+        <div
+          style={{
+            fontFamily: "'IBM Plex Mono', monospace",
+            fontSize: 13,
+            background: PAPER,
+            border: `1px solid ${GRID}`,
+            borderRadius: 4,
+            padding: "10px 12px",
+            marginBottom: 10,
+            lineHeight: 1.8,
+          }}
+        >
+          <div>Email: {credentials.email}</div>
+          <div>Temp password: {credentials.tempPassword}</div>
+        </div>
+        <div style={{ fontSize: 11.5, color: INK_SOFT, marginBottom: 16 }}>
+          They'll need to change this password after logging in.
+        </div>
+        <button onClick={onDone} style={primaryButtonStyle}>
+          Done
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Owner's coaches table (Home and Users), styled like the coach's Clients
+// grid. `state` is the loadOwnerCoaches { status, data, error }.
+function OwnerCoachList({ state, emptyText }) {
+  if (state.status === "error") {
+    return (
+      <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+        {state.error}
+      </div>
+    );
+  }
+  if (!state.data) {
+    return <div style={{ fontSize: 12, color: INK_SOFT }}>Loading coaches…</div>;
+  }
+  if (state.data.length === 0) {
+    return (
+      <div style={{ ...panelStyle, textAlign: "center" }}>
+        <div style={{ fontSize: 13, color: INK_SOFT }}>{emptyText}</div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ ...panelStyle, padding: 0, overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead>
+          <tr>
+            <th style={thStyle}>Coach name</th>
+            <th style={thStyle}>Status</th>
+            <th style={thStyle}>Active clients</th>
+          </tr>
+        </thead>
+        <tbody>
+          {state.data.map((c) => (
+            <tr key={c.id} style={{ borderTop: `1px solid ${GRID}` }}>
+              <td style={tdStyle}>{c.name}</td>
+              <td style={tdStyle}>
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    padding: "3px 8px",
+                    borderRadius: 4,
+                    background: c.active ? GREEN_SOFT : AMBER_SOFT,
+                    color: c.active ? GREEN : AMBER,
+                    fontFamily: "'Space Grotesk', sans-serif",
+                    fontSize: 10.5,
+                    fontWeight: 700,
+                    textTransform: "uppercase",
+                    letterSpacing: 0.4,
+                  }}
+                >
+                  {c.active ? "Active" : "Inactive"}
+                </span>
+              </td>
+              <td style={{ ...tdStyle, fontFamily: "'IBM Plex Mono', monospace" }}>{c.clientCount}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function HomeCard({ title, accent, state, children }) {
   return (
     <div style={{ ...panelStyle, borderLeft: `3px solid ${accent}` }}>

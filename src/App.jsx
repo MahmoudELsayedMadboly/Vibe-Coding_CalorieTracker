@@ -92,6 +92,14 @@ function todayStr() {
   return localDateStr(new Date());
 }
 
+// Whole calendar days from one "YYYY-MM-DD" string to a later one, parsed
+// as local dates so DST shifts don't produce off-by-one results.
+function daysBetweenDateStrs(fromStr, toStr) {
+  const [fy, fm, fd] = fromStr.split("-").map(Number);
+  const [ty, tm, td] = toStr.split("-").map(Number);
+  return Math.round((new Date(ty, tm - 1, td) - new Date(fy, fm - 1, fd)) / 86400000);
+}
+
 function threeDaysAgoStr() {
   const d = new Date();
   d.setDate(d.getDate() - 3);
@@ -629,7 +637,21 @@ export default function CalorieTrackerApp() {
   const [clientsError, setClientsError] = useState(null);
   const [clientsView, setClientsView] = useState("grid");
   const [clientsPage, setClientsPage] = useState(1);
+  // Optional { label, ids } narrowing of the Clients grid, set from the Home
+  // "Needs attention" card's "+N more" link.
+  const [clientsIdFilter, setClientsIdFilter] = useState(null);
   const [selectedClientId, setSelectedClientId] = useState(null);
+
+  // Coach Home dashboard cards. Each section keeps its own
+  // { status: "loading" | "ready" | "error", data, error } so one failing
+  // query never blanks the others.
+  const [homeAttention, setHomeAttention] = useState({ status: "loading", data: null, error: null });
+  const [homePending, setHomePending] = useState({ status: "loading", data: null, error: null });
+  const [homeUnread, setHomeUnread] = useState({ status: "loading", data: null, error: null });
+  const [homeActivity, setHomeActivity] = useState({ status: "loading", data: null, error: null });
+  // Set right before navigating to Plans so the "reset Plans to list" effect
+  // opens the builder for this client instead.
+  const pendingPlanBuilderClientIdRef = useRef(null);
   const [addClientName, setAddClientName] = useState("");
   const [addClientEmail, setAddClientEmail] = useState("");
   const [addClientPhoneCountryCode, setAddClientPhoneCountryCode] = useState("+20");
@@ -2013,6 +2035,319 @@ export default function CalorieTrackerApp() {
     }
   }
 
+  // Loads the four coach Home cards. A shared base (this coach's active
+  // client ids + names) is fetched first; then each card loads in parallel
+  // inside its own try/catch so one failing query only affects its own card.
+  async function loadHomeDashboard() {
+    if (!session) return;
+
+    const markLoading = (prev) => ({ status: "loading", data: prev.data, error: null });
+    setHomeAttention(markLoading);
+    setHomePending(markLoading);
+    setHomeUnread(markLoading);
+    setHomeActivity(markLoading);
+
+    let base;
+    try {
+      const { data: links, error: linksErr } = await supabase
+        .from("coach_clients")
+        .select("client_id")
+        .eq("coach_id", session.user.id)
+        .eq("status", "active");
+      if (linksErr) throw linksErr;
+
+      const clientIds = (links || []).map((l) => l.client_id);
+      const infoById = {};
+      if (clientIds.length > 0) {
+        const { data: infos, error: infosErr } = await supabase
+          .from("user_info")
+          .select("id, name, avatar_path, first_login_at")
+          .in("id", clientIds);
+        if (infosErr) throw infosErr;
+        (infos || []).forEach((row) => {
+          infoById[row.id] = row;
+        });
+      }
+
+      base = {
+        coachId: session.user.id,
+        clientIds,
+        infoById,
+        nameOf: (id) => (infoById[id] && infoById[id].name) || "(name unavailable)",
+      };
+    } catch (err) {
+      const failed = { status: "error", data: null, error: err && err.message ? err.message : "Couldn't load your clients." };
+      setHomeAttention(failed);
+      setHomePending(failed);
+      setHomeUnread(failed);
+      setHomeActivity(failed);
+      return;
+    }
+
+    await Promise.all([
+      loadHomeAttention(base),
+      loadHomePending(base),
+      loadHomeUnread(base),
+      loadHomeActivity(base),
+    ]);
+  }
+
+  async function loadHomeAttention(base) {
+    try {
+      const { clientIds, infoById, nameOf } = base;
+      if (clientIds.length === 0) {
+        setHomeAttention({ status: "ready", data: { flagged: [], total: 0, allIds: [] }, error: null });
+        return;
+      }
+
+      const today = todayStr();
+      const [todayLogsRes, profilesRes, ...latestLogResults] = await Promise.all([
+        supabase.from("meal_logs").select("user_id, calories").in("user_id", clientIds).eq("log_date", today),
+        supabase.from("client_profile").select("user_id, target_calories").in("user_id", clientIds),
+        ...clientIds.map((id) =>
+          supabase.from("meal_logs").select("log_date").eq("user_id", id).order("log_date", { ascending: false }).limit(1)
+        ),
+      ]);
+      if (todayLogsRes.error) throw todayLogsRes.error;
+      if (profilesRes.error) throw profilesRes.error;
+      latestLogResults.forEach((res) => {
+        if (res.error) throw res.error;
+      });
+
+      const todayCaloriesById = {};
+      (todayLogsRes.data || []).forEach((row) => {
+        todayCaloriesById[row.user_id] = (todayCaloriesById[row.user_id] || 0) + (Number(row.calories) || 0);
+      });
+
+      const targetById = {};
+      (profilesRes.data || []).forEach((row) => {
+        targetById[row.user_id] = Number(row.target_calories) || 0;
+      });
+
+      const inactive = [];
+      const overTarget = [];
+      clientIds.forEach((id, i) => {
+        const latestRow = (latestLogResults[i].data || [])[0];
+        if (!latestRow) {
+          inactive.push({ id, kind: "inactive", daysSince: Infinity, reason: "Never logged" });
+          return;
+        }
+
+        const daysSince = daysBetweenDateStrs(latestRow.log_date, today);
+        if (daysSince > 2) {
+          inactive.push({ id, kind: "inactive", daysSince, reason: `No log in ${daysSince} days` });
+          return;
+        }
+
+        const target = targetById[id];
+        const actual = todayCaloriesById[id] || 0;
+        if (target > 0 && actual > target) {
+          const percentOver = Math.max(1, Math.round(((actual - target) / target) * 100));
+          overTarget.push({ id, kind: "over", percentOver, reason: `${percentOver}% over target` });
+        }
+      });
+
+      inactive.sort((a, b) => b.daysSince - a.daysSince);
+      overTarget.sort((a, b) => b.percentOver - a.percentOver);
+      const allFlagged = [...inactive, ...overTarget];
+      const shown = allFlagged.slice(0, 5);
+
+      // Avatars are a nicety: if signing fails (e.g. storage policy), fall
+      // back to initials rather than failing the card.
+      const avatarUrlByPath = {};
+      const avatarPaths = shown.map((f) => infoById[f.id] && infoById[f.id].avatar_path).filter(Boolean);
+      if (avatarPaths.length > 0) {
+        try {
+          const { data: signed } = await supabase.storage.from("avatars").createSignedUrls(avatarPaths, 3600);
+          (signed || []).forEach((s) => {
+            if (s.signedUrl) avatarUrlByPath[s.path] = s.signedUrl;
+          });
+        } catch (avatarErr) {
+          console.error("Couldn't sign client avatars (non-critical):", avatarErr);
+        }
+      }
+
+      setHomeAttention({
+        status: "ready",
+        data: {
+          flagged: shown.map((f) => {
+            const avatarPath = infoById[f.id] && infoById[f.id].avatar_path;
+            return { ...f, name: nameOf(f.id), avatarUrl: (avatarPath && avatarUrlByPath[avatarPath]) || null };
+          }),
+          total: allFlagged.length,
+          allIds: allFlagged.map((f) => f.id),
+        },
+        error: null,
+      });
+    } catch (err) {
+      setHomeAttention({ status: "error", data: null, error: err && err.message ? err.message : "Couldn't check your clients." });
+    }
+  }
+
+  async function loadHomePending(base) {
+    try {
+      const { clientIds, nameOf } = base;
+      if (clientIds.length === 0) {
+        setHomePending({ status: "ready", data: { noPlan: [], requestsCount: 0 }, error: null });
+        return;
+      }
+
+      const [profilesRes, requestsRes] = await Promise.all([
+        supabase.from("client_profile").select("user_id, plan_status").in("user_id", clientIds),
+        supabase
+          .from("plan_food_requests")
+          .select("id", { count: "exact", head: true })
+          .in("client_id", clientIds)
+          .eq("status", "pending"),
+      ]);
+      if (profilesRes.error) throw profilesRes.error;
+      if (requestsRes.error) throw requestsRes.error;
+
+      const planStatusById = {};
+      (profilesRes.data || []).forEach((row) => {
+        planStatusById[row.user_id] = row.plan_status || null;
+      });
+
+      // plan_status is null (no client_profile row / never built), "draft",
+      // "active" or "inactive" — only null/draft mean no plan has been sent.
+      const noPlan = clientIds
+        .filter((id) => !planStatusById[id] || planStatusById[id] === "draft")
+        .map((id) => ({ id, name: nameOf(id), planStatus: planStatusById[id] || null }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      setHomePending({ status: "ready", data: { noPlan, requestsCount: requestsRes.count || 0 }, error: null });
+    } catch (err) {
+      setHomePending({ status: "error", data: null, error: err && err.message ? err.message : "Couldn't load pending setup." });
+    }
+  }
+
+  async function loadHomeUnread(base) {
+    try {
+      const { coachId, clientIds, nameOf } = base;
+      if (clientIds.length === 0) {
+        setHomeUnread({ status: "ready", data: { total: 0, byClient: [] }, error: null });
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("messages")
+        .select("sender_id")
+        .eq("recipient_id", coachId)
+        .in("sender_id", clientIds)
+        .is("read_at", null);
+      if (error) throw error;
+
+      const countById = {};
+      (data || []).forEach((row) => {
+        countById[row.sender_id] = (countById[row.sender_id] || 0) + 1;
+      });
+
+      const byClient = Object.entries(countById)
+        .map(([id, count]) => ({ id, name: nameOf(id), count }))
+        .sort((a, b) => b.count - a.count);
+
+      setHomeUnread({ status: "ready", data: { total: (data || []).length, byClient: byClient.slice(0, 5) }, error: null });
+    } catch (err) {
+      setHomeUnread({ status: "error", data: null, error: err && err.message ? err.message : "Couldn't load unread messages." });
+    }
+  }
+
+  async function loadHomeActivity(base) {
+    try {
+      const { coachId, clientIds, infoById, nameOf } = base;
+      if (clientIds.length === 0) {
+        setHomeActivity({ status: "ready", data: [], error: null });
+        return;
+      }
+
+      const [requestsRes, messagesRes] = await Promise.all([
+        supabase
+          .from("plan_food_requests")
+          .select("id, client_id, name, created_at")
+          .in("client_id", clientIds)
+          .order("created_at", { ascending: false })
+          .limit(10),
+        supabase
+          .from("messages")
+          .select("id, sender_id, created_at")
+          .eq("recipient_id", coachId)
+          .in("sender_id", clientIds)
+          .order("created_at", { ascending: false })
+          .limit(30),
+      ]);
+      if (requestsRes.error) throw requestsRes.error;
+      if (messagesRes.error) throw messagesRes.error;
+
+      const items = [];
+
+      clientIds.forEach((id) => {
+        const firstLoginAt = infoById[id] && infoById[id].first_login_at;
+        if (firstLoginAt) {
+          items.push({ key: `setup-${id}`, kind: "setup", clientId: id, at: firstLoginAt, text: `${nameOf(id)} completed setup` });
+        }
+      });
+
+      (requestsRes.data || []).forEach((row) => {
+        items.push({
+          key: `request-${row.id}`,
+          kind: "request",
+          clientId: row.client_id,
+          at: row.created_at,
+          text: `${nameOf(row.client_id)} requested ${row.name || "a food"}`,
+        });
+      });
+
+      // Only the latest message per client, so one chatty conversation
+      // doesn't crowd everything else out of the feed.
+      const seenSenders = new Set();
+      (messagesRes.data || []).forEach((row) => {
+        if (seenSenders.has(row.sender_id)) return;
+        seenSenders.add(row.sender_id);
+        items.push({
+          key: `message-${row.id}`,
+          kind: "message",
+          clientId: row.sender_id,
+          at: row.created_at,
+          text: `${nameOf(row.sender_id)} sent a message`,
+        });
+      });
+
+      items.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+      setHomeActivity({ status: "ready", data: items.slice(0, 10), error: null });
+    } catch (err) {
+      setHomeActivity({ status: "error", data: null, error: err && err.message ? err.message : "Couldn't load recent activity." });
+    }
+  }
+
+  function openClientDetailFromHome(clientId) {
+    setSelectedClientId(clientId);
+    setView("client-detail");
+  }
+
+  function openPlanBuilderFromHome(clientId) {
+    pendingPlanBuilderClientIdRef.current = clientId;
+    setView("plans");
+  }
+
+  function openChatWithClient(clientId) {
+    setChatSelectedClientId(clientId);
+    setView("chat");
+  }
+
+  // There's no dedicated food-request approval screen yet; Administration →
+  // Food list is the closest place a coach manages foods.
+  function openFoodRequests() {
+    setAdminTab("foodList");
+    setView("administration");
+  }
+
+  function openClientsFiltered(label, ids) {
+    setClientsIdFilter({ label, ids });
+    setClientsView("grid");
+    setClientsPage(1);
+    setView("clients");
+  }
+
   async function loadEventTypes() {
     if (!session) return;
 
@@ -2381,6 +2716,19 @@ export default function CalorieTrackerApp() {
   }, [view, roleId, clientsView, session]);
 
   useEffect(() => {
+    if (roleId === 2 && view === "home") {
+      loadHomeDashboard();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, session]);
+
+  useEffect(() => {
+    if (view !== "clients") {
+      setClientsIdFilter(null);
+    }
+  }, [view]);
+
+  useEffect(() => {
     if (roleId === 2 && (view === "clients" || view === "administration" || view === "client-detail")) {
       loadPlanTypes();
     }
@@ -2435,8 +2783,10 @@ export default function CalorieTrackerApp() {
 
   useEffect(() => {
     if (view === "plans") {
-      setPlansView("list");
-      setPlanBuilderClientId(null);
+      const pendingBuilderClientId = pendingPlanBuilderClientIdRef.current;
+      pendingPlanBuilderClientIdRef.current = null;
+      setPlansView(pendingBuilderClientId ? "builder" : "list");
+      setPlanBuilderClientId(pendingBuilderClientId);
       setPlanDetailsClientId(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3696,9 +4046,10 @@ export default function CalorieTrackerApp() {
   const invitedClientsCount = totalClientsCount - activeClientsCount;
 
   const CLIENTS_PAGE_SIZE = 10;
-  const totalClientsPages = Math.max(1, Math.ceil(clients.length / CLIENTS_PAGE_SIZE));
+  const gridClients = clientsIdFilter ? clients.filter((c) => clientsIdFilter.ids.includes(c.id)) : clients;
+  const totalClientsPages = Math.max(1, Math.ceil(gridClients.length / CLIENTS_PAGE_SIZE));
   const clampedClientsPage = Math.min(clientsPage, totalClientsPages);
-  const pagedClients = clients.slice(
+  const pagedClients = gridClients.slice(
     (clampedClientsPage - 1) * CLIENTS_PAGE_SIZE,
     clampedClientsPage * CLIENTS_PAGE_SIZE
   );
@@ -5609,6 +5960,159 @@ export default function CalorieTrackerApp() {
                     Manage plans
                   </button>
                 </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16, marginTop: 20 }}>
+                  <HomeCard title="⚠ Needs attention" accent={homeAttention.data && homeAttention.data.total > 0 ? RED : GREEN} state={homeAttention}>
+                    {(data) =>
+                      data.flagged.length === 0 ? (
+                        <HomeEmptyState>All clients on track</HomeEmptyState>
+                      ) : (
+                        <>
+                          {data.flagged.map((f) => (
+                            <HomeRow key={f.id}>
+                              <ClientAvatar name={f.name} url={f.avatarUrl} />
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={homeRowNameStyle}>{f.name}</div>
+                                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: f.kind === "inactive" ? AMBER : RED }}>
+                                  {f.reason}
+                                </div>
+                              </div>
+                              <button onClick={() => openClientDetailFromHome(f.id)} style={linkButtonStyle}>
+                                View
+                              </button>
+                            </HomeRow>
+                          ))}
+                          {data.total > data.flagged.length && (
+                            <button
+                              onClick={() => openClientsFiltered("clients needing attention", data.allIds)}
+                              style={{ ...linkButtonStyle, marginTop: 10 }}
+                            >
+                              +{data.total - data.flagged.length} more →
+                            </button>
+                          )}
+                        </>
+                      )
+                    }
+                  </HomeCard>
+
+                  <HomeCard title="Pending setup" accent={AMBER} state={homePending}>
+                    {(data) =>
+                      data.noPlan.length === 0 && data.requestsCount === 0 ? (
+                        <HomeEmptyState>Nothing pending</HomeEmptyState>
+                      ) : (
+                        <>
+                          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
+                            <span style={homeCountStyle}>{data.noPlan.length}</span>
+                            <span style={homeCountLabelStyle}>{data.noPlan.length === 1 ? "client without an active plan" : "clients without an active plan"}</span>
+                          </div>
+                          {data.noPlan.map((c) => (
+                            <HomeRow key={c.id}>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={homeRowNameStyle}>{c.name}</div>
+                                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                                  {c.planStatus === "draft" ? "Draft not sent" : "No plan yet"}
+                                </div>
+                              </div>
+                              <button onClick={() => openPlanBuilderFromHome(c.id)} style={linkButtonStyle}>
+                                Build plan
+                              </button>
+                            </HomeRow>
+                          ))}
+
+                          <button
+                            onClick={openFoodRequests}
+                            style={{
+                              display: "flex",
+                              alignItems: "baseline",
+                              gap: 8,
+                              width: "100%",
+                              marginTop: 14,
+                              paddingTop: 12,
+                              border: "none",
+                              borderTop: `1px solid ${GRID}`,
+                              background: "transparent",
+                              cursor: "pointer",
+                              textAlign: "left",
+                            }}
+                          >
+                            <span style={homeCountStyle}>{data.requestsCount}</span>
+                            <span style={homeCountLabelStyle}>{data.requestsCount === 1 ? "pending food request" : "pending food requests"}</span>
+                            <span style={{ ...linkButtonStyle, marginLeft: "auto" }}>Review →</span>
+                          </button>
+                        </>
+                      )
+                    }
+                  </HomeCard>
+
+                  <HomeCard title="💬 Unread messages" accent={TEAL} state={homeUnread}>
+                    {(data) =>
+                      data.total === 0 ? (
+                        <HomeEmptyState>No unread messages</HomeEmptyState>
+                      ) : (
+                        <>
+                          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
+                            <span style={homeCountStyle}>{data.total}</span>
+                            <span style={homeCountLabelStyle}>unread</span>
+                          </div>
+                          {data.byClient.map((c) => (
+                            <HomeRow key={c.id}>
+                              <div style={{ flex: 1, minWidth: 0, ...homeRowNameStyle }}>{c.name}</div>
+                              <UnreadBadge count={c.count} />
+                              <button onClick={() => openChatWithClient(c.id)} style={{ ...linkButtonStyle, marginLeft: 10 }}>
+                                Open chat
+                              </button>
+                            </HomeRow>
+                          ))}
+                        </>
+                      )
+                    }
+                  </HomeCard>
+
+                  <HomeCard title="Recent activity" accent={GREEN} state={homeActivity}>
+                    {(items) =>
+                      items.length === 0 ? (
+                        <HomeEmptyState>No recent activity</HomeEmptyState>
+                      ) : (
+                        items.map((item) => {
+                          const ItemIcon = item.kind === "setup" ? Check : item.kind === "request" ? Plus : MessageSquare;
+                          const onOpen =
+                            item.kind === "setup"
+                              ? () => openClientDetailFromHome(item.clientId)
+                              : item.kind === "request"
+                              ? openFoodRequests
+                              : () => openChatWithClient(item.clientId);
+                          return (
+                            <button
+                              key={item.key}
+                              onClick={onOpen}
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 10,
+                                width: "100%",
+                                padding: "8px 0",
+                                border: "none",
+                                borderTop: `1px solid ${GRID}`,
+                                background: "transparent",
+                                cursor: "pointer",
+                                textAlign: "left",
+                                color: INK,
+                              }}
+                            >
+                              <ItemIcon size={14} color={TEAL} style={{ flexShrink: 0 }} />
+                              <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {item.text}
+                              </span>
+                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT, flexShrink: 0 }}>
+                                {formatRelativeTime(item.at)}
+                              </span>
+                            </button>
+                          );
+                        })
+                      )
+                    }
+                  </HomeCard>
+                </div>
               </div>
             )}
 
@@ -5700,6 +6204,30 @@ export default function CalorieTrackerApp() {
                       </div>
                     ) : (
                       <>
+                        {clientsIdFilter && (
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                              marginBottom: 10,
+                              padding: "8px 12px",
+                              borderRadius: 4,
+                              background: AMBER_SOFT,
+                              color: AMBER,
+                              fontFamily: "'Space Grotesk', sans-serif",
+                              fontSize: 12.5,
+                              fontWeight: 600,
+                            }}
+                          >
+                            <span>
+                              Showing {gridClients.length} {clientsIdFilter.label}
+                            </span>
+                            <button onClick={() => setClientsIdFilter(null)} style={{ ...linkButtonStyle, color: AMBER }}>
+                              Show all clients
+                            </button>
+                          </div>
+                        )}
                         <div style={{ ...panelStyle, padding: 0, overflowX: "auto" }}>
                           <table style={{ width: "100%", borderCollapse: "collapse" }}>
                             <thead>
@@ -7240,6 +7768,86 @@ function SectionTitle({ children }) {
   );
 }
 
+// A coach Home dashboard card. `state` is { status, data, error }; children
+// is a render function called with `data` once the card has loaded.
+function HomeCard({ title, accent, state, children }) {
+  return (
+    <div style={{ ...panelStyle, borderLeft: `3px solid ${accent}` }}>
+      <SectionTitle>{title}</SectionTitle>
+      {state.status === "error" ? (
+        <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>{state.error}</div>
+      ) : state.data == null ? (
+        <div style={{ fontSize: 12, color: INK_SOFT }}>Loading…</div>
+      ) : (
+        children(state.data)
+      )}
+    </div>
+  );
+}
+
+function HomeEmptyState({ children }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: INK_SOFT }}>
+      <Check size={14} color={GREEN} />
+      {children}
+    </div>
+  );
+}
+
+function HomeRow({ children }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: `1px solid ${GRID}` }}>{children}</div>
+  );
+}
+
+function ClientAvatar({ name, url, size = 28 }) {
+  if (url) {
+    return <img src={url} alt="" style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", border: `1px solid ${GRID}`, flexShrink: 0 }} />;
+  }
+
+  const initials = (name || "?")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0].toUpperCase())
+    .join("");
+  return (
+    <div
+      style={{
+        width: size,
+        height: size,
+        borderRadius: "50%",
+        background: TEAL_SOFT,
+        color: TEAL,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        fontFamily: "'Space Grotesk', sans-serif",
+        fontSize: 11,
+        fontWeight: 700,
+        flexShrink: 0,
+      }}
+    >
+      {initials || "?"}
+    </div>
+  );
+}
+
+function formatRelativeTime(isoString) {
+  if (!isoString) return "";
+  const then = new Date(isoString).getTime();
+  if (Number.isNaN(then)) return "";
+
+  const minutes = Math.floor((Date.now() - then) / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(isoString).toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
 function formatChatTime(isoString) {
   if (!isoString) return "";
   const d = new Date(isoString);
@@ -7464,6 +8072,40 @@ const secondaryButtonStyle = {
   fontSize: 12,
   fontWeight: 600,
   cursor: "pointer",
+};
+
+const linkButtonStyle = {
+  border: "none",
+  background: "transparent",
+  color: TEAL,
+  fontFamily: "'Space Grotesk', sans-serif",
+  fontSize: 12.5,
+  fontWeight: 600,
+  cursor: "pointer",
+  padding: 0,
+  flexShrink: 0,
+};
+
+const homeRowNameStyle = {
+  fontFamily: "'Space Grotesk', sans-serif",
+  fontSize: 13,
+  fontWeight: 600,
+  color: INK,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const homeCountStyle = {
+  fontFamily: "'IBM Plex Mono', monospace",
+  fontSize: 28,
+  fontWeight: 600,
+  color: INK,
+};
+
+const homeCountLabelStyle = {
+  fontSize: 12.5,
+  color: INK_SOFT,
 };
 
 const iconButtonStyle = {

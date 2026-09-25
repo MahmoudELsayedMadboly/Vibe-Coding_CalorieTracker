@@ -825,7 +825,7 @@ export default function CalorieTrackerApp() {
   const [forcedPasswordConfirm, setForcedPasswordConfirm] = useState("");
   const [forcedPasswordBusy, setForcedPasswordBusy] = useState(false);
   const [forcedPasswordError, setForcedPasswordError] = useState(null);
-  // Set once auth.updateUser succeeds, so a retry after the flag update
+  // Set once auth.updateUser succeeds, so a retry after the flag re-read
   // failed doesn't re-submit the password (Supabase rejects an unchanged one).
   const forcedPasswordUpdatedRef = useRef(false);
 
@@ -1781,11 +1781,17 @@ export default function CalorieTrackerApp() {
         forcedPasswordUpdatedRef.current = true;
       }
 
-      const { error: flagErr } = await supabase
+      // The flag is cleared server-side by the auth.users password trigger
+      // (users can't write it themselves), so re-read it to confirm.
+      const { data: flagRow, error: flagErr } = await supabase
         .from("user_info")
-        .update({ must_change_password: false })
-        .eq("id", session.user.id);
+        .select("must_change_password")
+        .eq("id", session.user.id)
+        .maybeSingle();
       if (flagErr) throw flagErr;
+      if (flagRow && flagRow.must_change_password) {
+        throw new Error("must_change_password still set after password change");
+      }
 
       forcedPasswordUpdatedRef.current = false;
       setForcedPassword("");

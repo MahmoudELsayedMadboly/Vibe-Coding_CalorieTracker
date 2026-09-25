@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X, Send, User, StickyNote, Clock, Search } from "lucide-react";
+import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X, Send, User, StickyNote, Clock, Search, Coffee, Dumbbell, Utensils, Zap, Moon, Apple, ChevronLeft, ChevronRight } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const INK = "#1B2430";
@@ -36,7 +36,8 @@ const RATES = [
   { id: "aggressive", label: "Aggressive", kcal: 750 },
 ];
 
-const MEALS = ["Breakfast", "Lunch", "Dinner", "Snack", "Before training", "After training"];
+// Display/picker order. meal_logs.meal and plan_foods.meal store these exact strings.
+const MEALS = ["Breakfast", "Before training", "Lunch", "After training", "Dinner", "Snack"];
 const COURSES = ["Main", "Side1", "Side2", "Drink", "Dessert"];
 
 const MEASUREMENT_FIELDS = [
@@ -90,14 +91,6 @@ function localDateStr(d) {
 
 function todayStr() {
   return localDateStr(new Date());
-}
-
-// Whole calendar days from one "YYYY-MM-DD" string to a later one, parsed
-// as local dates so DST shifts don't produce off-by-one results.
-function daysBetweenDateStrs(fromStr, toStr) {
-  const [fy, fm, fd] = fromStr.split("-").map(Number);
-  const [ty, tm, td] = toStr.split("-").map(Number);
-  return Math.round((new Date(ty, tm - 1, td) - new Date(fy, fm - 1, fd)) / 86400000);
 }
 
 function threeDaysAgoStr() {
@@ -399,6 +392,16 @@ function describeAddClientError(reason) {
   }
 }
 
+// Total calories for a list of meal_logs entries. Shared by the client's
+// Daily log / History and the coach's Client Meal Log so both show the
+// exact same number.
+function sumCalories(entries) {
+  return entries.reduce((sum, e) => sum + (e.calories || 0), 0);
+}
+
+// "green" within ±TOLERANCE of target, "yellow" under, "red" over. Used for
+// every on/under/over-target colour in the app (client screens, coach
+// dashboard's Needs attention card, coach Client Meal Log).
 function statusFor(actual, target) {
   if (target <= 0) return "green";
 
@@ -650,6 +653,14 @@ export default function CalorieTrackerApp() {
   const [homeUnread, setHomeUnread] = useState({ status: "loading", data: null, error: null });
   const [homeActivity, setHomeActivity] = useState({ status: "loading", data: null, error: null });
   const [homeReminders, setHomeReminders] = useState({ status: "loading", data: null, error: null });
+
+  // Coach's read-only Client Meal Log (view "client-meal-log", for selectedClientId).
+  const [mealLogDate, setMealLogDate] = useState(todayStr());
+  const [mealLogDay, setMealLogDay] = useState({ status: "loading", data: null, error: null });
+  const [mealLogTrend, setMealLogTrend] = useState({ status: "loading", data: null, error: null });
+  // "<clientId>|<date>" of the latest meal-log request, so a slow response
+  // for a previous day can't overwrite the one now on screen.
+  const mealLogRequestKeyRef = useRef(null);
 
   // Coach Notes tab (coach_notes table).
   const [notes, setNotes] = useState([]);
@@ -1395,7 +1406,7 @@ export default function CalorieTrackerApp() {
   const actualEntriesForDay = useMemo(() => logs[comparisonDate] || [], [logs, comparisonDate]);
 
   const dailyActualTotal = useMemo(
-    () => actualEntriesForDay.reduce((sum, e) => sum + (e.calories || 0), 0),
+    () => sumCalories(actualEntriesForDay),
     [actualEntriesForDay]
   );
 
@@ -2136,9 +2147,10 @@ export default function CalorieTrackerApp() {
         if (res.error) throw res.error;
       });
 
-      const todayCaloriesById = {};
+      const todayEntriesById = {};
       (todayLogsRes.data || []).forEach((row) => {
-        todayCaloriesById[row.user_id] = (todayCaloriesById[row.user_id] || 0) + (Number(row.calories) || 0);
+        if (!todayEntriesById[row.user_id]) todayEntriesById[row.user_id] = [];
+        todayEntriesById[row.user_id].push(row);
       });
 
       const targetById = {};
@@ -2155,15 +2167,15 @@ export default function CalorieTrackerApp() {
           return;
         }
 
-        const daysSince = daysBetweenDateStrs(latestRow.log_date, today);
+        const daysSince = daysBetweenStr(latestRow.log_date, today);
         if (daysSince > 2) {
           inactive.push({ id, kind: "inactive", daysSince, reason: `No log in ${daysSince} days` });
           return;
         }
 
         const target = targetById[id];
-        const actual = todayCaloriesById[id] || 0;
-        if (target > 0 && actual > target) {
+        const actual = sumCalories(todayEntriesById[id] || []);
+        if (target > 0 && statusFor(actual, target) === "red") {
           const percentOver = Math.max(1, Math.round(((actual - target) / target) * 100));
           overTarget.push({ id, kind: "over", percentOver, reason: `${percentOver}% over target` });
         }
@@ -2402,6 +2414,79 @@ export default function CalorieTrackerApp() {
       return;
     }
     setNotes((prev) => prev.map((n) => (n.id === noteId ? { ...n, reminder_dismissed: true } : n)));
+  }
+
+  function openClientMealLog(clientId) {
+    setSelectedClientId(clientId);
+    setMealLogDate(todayStr());
+    setView("client-meal-log");
+  }
+
+  // The day's entries plus the client's calorie target (the target is also
+  // what the 7-day trend is coloured against).
+  async function loadCoachMealLogDay(clientId, date) {
+    const isCurrent = () => mealLogRequestKeyRef.current === `${clientId}|${date}`;
+    setMealLogDay({ status: "loading", data: null, error: null });
+    try {
+      const [logsRes, profileRes] = await Promise.all([
+        supabase
+          .from("meal_logs")
+          .select("id, name, meal, grams, calories, protein, carbs, fat")
+          .eq("user_id", clientId)
+          .eq("log_date", date)
+          .order("created_at", { ascending: true }),
+        supabase.from("client_profile").select("target_calories").eq("user_id", clientId).maybeSingle(),
+      ]);
+      if (logsRes.error) throw logsRes.error;
+      if (profileRes.error) throw profileRes.error;
+      if (!isCurrent()) return;
+
+      setMealLogDay({
+        status: "ready",
+        data: {
+          date,
+          entries: logsRes.data || [],
+          target: Number(profileRes.data && profileRes.data.target_calories) || 0,
+        },
+        error: null,
+      });
+    } catch (err) {
+      if (!isCurrent()) return;
+      setMealLogDay({ status: "error", data: null, error: err && err.message ? err.message : "Couldn't load this day's meals." });
+    }
+  }
+
+  async function loadCoachMealLogTrend(clientId, endDate) {
+    const isCurrent = () => mealLogRequestKeyRef.current === `${clientId}|${endDate}`;
+    setMealLogTrend({ status: "loading", data: null, error: null });
+    try {
+      const startDate = addDaysStr(endDate, -6);
+      const { data, error } = await supabase
+        .from("meal_logs")
+        .select("log_date, calories")
+        .eq("user_id", clientId)
+        .gte("log_date", startDate)
+        .lte("log_date", endDate);
+      if (error) throw error;
+      if (!isCurrent()) return;
+
+      const entriesByDate = {};
+      (data || []).forEach((row) => {
+        if (!entriesByDate[row.log_date]) entriesByDate[row.log_date] = [];
+        entriesByDate[row.log_date].push(row);
+      });
+
+      const days = [];
+      for (let i = 0; i < 7; i++) {
+        const date = addDaysStr(startDate, i);
+        const entries = entriesByDate[date] || [];
+        days.push({ date, actualTotal: sumCalories(entries), hasEntries: entries.length > 0 });
+      }
+      setMealLogTrend({ status: "ready", data: days, error: null });
+    } catch (err) {
+      if (!isCurrent()) return;
+      setMealLogTrend({ status: "error", data: null, error: err && err.message ? err.message : "Couldn't load the 7-day trend." });
+    }
   }
 
   function openNoteFromHome(note) {
@@ -2911,6 +2996,15 @@ export default function CalorieTrackerApp() {
       setClientsIdFilter(null);
     }
   }, [view]);
+
+  useEffect(() => {
+    if (roleId === 2 && view === "client-meal-log" && selectedClientId) {
+      mealLogRequestKeyRef.current = `${selectedClientId}|${mealLogDate}`;
+      loadCoachMealLogDay(selectedClientId, mealLogDate);
+      loadCoachMealLogTrend(selectedClientId, mealLogDate);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, selectedClientId, mealLogDate, session]);
 
   useEffect(() => {
     if (roleId === 2 && view === "notes") {
@@ -4144,7 +4238,7 @@ export default function CalorieTrackerApp() {
   const historyDayData = useMemo(() => {
     return historyDayDates.map((date) => {
       const entries = logs[date] || [];
-      const actualTotal = entries.reduce((sum, e) => sum + (e.calories || 0), 0);
+      const actualTotal = sumCalories(entries);
       return { date, actualTotal, hasEntries: entries.length > 0 };
     });
   }, [historyDayDates, logs]);
@@ -4679,6 +4773,7 @@ export default function CalorieTrackerApp() {
             {view === "notes" && "Notes"}
             {view === "account" && "Account"}
             {view === "client-detail" && "Client details"}
+            {view === "client-meal-log" && "Meal log"}
           </h1>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
@@ -8216,6 +8311,9 @@ export default function CalorieTrackerApp() {
                     </div>
 
                     <div style={{ display: "flex", gap: 10 }}>
+                      <button onClick={() => openClientMealLog(clientDetail.id)} style={primaryButtonStyle} disabled={clientDetailBusy}>
+                        View meal log
+                      </button>
                       <button onClick={() => startEditClient(clientDetail)} style={secondaryButtonStyle} disabled={clientDetailBusy}>
                         Edit
                       </button>
@@ -8235,6 +8333,21 @@ export default function CalorieTrackerApp() {
                   !clientDetailError && <div style={{ fontSize: 12, color: INK_SOFT }}>Client not found.</div>
                 )}
               </div>
+            )}
+
+            {view === "client-meal-log" && (
+              <CoachMealLog
+                clientName={
+                  (clientDetail && clientDetail.id === selectedClientId && clientDetail.name) ||
+                  (clients.find((c) => c.id === selectedClientId) || {}).name ||
+                  "Client"
+                }
+                date={mealLogDate}
+                onDateChange={setMealLogDate}
+                onBack={() => setView("client-detail")}
+                day={mealLogDay}
+                trend={mealLogTrend}
+              />
             )}
           </div>
         </div>
@@ -8331,6 +8444,278 @@ function formatRelativeTime(isoString) {
   return new Date(isoString).toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
+const MEAL_ICONS = {
+  Breakfast: Coffee,
+  "Before training": Dumbbell,
+  Lunch: Utensils,
+  "After training": Zap,
+  Dinner: Moon,
+  Snack: Apple,
+};
+
+// Coach's read-only view of one client's meal_logs for a single day, plus a
+// per-meal breakdown chart and a 7-day trend against the calorie target.
+function CoachMealLog({ clientName, date, onDateChange, onBack, day, trend }) {
+  const today = todayStr();
+  const target = (day.data && day.data.target) || 0;
+
+  const mealSections = useMemo(() => {
+    if (!day.data) return [];
+    const entries = day.data.entries;
+    const sections = MEALS.map((meal) => {
+      const mealEntries = entries.filter((e) => e.meal === meal);
+      return { meal, entries: mealEntries, subtotal: sumCalories(mealEntries) };
+    });
+    // Anything logged under a legacy / unexpected meal value still counts
+    // toward the day total, so surface it rather than silently dropping it.
+    const otherEntries = entries.filter((e) => !MEALS.includes(e.meal));
+    if (otherEntries.length > 0) {
+      sections.push({ meal: "Other", entries: otherEntries, subtotal: sumCalories(otherEntries) });
+    }
+    return sections;
+  }, [day.data]);
+
+  const dayTotal = day.data ? sumCalories(day.data.entries) : 0;
+  const status = statusFor(dayTotal, target);
+  const percentOfTarget = target > 0 ? Math.round((dayTotal / target) * 100) : null;
+
+  const maxMealSubtotal = Math.max(1, ...mealSections.map((s) => s.subtotal));
+  const trendMaxScale = trend.data ? Math.max(target, ...trend.data.map((d) => d.actualTotal), 1) * 1.1 : 1;
+
+  const monoSmall = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT };
+  const errorBox = (message) => (
+    <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>{message}</div>
+  );
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <button onClick={onBack} style={{ ...linkButtonStyle, marginBottom: 4 }}>
+            ← Back to client details
+          </button>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 18, fontWeight: 700 }}>{clientName}</div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button
+            onClick={() => onDateChange(addDaysStr(date, -1))}
+            aria-label="Previous day"
+            style={{ ...secondaryButtonStyle, padding: "6px 8px" }}
+          >
+            <ChevronLeft size={14} />
+          </button>
+          <input
+            type="date"
+            value={date}
+            max={today}
+            onChange={(e) => e.target.value && onDateChange(e.target.value)}
+            style={{ ...inputStyle, marginBottom: 0, width: 160 }}
+          />
+          <button
+            onClick={() => onDateChange(addDaysStr(date, 1))}
+            disabled={date >= today}
+            aria-label="Next day"
+            style={{ ...secondaryButtonStyle, padding: "6px 8px", opacity: date >= today ? 0.5 : 1, cursor: date >= today ? "not-allowed" : "pointer" }}
+          >
+            <ChevronRight size={14} />
+          </button>
+        </div>
+      </div>
+
+      {day.status === "error" ? (
+        errorBox(day.error)
+      ) : !day.data ? (
+        <div style={{ fontSize: 12, color: INK_SOFT }}>Loading meals…</div>
+      ) : (
+        <>
+          <div style={{ ...panelStyle, borderLeft: `3px solid ${target > 0 ? STATUS_META[status].color : GRID}` }}>
+            <SectionTitle>Day total</SectionTitle>
+            <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: 12 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 32, fontWeight: 600, color: INK }}>
+                {dayTotal}
+                <span style={{ fontSize: 16, color: INK_SOFT }}> / {target > 0 ? `${target} kcal` : "no target set"}</span>
+              </span>
+              {percentOfTarget !== null && (
+                <span
+                  style={{
+                    padding: "4px 10px",
+                    borderRadius: 999,
+                    background: STATUS_META[status].soft,
+                    color: STATUS_META[status].color,
+                    fontFamily: "'Space Grotesk', sans-serif",
+                    fontSize: 12,
+                    fontWeight: 700,
+                  }}
+                >
+                  {percentOfTarget}% of target
+                </span>
+              )}
+            </div>
+            <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 10 }}>
+              Green means within {TOLERANCE * 100}% of target. Red means over. Amber means under.
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16 }}>
+            <div style={panelStyle}>
+              <SectionTitle>Calories by meal</SectionTitle>
+              <div style={{ display: "grid", gap: 8 }}>
+                {mealSections.map((s) => (
+                  <div key={s.meal} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 104, flexShrink: 0, fontSize: 12, color: INK, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {s.meal}
+                    </span>
+                    <div style={{ flex: 1, height: 14, background: PAPER, borderRadius: 3, overflow: "hidden" }}>
+                      <div
+                        title={`${s.meal}: ${s.subtotal} kcal`}
+                        style={{ width: `${(s.subtotal / maxMealSubtotal) * 100}%`, height: "100%", background: TEAL, borderRadius: 3 }}
+                      />
+                    </div>
+                    <span style={{ ...monoSmall, width: 64, textAlign: "right", flexShrink: 0, color: INK }}>{s.subtotal} kcal</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={panelStyle}>
+              <SectionTitle>7-day trend vs target</SectionTitle>
+              {trend.status === "error" ? (
+                errorBox(trend.error)
+              ) : !trend.data ? (
+                <div style={{ fontSize: 12, color: INK_SOFT }}>Loading trend…</div>
+              ) : (
+                <>
+                  <div style={{ position: "relative", height: 150 }}>
+                    {target > 0 && (
+                      <>
+                        <div
+                          style={{
+                            position: "absolute",
+                            left: 0,
+                            right: 0,
+                            top: `${100 - (target / trendMaxScale) * 100}%`,
+                            borderTop: `2px dashed ${INK_SOFT}`,
+                          }}
+                        />
+                        <span
+                          style={{
+                            position: "absolute",
+                            top: `${100 - (target / trendMaxScale) * 100}%`,
+                            left: 0,
+                            transform: "translateY(-100%)",
+                            ...monoSmall,
+                            fontSize: 10,
+                            background: PANEL,
+                            padding: "0 4px 2px 0",
+                          }}
+                        >
+                          {target} kcal
+                        </span>
+                      </>
+                    )}
+                    <div style={{ display: "flex", alignItems: "flex-end", height: "100%", gap: 6 }}>
+                      {trend.data.map((d) => (
+                        <button
+                          key={d.date}
+                          onClick={() => onDateChange(d.date)}
+                          title={d.hasEntries ? `${d.date}: ${d.actualTotal} kcal` : `${d.date}: not logged`}
+                          style={{
+                            flex: 1,
+                            height: "100%",
+                            display: "flex",
+                            alignItems: "flex-end",
+                            justifyContent: "center",
+                            border: "none",
+                            background: "transparent",
+                            padding: 0,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {d.hasEntries ? (
+                            <div
+                              style={{
+                                width: "70%",
+                                height: `${Math.max((d.actualTotal / trendMaxScale) * 100, 2)}%`,
+                                background: STATUS_META[statusFor(d.actualTotal, target)].color,
+                                borderRadius: "3px 3px 0 0",
+                                outline: d.date === date ? `2px solid ${INK}` : "none",
+                                outlineOffset: 1,
+                              }}
+                            />
+                          ) : (
+                            <div style={{ width: "70%", height: 10, border: `1px dashed ${GRID}`, borderRadius: 2 }} />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                    {trend.data.map((d) => (
+                      <div
+                        key={d.date}
+                        style={{ ...monoSmall, fontSize: 9.5, flex: 1, textAlign: "center", fontWeight: d.date === date ? 700 : 400, color: d.date === date ? INK : INK_SOFT }}
+                      >
+                        {shortDayLabel(d.date)}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gap: 12 }}>
+            {mealSections.map((s) => {
+              const MealIcon = MEAL_ICONS[s.meal] || Utensils;
+              return (
+                <div key={s.meal} style={panelStyle}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: s.entries.length > 0 ? 10 : 0 }}>
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 6,
+                        padding: "4px 10px",
+                        borderRadius: 999,
+                        background: TEAL_SOFT,
+                        color: TEAL,
+                        fontFamily: "'Space Grotesk', sans-serif",
+                        fontSize: 12,
+                        fontWeight: 700,
+                      }}
+                    >
+                      <MealIcon size={13} />
+                      {s.meal}
+                    </span>
+                    {s.entries.length > 0 ? (
+                      <span style={{ ...monoSmall, color: INK }}>{s.subtotal} kcal</span>
+                    ) : (
+                      <span style={{ ...monoSmall, fontStyle: "italic" }}>not logged yet</span>
+                    )}
+                  </div>
+                  {s.entries.map((e) => (
+                    <div
+                      key={e.id}
+                      style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "6px 0", borderTop: `1px solid ${GRID}` }}
+                    >
+                      <span style={{ fontSize: 13 }}>{e.name}</span>
+                      <span style={{ ...monoSmall, whiteSpace: "nowrap" }}>
+                        {e.grams ? `${e.grams} g · ` : ""}
+                        <span style={{ color: INK }}>{e.calories || 0} kcal</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 const REMINDER_WINDOW_MS = 48 * 60 * 60 * 1000;
 
 // "YYYY-MM-DDTHH:MM" in local time, the format <input type="datetime-local"> expects.
@@ -8358,7 +8743,7 @@ function formatReminderLabel(isoString) {
   if (d.getTime() < Date.now()) return "Overdue";
 
   const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  const dayDiff = daysBetweenDateStrs(todayStr(), localDateStr(d));
+  const dayDiff = daysBetweenStr(todayStr(), localDateStr(d));
   if (dayDiff === 0) return `Today ${time}`;
   if (dayDiff === 1) return `Tomorrow ${time}`;
   if (dayDiff < 7) return `${d.toLocaleDateString([], { weekday: "short" })} ${time}`;

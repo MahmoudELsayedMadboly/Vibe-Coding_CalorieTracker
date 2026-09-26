@@ -313,6 +313,56 @@ function clientStatusMeta(client) {
   return { label: "Invited", color: AMBER, soft: AMBER_SOFT };
 }
 
+// owner_coaches.status lifecycle: invited → active (first password change,
+// set by a DB trigger) → inactive (owner deactivated).
+const COACH_STATUSES = ["invited", "active", "inactive"];
+
+function coachStatusMeta(status) {
+  if (status === "active") return { label: "Active", color: GREEN, soft: GREEN_SOFT };
+  if (status === "inactive") return { label: "Inactive", color: INK_SOFT, soft: GRID };
+  return { label: "Invited", color: AMBER, soft: AMBER_SOFT };
+}
+
+function CoachStatusBadge({ status }) {
+  const meta = coachStatusMeta(status);
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "3px 8px",
+        borderRadius: 4,
+        background: meta.soft,
+        color: meta.color,
+        fontFamily: "'Space Grotesk', sans-serif",
+        fontSize: 10.5,
+        fontWeight: 700,
+        textTransform: "uppercase",
+        letterSpacing: 0.4,
+      }}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
+// The Edge Function's JSON body. supabase.functions.invoke puts a non-2xx
+// response in `error` (body unread) instead of `data`, so read it from there
+// too — that's where a { ok: false, reason } rejection can end up.
+async function invokeEdgeFunction(name, body) {
+  const { data, error } = await supabase.functions.invoke(name, { body });
+  if (!error) return data;
+  if (error.context && typeof error.context.json === "function") {
+    try {
+      const parsed = await error.context.json();
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch (_) {
+      // Not JSON; fall through to the original error.
+    }
+  }
+  throw error;
+}
+
 function planStatusMeta(status) {
   if (status === "active") return { label: "Active", color: GREEN, soft: GREEN_SOFT };
   if (status === "draft") return { label: "Draft", color: TEAL, soft: TEAL_SOFT };
@@ -391,6 +441,16 @@ function describeCreateUserError(reason, roleLabel) {
       return "Enter an email address.";
     default:
       return reason ? `Couldn't add ${roleLabel}: ${reason}` : `Couldn't add ${roleLabel}. Please try again.`;
+  }
+}
+
+// Maps an edit-user `reason` to a message, like describeCreateUserError.
+function describeEditUserError(reason, roleLabel) {
+  switch (reason) {
+    case "email_required":
+      return "Enter an email address.";
+    default:
+      return reason ? `Couldn't update ${roleLabel}: ${reason}` : `Couldn't update ${roleLabel}. Please try again.`;
   }
 }
 
@@ -707,6 +767,19 @@ export default function CalorieTrackerApp() {
   const [newCoachBusy, setNewCoachBusy] = useState(false);
   const [newCoachError, setNewCoachError] = useState(null);
   const [createdCoachCredentials, setCreatedCoachCredentials] = useState(null);
+  // Set while the New coach form is editing an existing coach (edit-user).
+  const [editingCoachId, setEditingCoachId] = useState(null);
+  const [coachesNameFilter, setCoachesNameFilter] = useState("");
+  const [coachesStatusFilter, setCoachesStatusFilter] = useState("all");
+  const [coachesPage, setCoachesPage] = useState(1);
+
+  // Owner's Coach Details screen, mirroring the coach's clientDetail state.
+  const [selectedCoachId, setSelectedCoachId] = useState(null);
+  const [coachDetail, setCoachDetail] = useState(null);
+  const [coachDetailLoading, setCoachDetailLoading] = useState(false);
+  const [coachDetailError, setCoachDetailError] = useState(null);
+  const [coachDetailBusy, setCoachDetailBusy] = useState(false);
+  const [coachDetailFlash, setCoachDetailFlash] = useState(null);
   const [editingClientId, setEditingClientId] = useState(null);
 
   const [clientDetail, setClientDetail] = useState(null);
@@ -829,7 +902,9 @@ export default function CalorieTrackerApp() {
   // failed doesn't re-submit the password (Supabase rejects an unchanged one).
   const forcedPasswordUpdatedRef = useRef(false);
 
-  // Owner's organization name (user_info.organization_name), Account screen.
+  // Organization name on the Account screen. For an owner it's their own
+  // user_info.organization_name (editable); for a coach it's read-only,
+  // fetched from their owner's row via owner_coaches.
   const [organizationName, setOrganizationName] = useState("");
   const [organizationNameDraft, setOrganizationNameDraft] = useState("");
   const [organizationNameSaving, setOrganizationNameSaving] = useState(false);
@@ -1053,8 +1128,12 @@ export default function CalorieTrackerApp() {
 
         setAccountEmail(userInfoRow?.email || "");
         setLanguagePreference(userInfoRow?.language_preference || "en");
-        setOrganizationName(userInfoRow?.organization_name || "");
-        setOrganizationNameDraft(userInfoRow?.organization_name || "");
+        // Only an owner's own row carries the organization name; a coach's
+        // is loaded from their owner by loadCoachOrganizationName.
+        if (userInfoRow?.role_id === 4) {
+          setOrganizationName(userInfoRow?.organization_name || "");
+          setOrganizationNameDraft(userInfoRow?.organization_name || "");
+        }
         setAvatarPath(userInfoRow?.avatar_path || null);
         if (userInfoRow?.avatar_path) {
           const { data: avatarSigned, error: avatarSignedErr } = await supabase.storage
@@ -1809,6 +1888,37 @@ export default function CalorieTrackerApp() {
     }
   }
 
+  // Coach's Account screen: the organization name of the owner they belong
+  // to (owner_coaches → owner's user_info.organization_name). Read-only.
+  async function loadCoachOrganizationName() {
+    if (!session || !session.user) return;
+
+    setOrganizationNameError(null);
+
+    try {
+      const { data: link, error: linkErr } = await supabase
+        .from("owner_coaches")
+        .select("owner_id")
+        .eq("coach_id", session.user.id)
+        .maybeSingle();
+      if (linkErr) throw linkErr;
+      if (!link) {
+        setOrganizationName("");
+        return;
+      }
+
+      const { data: owner, error: ownerErr } = await supabase
+        .from("user_info")
+        .select("organization_name")
+        .eq("id", link.owner_id)
+        .maybeSingle();
+      if (ownerErr) throw ownerErr;
+      setOrganizationName((owner && owner.organization_name) || "");
+    } catch (err) {
+      setOrganizationNameError(err && err.message ? err.message : "Couldn't load your organization name.");
+    }
+  }
+
   async function saveOrganizationName() {
     if (!session || !session.user) return;
 
@@ -2241,7 +2351,7 @@ export default function CalorieTrackerApp() {
           .map((l) => ({
             id: l.coach_id,
             name: nameById[l.coach_id] || "(name unavailable)",
-            active: l.status === "active",
+            status: COACH_STATUSES.includes(l.status) ? l.status : "invited",
             clientCount: clientCountByCoach[l.coach_id] || 0,
           }))
           .sort((a, b) => a.name.localeCompare(b.name)),
@@ -2258,7 +2368,201 @@ export default function CalorieTrackerApp() {
     setNewCoachPhoneCountryCode("+20");
     setNewCoachPhoneNumber("");
     setNewCoachError(null);
+    setEditingCoachId(null);
     setNewCoachFormOpen(true);
+  }
+
+  // Coach Details: user_info fields, owner_coaches status, and client counts.
+  async function loadCoachDetail(coachId) {
+    if (!session || !coachId) return;
+
+    setCoachDetailLoading(true);
+    setCoachDetailError(null);
+
+    try {
+      const [infoRes, linkRes, clientLinksRes] = await Promise.all([
+        supabase.from("user_info").select("id, name, email, phone, first_login_at").eq("id", coachId).maybeSingle(),
+        supabase.from("owner_coaches").select("status").eq("owner_id", session.user.id).eq("coach_id", coachId).maybeSingle(),
+        supabase.from("coach_clients").select("status").eq("coach_id", coachId),
+      ]);
+      if (infoRes.error) throw infoRes.error;
+      if (linkRes.error) throw linkRes.error;
+      if (clientLinksRes.error) throw clientLinksRes.error;
+
+      if (!linkRes.data) {
+        setCoachDetail(null);
+        return;
+      }
+
+      const info = infoRes.data || {};
+      const clientLinks = clientLinksRes.data || [];
+
+      setCoachDetail({
+        id: coachId,
+        name: info.name || "(name unavailable)",
+        email: info.email || null,
+        phone: info.phone || null,
+        firstLoginAt: info.first_login_at || null,
+        status: COACH_STATUSES.includes(linkRes.data.status) ? linkRes.data.status : "invited",
+        clientCount: clientLinks.length,
+        activeClientCount: clientLinks.filter((l) => l.status === "active").length,
+      });
+    } catch (err) {
+      setCoachDetailError(err && err.message ? err.message : "Couldn't load this coach.");
+    } finally {
+      setCoachDetailLoading(false);
+    }
+  }
+
+  // Number of coach_clients rows for a coach, for the "has clients" messages
+  // (neither the DB error nor delete-user's reason carries the count).
+  async function countCoachClients(coachId) {
+    const { count, error } = await supabase
+      .from("coach_clients")
+      .select("client_id", { count: "exact", head: true })
+      .eq("coach_id", coachId);
+    if (error) throw error;
+    return count || 0;
+  }
+
+  async function coachHasClientsMessage(coachId, action) {
+    let countLabel = "one or more";
+    try {
+      countLabel = String(await countCoachClients(coachId));
+    } catch (_) {
+      // Keep the generic wording if the count itself can't be read.
+    }
+    return `This coach has ${countLabel} client(s). Remove them before ${action} this coach.`;
+  }
+
+  function startEditCoach(coach) {
+    const { code, number } = splitPhoneByDialCode(coach.phone);
+    setNewCoachName(coach.name || "");
+    setNewCoachEmail(coach.email || "");
+    setNewCoachPhoneCountryCode(code);
+    setNewCoachPhoneNumber(number);
+    setNewCoachError(null);
+    setEditingCoachId(coach.id);
+    setNewCoachFormOpen(true);
+    setView("users");
+  }
+
+  function cancelCoachForm() {
+    setNewCoachError(null);
+    setNewCoachFormOpen(false);
+    if (editingCoachId) {
+      setEditingCoachId(null);
+      setView("coach-detail");
+    }
+  }
+
+  async function submitEditCoach() {
+    setNewCoachError(null);
+    const coachId = editingCoachId;
+    const name = newCoachName.trim();
+    const email = newCoachEmail.trim();
+
+    if (!name) {
+      setNewCoachError("Enter the coach's name.");
+      return;
+    }
+    if (!email) {
+      setNewCoachError(describeCreateUserError("email_required", "coach"));
+      return;
+    }
+
+    setNewCoachBusy(true);
+
+    const phoneNumber = newCoachPhoneNumber.trim();
+    const combinedPhone = phoneNumber ? `${newCoachPhoneCountryCode}${phoneNumber}` : null;
+
+    try {
+      const data = await invokeEdgeFunction("edit-user", {
+        user_id: coachId,
+        email,
+        name,
+        phone: combinedPhone,
+      });
+
+      if (data && data.ok) {
+        setEditingCoachId(null);
+        setNewCoachFormOpen(false);
+        setView("coach-detail");
+        setSelectedCoachId(coachId);
+        setCoachDetailFlash("Coach details updated.");
+        setTimeout(() => setCoachDetailFlash(null), 2500);
+        loadCoachDetail(coachId);
+        loadOwnerCoaches();
+      } else {
+        setNewCoachError(describeEditUserError(data && data.reason, "coach"));
+      }
+    } catch (err) {
+      setNewCoachError("Couldn't update the coach. Please try again.");
+    } finally {
+      setNewCoachBusy(false);
+    }
+  }
+
+  async function toggleCoachStatus(coach) {
+    const nextStatus = coach.status === "inactive" ? "active" : "inactive";
+
+    setCoachDetailBusy(true);
+    setCoachDetailError(null);
+
+    try {
+      const { data, error } = await supabase
+        .from("owner_coaches")
+        .update({ status: nextStatus })
+        .eq("owner_id", session.user.id)
+        .eq("coach_id", coach.id)
+        .select("status");
+      if (error) {
+        const errorText = [error.message, error.details, error.hint].filter(Boolean).join(" ");
+        if (nextStatus === "inactive" && errorText.includes("coach_has_clients")) {
+          setCoachDetailError(await coachHasClientsMessage(coach.id, "deactivating"));
+          return;
+        }
+        throw error;
+      }
+      // RLS silently filters out a disallowed update instead of erroring.
+      if (!data || data.length === 0) throw new Error("You don't have permission to change this coach's status.");
+
+      loadCoachDetail(coach.id);
+      loadOwnerCoaches();
+    } catch (err) {
+      setCoachDetailError(err && err.message ? err.message : "Couldn't update this coach's status. Please try again.");
+    } finally {
+      setCoachDetailBusy(false);
+    }
+  }
+
+  async function deleteCoach(coachId, name) {
+    const confirmed = window.confirm(`Are you sure? This permanently deletes ${name} and all their data.`);
+    if (!confirmed) return;
+
+    setCoachDetailBusy(true);
+    setCoachDetailError(null);
+
+    try {
+      const data = await invokeEdgeFunction("delete-user", { user_id: coachId });
+
+      if (data && data.ok) {
+        setOwnerCoaches((prev) => (prev.data ? { ...prev, data: prev.data.filter((c) => c.id !== coachId) } : prev));
+        setSelectedCoachId(null);
+        setCoachDetail(null);
+        setView("users");
+      } else if (data && data.reason === "has_clients") {
+        setCoachDetailError(await coachHasClientsMessage(coachId, "deleting"));
+      } else {
+        setCoachDetailError(
+          data && data.reason ? `Couldn't delete this coach: ${data.reason}` : "Couldn't delete this coach. Please try again."
+        );
+      }
+    } catch (err) {
+      setCoachDetailError("Couldn't delete this coach. Please try again.");
+    } finally {
+      setCoachDetailBusy(false);
+    }
   }
 
   async function submitNewCoach() {
@@ -3232,8 +3536,25 @@ export default function CalorieTrackerApp() {
   }, [view, roleId, session]);
 
   useEffect(() => {
-    if (view !== "users") setNewCoachFormOpen(false);
+    if (view !== "users") {
+      setNewCoachFormOpen(false);
+      setEditingCoachId(null);
+    }
   }, [view]);
+
+  useEffect(() => {
+    if (roleId === 4 && view === "coach-detail" && selectedCoachId) {
+      loadCoachDetail(selectedCoachId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, selectedCoachId, session]);
+
+  useEffect(() => {
+    if (roleId === 2) {
+      loadCoachOrganizationName();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roleId, session]);
 
   useEffect(() => {
     if (roleId === 2 && (view === "home" || (view === "clients" && clientsView === "grid") || view === "plans" || view === "chat" || view === "notifications")) {
@@ -4695,6 +5016,21 @@ export default function CalorieTrackerApp() {
     clampedClientsPage * CLIENTS_PAGE_SIZE
   );
 
+  // Owner's Users grid: name + status filters, paged like the Clients grid.
+  const COACHES_PAGE_SIZE = 10;
+  const coachesNameQuery = coachesNameFilter.trim().toLowerCase();
+  const filteredOwnerCoaches = (ownerCoaches.data || []).filter(
+    (c) =>
+      (coachesStatusFilter === "all" || c.status === coachesStatusFilter) &&
+      (!coachesNameQuery || c.name.toLowerCase().includes(coachesNameQuery))
+  );
+  const totalCoachesPages = Math.max(1, Math.ceil(filteredOwnerCoaches.length / COACHES_PAGE_SIZE));
+  const clampedCoachesPage = Math.min(coachesPage, totalCoachesPages);
+  const pagedOwnerCoaches = filteredOwnerCoaches.slice(
+    (clampedCoachesPage - 1) * COACHES_PAGE_SIZE,
+    clampedCoachesPage * COACHES_PAGE_SIZE
+  );
+
   const activePlanClients = clients.filter((c) => c.active);
 
   const chatUnreadTotal = Object.values(chatUnreadByClient).reduce((sum, n) => sum + n, 0);
@@ -5061,6 +5397,18 @@ export default function CalorieTrackerApp() {
         </div>
       )}
 
+      {roleId === 2 && (
+        <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
+          <label style={labelStyle}>Organization name</label>
+          <div style={{ fontSize: 13 }}>{organizationName || "—"}</div>
+          {organizationNameError && (
+            <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+              {organizationNameError}
+            </div>
+          )}
+        </div>
+      )}
+
       <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
         <label style={labelStyle}>Language</label>
         <select
@@ -5150,6 +5498,7 @@ export default function CalorieTrackerApp() {
             {view === "notes" && "Notes"}
             {view === "account" && "Account"}
             {view === "client-detail" && "Client details"}
+            {view === "coach-detail" && "Coach details"}
             {view === "client-meal-log" && "Meal log"}
           </h1>
         </div>
@@ -7177,25 +7526,7 @@ export default function CalorieTrackerApp() {
                           </table>
                         </div>
 
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10 }}>
-                          <button
-                            onClick={() => setClientsPage((p) => Math.max(1, p - 1))}
-                            disabled={clampedClientsPage <= 1}
-                            style={{ ...secondaryButtonStyle, fontSize: 11, padding: "5px 10px", opacity: clampedClientsPage <= 1 ? 0.5 : 1, cursor: clampedClientsPage <= 1 ? "not-allowed" : "pointer" }}
-                          >
-                            Previous
-                          </button>
-                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                            Page {clampedClientsPage} of {totalClientsPages}
-                          </span>
-                          <button
-                            onClick={() => setClientsPage((p) => Math.min(totalClientsPages, p + 1))}
-                            disabled={clampedClientsPage >= totalClientsPages}
-                            style={{ ...secondaryButtonStyle, fontSize: 11, padding: "5px 10px", opacity: clampedClientsPage >= totalClientsPages ? 0.5 : 1, cursor: clampedClientsPage >= totalClientsPages ? "not-allowed" : "pointer" }}
-                          >
-                            Next
-                          </button>
-                        </div>
+                        <Pagination page={clampedClientsPage} totalPages={totalClientsPages} onPageChange={setClientsPage} />
                       </>
                     )}
                   </div>
@@ -8687,12 +9018,22 @@ export default function CalorieTrackerApp() {
 
           <div style={{ flex: 1, minWidth: 0 }}>
             {view === "home" && (
-              <div>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-                  <SectionTitle>Your coaches</SectionTitle>
-                </div>
-                <OwnerCoachList state={ownerCoaches} emptyText="You don't have any coaches yet. Add one from Users." />
-              </div>
+              <HomeCard title="Your coaches" accent={TEAL} state={ownerCoaches}>
+                {(coaches) =>
+                  coaches.length === 0 ? (
+                    <HomeEmptyState>You don't have any coaches yet. Add one from Users.</HomeEmptyState>
+                  ) : (
+                    <div>
+                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700, color: INK }}>
+                        {coaches.length}
+                      </div>
+                      <div style={{ fontSize: 12.5, color: INK_SOFT, marginTop: 4 }}>
+                        {COACH_STATUSES.map((st) => `${coaches.filter((c) => c.status === st).length} ${st}`).join(", ")}
+                      </div>
+                    </div>
+                  )
+                }
+              </HomeCard>
             )}
 
             {view === "users" && (
@@ -8707,7 +9048,7 @@ export default function CalorieTrackerApp() {
 
                 {newCoachFormOpen ? (
                   <div style={panelStyle}>
-                    <SectionTitle>New coach</SectionTitle>
+                    <SectionTitle>{editingCoachId ? "Edit coach" : "New coach"}</SectionTitle>
 
                     <label style={labelStyle}>Coach name</label>
                     <input
@@ -8754,17 +9095,10 @@ export default function CalorieTrackerApp() {
                     </div>
 
                     <div style={{ display: "flex", gap: 10 }}>
-                      <button onClick={submitNewCoach} style={primaryButtonStyle} disabled={newCoachBusy}>
+                      <button onClick={editingCoachId ? submitEditCoach : submitNewCoach} style={primaryButtonStyle} disabled={newCoachBusy}>
                         {newCoachBusy ? "Saving…" : "Save"}
                       </button>
-                      <button
-                        onClick={() => {
-                          setNewCoachError(null);
-                          setNewCoachFormOpen(false);
-                        }}
-                        style={secondaryButtonStyle}
-                        disabled={newCoachBusy}
-                      >
+                      <button onClick={cancelCoachForm} style={secondaryButtonStyle} disabled={newCoachBusy}>
                         Cancel
                       </button>
                     </div>
@@ -8783,8 +9117,115 @@ export default function CalorieTrackerApp() {
                         + New coach
                       </button>
                     </div>
-                    <OwnerCoachList state={ownerCoaches} emptyText="There are no coaches added yet" />
+                    {ownerCoaches.data && ownerCoaches.data.length > 0 && (
+                      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                        <input
+                          type="text"
+                          placeholder="Filter by coach name"
+                          value={coachesNameFilter}
+                          onChange={(e) => {
+                            setCoachesNameFilter(e.target.value);
+                            setCoachesPage(1);
+                          }}
+                          style={{ ...inputStyle, flex: 1, marginBottom: 0 }}
+                        />
+                        <select
+                          value={coachesStatusFilter}
+                          onChange={(e) => {
+                            setCoachesStatusFilter(e.target.value);
+                            setCoachesPage(1);
+                          }}
+                          style={{ ...inputStyle, width: 160, marginBottom: 0 }}
+                        >
+                          <option value="all">All</option>
+                          {COACH_STATUSES.map((st) => (
+                            <option key={st} value={st}>
+                              {coachStatusMeta(st).label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                    <OwnerCoachList
+                      state={ownerCoaches}
+                      rows={pagedOwnerCoaches}
+                      emptyText="There are no coaches added yet"
+                      noMatchText="No coaches match these filters."
+                      onViewDetails={(coachId) => {
+                        setSelectedCoachId(coachId);
+                        setView("coach-detail");
+                      }}
+                    />
+                    {filteredOwnerCoaches.length > 0 && (
+                      <Pagination page={clampedCoachesPage} totalPages={totalCoachesPages} onPageChange={setCoachesPage} />
+                    )}
                   </div>
+                )}
+              </div>
+            )}
+
+            {view === "coach-detail" && (
+              <div style={{ display: "grid", gap: 16 }}>
+                {coachDetailFlash && (
+                  <div style={{ padding: "10px 12px", borderRadius: 4, fontSize: 12.5, background: GREEN_SOFT, color: GREEN }}>
+                    {coachDetailFlash}
+                  </div>
+                )}
+
+                {coachDetailError && (
+                  <div style={{ padding: "10px 12px", borderRadius: 4, fontSize: 12.5, background: RED_SOFT, color: RED }}>
+                    {coachDetailError}
+                  </div>
+                )}
+
+                {coachDetailLoading ? (
+                  <div style={{ fontSize: 12, color: INK_SOFT }}>Loading coach…</div>
+                ) : coachDetail ? (
+                  <div style={panelStyle}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
+                      <SectionTitle>{coachDetail.name}</SectionTitle>
+                      <CoachStatusBadge status={coachDetail.status} />
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 20 }}>
+                      <div>
+                        <div style={labelStyle}>Email</div>
+                        <div style={{ fontSize: 13 }}>{coachDetail.email || "—"}</div>
+                      </div>
+                      <div>
+                        <div style={labelStyle}>Phone</div>
+                        <div style={{ fontSize: 13 }}>{coachDetail.phone || "—"}</div>
+                      </div>
+                      <div>
+                        <div style={labelStyle}>Active clients</div>
+                        <div style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace" }}>{coachDetail.activeClientCount}</div>
+                      </div>
+                      <div>
+                        <div style={labelStyle}>Total clients</div>
+                        <div style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace" }}>{coachDetail.clientCount}</div>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <button onClick={() => startEditCoach(coachDetail)} style={secondaryButtonStyle} disabled={coachDetailBusy}>
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => deleteCoach(coachDetail.id, coachDetail.name)}
+                        style={{ ...secondaryButtonStyle, border: `1px solid ${RED}`, color: RED }}
+                        disabled={coachDetailBusy}
+                      >
+                        Remove
+                      </button>
+                      {coachDetail.status !== "invited" && (
+                        <button onClick={() => toggleCoachStatus(coachDetail)} style={secondaryButtonStyle} disabled={coachDetailBusy}>
+                          {coachDetail.status === "inactive" ? "Reactivate" : "Deactivate"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  !coachDetailError && <div style={{ fontSize: 12, color: INK_SOFT }}>Coach not found.</div>
                 )}
               </div>
             )}
@@ -8827,6 +9268,34 @@ function SidebarNav({ items, view, onSelect }) {
           {t.badge > 0 && <UnreadBadge count={t.badge} />}
         </button>
       ))}
+    </div>
+  );
+}
+
+// Previous / "Page X of Y" / Next row under a paged grid (coach's Clients,
+// owner's Users). `page` should already be clamped to 1..totalPages.
+function Pagination({ page, totalPages, onPageChange }) {
+  const atFirst = page <= 1;
+  const atLast = page >= totalPages;
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10 }}>
+      <button
+        onClick={() => onPageChange(Math.max(1, page - 1))}
+        disabled={atFirst}
+        style={{ ...secondaryButtonStyle, fontSize: 11, padding: "5px 10px", opacity: atFirst ? 0.5 : 1, cursor: atFirst ? "not-allowed" : "pointer" }}
+      >
+        Previous
+      </button>
+      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+        Page {page} of {totalPages}
+      </span>
+      <button
+        onClick={() => onPageChange(Math.min(totalPages, page + 1))}
+        disabled={atLast}
+        style={{ ...secondaryButtonStyle, fontSize: 11, padding: "5px 10px", opacity: atLast ? 0.5 : 1, cursor: atLast ? "not-allowed" : "pointer" }}
+      >
+        Next
+      </button>
     </div>
   );
 }
@@ -8888,9 +9357,10 @@ function CreatedCredentialsModal({ roleLabel, credentials, onDone }) {
   );
 }
 
-// Owner's coaches table (Home and Users), styled like the coach's Clients
-// grid. `state` is the loadOwnerCoaches { status, data, error }.
-function OwnerCoachList({ state, emptyText }) {
+// Owner's Users coach grid, styled like the coach's Clients grid. `state` is
+// the loadOwnerCoaches { status, data, error }; `rows` is the filtered,
+// paged slice of state.data to show.
+function OwnerCoachList({ state, rows, emptyText, noMatchText, onViewDetails }) {
   if (state.status === "error") {
     return (
       <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
@@ -8908,6 +9378,13 @@ function OwnerCoachList({ state, emptyText }) {
       </div>
     );
   }
+  if (rows.length === 0) {
+    return (
+      <div style={{ ...panelStyle, textAlign: "center" }}>
+        <div style={{ fontSize: 13, color: INK_SOFT }}>{noMatchText}</div>
+      </div>
+    );
+  }
   return (
     <div style={{ ...panelStyle, padding: 0, overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -8916,32 +9393,22 @@ function OwnerCoachList({ state, emptyText }) {
             <th style={thStyle}>Coach name</th>
             <th style={thStyle}>Status</th>
             <th style={thStyle}>Active clients</th>
+            <th style={thStyle}></th>
           </tr>
         </thead>
         <tbody>
-          {state.data.map((c) => (
+          {rows.map((c) => (
             <tr key={c.id} style={{ borderTop: `1px solid ${GRID}` }}>
               <td style={tdStyle}>{c.name}</td>
               <td style={tdStyle}>
-                <span
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    padding: "3px 8px",
-                    borderRadius: 4,
-                    background: c.active ? GREEN_SOFT : AMBER_SOFT,
-                    color: c.active ? GREEN : AMBER,
-                    fontFamily: "'Space Grotesk', sans-serif",
-                    fontSize: 10.5,
-                    fontWeight: 700,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.4,
-                  }}
-                >
-                  {c.active ? "Active" : "Inactive"}
-                </span>
+                <CoachStatusBadge status={c.status} />
               </td>
               <td style={{ ...tdStyle, fontFamily: "'IBM Plex Mono', monospace" }}>{c.clientCount}</td>
+              <td style={tdStyle}>
+                <button onClick={() => onViewDetails(c.id)} style={secondaryButtonStyle}>
+                  View details
+                </button>
+              </td>
             </tr>
           ))}
         </tbody>

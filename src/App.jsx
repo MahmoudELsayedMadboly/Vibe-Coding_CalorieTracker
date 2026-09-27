@@ -2496,8 +2496,8 @@ export default function CalorieTrackerApp() {
 
     try {
       const data = await invokeEdgeFunction("edit-user", {
-        user_id: coachId,
         target_role: "coach",
+        target_id: coachId,
         email,
         name,
         phone: combinedPhone,
@@ -2563,7 +2563,7 @@ export default function CalorieTrackerApp() {
     setCoachDetailError(null);
 
     try {
-      const data = await invokeEdgeFunction("delete-user", { user_id: coachId, target_role: "coach" });
+      const data = await invokeEdgeFunction("delete-user", { target_role: "coach", target_id: coachId });
 
       if (data && data.ok) {
         setOwnerCoaches((prev) => (prev.data ? { ...prev, data: prev.data.filter((c) => c.id !== coachId) } : prev));

@@ -7,6 +7,8 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "autoUpdate",
+      // Registered from src/main.jsx via virtual:pwa-register.
+      injectRegister: false,
       manifest: {
         name: "Calorie Tracker",
         short_name: "CalTracker",

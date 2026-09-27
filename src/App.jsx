@@ -1047,10 +1047,28 @@ export default function CalorieTrackerApp() {
         // no forced change; a query error leaves the gate "unknown".
         const { data: gateRow, error: gateErr } = await supabase
           .from("user_info")
-          .select("must_change_password")
+          .select("must_change_password, role_id")
           .eq("id", userId)
           .maybeSingle();
         if (gateErr) throw gateErr;
+
+        // Supabase Auth doesn't know about owner_coaches, so a coach the
+        // owner deactivated can still sign in. Sign them straight back out
+        // before anything renders.
+        if (gateRow && gateRow.role_id === 2) {
+          const { data: coachLink, error: coachLinkErr } = await supabase
+            .from("owner_coaches")
+            .select("status")
+            .eq("coach_id", userId)
+            .maybeSingle();
+          if (coachLinkErr) throw coachLinkErr;
+          if (coachLink && coachLink.status === "inactive") {
+            await supabase.auth.signOut();
+            setAuthError("Your account has been deactivated by your organization owner. Contact them for access.");
+            return;
+          }
+        }
+
         setPasswordGate({ userId, status: gateRow && gateRow.must_change_password ? "required" : "clear" });
 
         let { data: profileRow, error: profileErr } = await supabase
@@ -2479,6 +2497,7 @@ export default function CalorieTrackerApp() {
     try {
       const data = await invokeEdgeFunction("edit-user", {
         user_id: coachId,
+        target_role: "coach",
         email,
         name,
         phone: combinedPhone,
@@ -2544,7 +2563,7 @@ export default function CalorieTrackerApp() {
     setCoachDetailError(null);
 
     try {
-      const data = await invokeEdgeFunction("delete-user", { user_id: coachId });
+      const data = await invokeEdgeFunction("delete-user", { user_id: coachId, target_role: "coach" });
 
       if (data && data.ok) {
         setOwnerCoaches((prev) => (prev.data ? { ...prev, data: prev.data.filter((c) => c.id !== coachId) } : prev));
@@ -5400,7 +5419,14 @@ export default function CalorieTrackerApp() {
       {roleId === 2 && (
         <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
           <label style={labelStyle}>Organization name</label>
-          <div style={{ fontSize: 13 }}>{organizationName || "—"}</div>
+          <input
+            type="text"
+            value={organizationName}
+            placeholder="—"
+            readOnly
+            disabled
+            style={{ ...inputStyle, width: 280, marginBottom: 0 }}
+          />
           {organizationNameError && (
             <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
               {organizationNameError}

@@ -214,6 +214,27 @@ function computeBMI(profile) {
   return { bmi, category, status, percentDiff, diffLabel, sentence };
 }
 
+// Weight used for BMI and plan math: the most recent check-in that recorded
+// a weight (body_measurements.weight_kg), else the fixed starting weight
+// (profile.original_weight_kg). measuredAt is null for the fallback so the
+// UI can label it "Starting weight" instead of a check-in date.
+function resolveCurrentWeight(measurementRows, originalWeightKg) {
+  const latest = (measurementRows || [])
+    .filter((m) => m.weight_kg !== null && m.weight_kg !== undefined)
+    .sort((a, b) => {
+      if (a.measured_at !== b.measured_at) return a.measured_at < b.measured_at ? 1 : -1;
+      return (b.created_at || "").localeCompare(a.created_at || "");
+    })[0];
+  if (latest) return { weightKg: Number(latest.weight_kg), measuredAt: String(latest.measured_at).slice(0, 10) };
+  const original = Number(originalWeightKg);
+  return original > 0 ? { weightKg: original, measuredAt: null } : null;
+}
+
+function weightSourceLabel(currentWeight) {
+  if (!currentWeight) return null;
+  return currentWeight.measuredAt ? `Check-in ${currentWeight.measuredAt}` : "Starting weight";
+}
+
 function computePlan(profile, goal) {
   const weight = Number(profile.weightKg) || 0;
   const height = Number(profile.heightCm) || 0;
@@ -850,12 +871,12 @@ export default function CalorieTrackerApp() {
   const [chatSendError, setChatSendError] = useState(null);
   const [chatUnreadByClient, setChatUnreadByClient] = useState({});
 
-  const [profile, setProfile] = useState({ sex: "male", age: 30, dateOfBirth: "", healthNotes: "", weightKg: 75, heightCm: 175, activity: "moderate" });
+  const [profile, setProfile] = useState({ sex: "male", age: 30, dateOfBirth: "", healthNotes: "", originalWeightKg: 75, heightCm: 175, activity: "moderate" });
   const [coachOwnedInfo, setCoachOwnedInfo] = useState({ name: "", email: "", phone: "", planDateFrom: null, planDateTo: null, planTypeName: null });
   const [coachSetPlanTargets, setCoachSetPlanTargets] = useState({ calories: null, protein: null, carb: null, fat: null });
 
   const [measurements, setMeasurements] = useState([]);
-  const [newMeasurement, setNewMeasurement] = useState({ date: todayStr(), neck: "", waist: "", shoulder: "", chest: "", abdomen: "", thighs: "" });
+  const [newMeasurement, setNewMeasurement] = useState({ date: todayStr(), weightKg: "", neck: "", waist: "", shoulder: "", chest: "", abdomen: "", thighs: "" });
   const [measurementSaving, setMeasurementSaving] = useState(false);
   const [measurementError, setMeasurementError] = useState(null);
 
@@ -1234,7 +1255,7 @@ export default function CalorieTrackerApp() {
             age: dobAge !== null ? dobAge : (p.age ?? 30),
             dateOfBirth: dob,
             healthNotes: p.health_notes || "",
-            weightKg: p.weight_kg ?? 75,
+            originalWeightKg: p.original_weight_kg ?? 75,
             heightCm: p.height_cm ?? 175,
             activity: p.activity || "moderate",
           });
@@ -1259,7 +1280,14 @@ export default function CalorieTrackerApp() {
           // over the saved DB values so in-progress edits aren't lost.
           const draft = loadDraft(userId);
           if (draft) {
-            if (draft.profile) setProfile(draft.profile);
+            if (draft.profile) {
+              // Drafts saved before weightKg was renamed to originalWeightKg.
+              const { weightKg: legacyWeightKg, ...draftProfile } = draft.profile;
+              if (draftProfile.originalWeightKg === undefined && legacyWeightKg !== undefined) {
+                draftProfile.originalWeightKg = legacyWeightKg;
+              }
+              setProfile(draftProfile);
+            }
             if (draft.goal) setGoal(draft.goal);
             if (draft.planOverride !== undefined) setPlanOverride(draft.planOverride);
           }
@@ -1371,7 +1399,11 @@ export default function CalorieTrackerApp() {
         const p = next.profile ?? profile;
         const g = next.goal ?? goal;
         const o = next.planOverride !== undefined ? next.planOverride : planOverride;
-        const bmiResult = computeBMI(p);
+        // Starting weight is fixed once a check-in has recorded a weight;
+        // from then on the trend lives in body_measurements.weight_kg.
+        const startingWeightLocked = measurements.some((m) => m.weight_kg !== null && m.weight_kg !== undefined);
+        const currentWeight = resolveCurrentWeight(measurements, p.originalWeightKg);
+        const bmiResult = computeBMI({ ...p, weightKg: currentWeight ? currentWeight.weightKg : null });
 
         const { error } = await supabase
           .from("profile")
@@ -1380,7 +1412,7 @@ export default function CalorieTrackerApp() {
             age: Number(p.age) || null,
             date_of_birth: p.dateOfBirth || null,
             health_notes: p.healthNotes || null,
-            weight_kg: Number(p.weightKg) || null,
+            ...(startingWeightLocked ? {} : { original_weight_kg: Number(p.originalWeightKg) || null }),
             height_cm: Number(p.heightCm) || null,
             activity: p.activity,
             goal_type: g.type,
@@ -1518,8 +1550,19 @@ export default function CalorieTrackerApp() {
     saveDraft(session.user.id, { profile, goal, planOverride });
   }, [profile, goal, planOverride, loaded, session]);
 
-  const computedPlan = useMemo(() => computePlan(profile, goal), [profile, goal]);
-  const bmiInfo = useMemo(() => computeBMI(profile), [profile]);
+  const hasWeightCheckIn = measurements.some((m) => m.weight_kg !== null && m.weight_kg !== undefined);
+  const currentWeight = useMemo(
+    () => resolveCurrentWeight(measurements, profile.originalWeightKg),
+    [measurements, profile.originalWeightKg]
+  );
+  const computedPlan = useMemo(
+    () => computePlan({ ...profile, weightKg: currentWeight ? currentWeight.weightKg : 0 }, goal),
+    [profile, goal, currentWeight]
+  );
+  const bmiInfo = useMemo(
+    () => computeBMI({ ...profile, weightKg: currentWeight ? currentWeight.weightKg : 0 }),
+    [profile, currentWeight]
+  );
   const effectivePlan = planOverride || computedPlan;
 
   const dayEntries = logs[selectedDate] || [];
@@ -1711,6 +1754,7 @@ export default function CalorieTrackerApp() {
       const payload = {
         user_id: userId,
         measured_at: newMeasurement.date || todayStr(),
+        weight_kg: numOrNull(newMeasurement.weightKg),
         neck: numOrNull(newMeasurement.neck),
         waist: numOrNull(newMeasurement.waist),
         shoulder: numOrNull(newMeasurement.shoulder),
@@ -1723,7 +1767,7 @@ export default function CalorieTrackerApp() {
       if (error) throw error;
 
       setMeasurements((prev) => [data, ...prev].sort((a, b) => (a.measured_at < b.measured_at ? 1 : -1)));
-      setNewMeasurement({ date: todayStr(), neck: "", waist: "", shoulder: "", chest: "", abdomen: "", thighs: "" });
+      setNewMeasurement({ date: todayStr(), weightKg: "", neck: "", waist: "", shoulder: "", chest: "", abdomen: "", thighs: "" });
     } catch (err) {
       setMeasurementError(err && err.message ? err.message : "Couldn't save that measurement.");
     } finally {
@@ -3957,7 +4001,7 @@ export default function CalorieTrackerApp() {
         supabase.from("coach_clients").select("status").eq("coach_id", session.user.id).eq("client_id", clientId).maybeSingle(),
         supabase
           .from("profile")
-          .select("date_of_birth, age, sex, activity, goal_type, goal_rate, health_notes, weight_kg, height_cm")
+          .select("date_of_birth, age, sex, activity, goal_type, goal_rate, health_notes, original_weight_kg, height_cm")
           .eq("user_id", clientId)
           .maybeSingle(),
         supabase.from("body_measurements").select("*").eq("user_id", clientId).order("measured_at", { ascending: false }),
@@ -3986,6 +4030,8 @@ export default function CalorieTrackerApp() {
           if (a.measured_at !== b.measured_at) return a.measured_at < b.measured_at ? 1 : -1;
           return (b.created_at || "").localeCompare(a.created_at || "");
         })[0] || null;
+
+      const currentWeight = resolveCurrentWeight(measurementsRes.data, ownProfile.original_weight_kg);
 
       const photoRows = photosRes.data || [];
       let progressPhotos = [];
@@ -4037,17 +4083,19 @@ export default function CalorieTrackerApp() {
         // Age from DOB when the client set one; otherwise the age they typed in.
         age: ownProfile.date_of_birth ? calcAgeFromDOB(ownProfile.date_of_birth) : ownProfile.age ?? null,
         sex: ownProfile.sex || null,
-        weightKg: ownProfile.weight_kg ?? null,
+        originalWeightKg: ownProfile.original_weight_kg ?? null,
+        currentWeight,
         heightCm: ownProfile.height_cm ?? null,
         activity: ownProfile.activity || null,
         goalType: ownProfile.goal_type || null,
         goalRate: ownProfile.goal_rate || null,
         progressPhotos,
         healthNotes: ownProfile.health_notes || null,
-        bmiInfo: computeBMI({ weightKg: ownProfile.weight_kg, heightCm: ownProfile.height_cm }),
+        bmiInfo: computeBMI({ weightKg: currentWeight ? currentWeight.weightKg : null, heightCm: ownProfile.height_cm }),
         latestMeasurement: latestMeasurement
           ? {
               measuredAt: latestMeasurement.measured_at,
+              weightKg: latestMeasurement.weight_kg ?? null,
               neck: latestMeasurement.neck,
               waist: latestMeasurement.waist,
               shoulder: latestMeasurement.shoulder,
@@ -4313,7 +4361,7 @@ export default function CalorieTrackerApp() {
     setNewClientPlanFood({ foodKey: "", grams: "", calories: "", meal: "Breakfast", course: "Main" });
 
     try {
-      const [planFoodsRes, profileRes, ownProfileRes] = await Promise.all([
+      const [planFoodsRes, profileRes, ownProfileRes, weightCheckInRes] = await Promise.all([
         supabase.from("plan_foods").select("*").eq("user_id", clientId).order("created_at", { ascending: true }),
         supabase
           .from("client_profile")
@@ -4322,13 +4370,22 @@ export default function CalorieTrackerApp() {
           .maybeSingle(),
         supabase
           .from("profile")
-          .select("sex, age, weight_kg, height_cm, activity, goal_type, goal_rate")
+          .select("sex, age, original_weight_kg, height_cm, activity, goal_type, goal_rate")
           .eq("user_id", clientId)
           .maybeSingle(),
+        supabase
+          .from("body_measurements")
+          .select("weight_kg, measured_at, created_at")
+          .eq("user_id", clientId)
+          .not("weight_kg", "is", null)
+          .order("measured_at", { ascending: false })
+          .order("created_at", { ascending: false })
+          .limit(1),
       ]);
       if (planFoodsRes.error) throw planFoodsRes.error;
       if (profileRes.error) throw profileRes.error;
       if (ownProfileRes.error) throw ownProfileRes.error;
+      if (weightCheckInRes.error) throw weightCheckInRes.error;
 
       const rows = planFoodsRes.data || [];
       const clientProfile = profileRes.data || {};
@@ -4359,7 +4416,7 @@ export default function CalorieTrackerApp() {
         {
           sex: ownProfile.sex || "male",
           age: ownProfile.age,
-          weightKg: ownProfile.weight_kg,
+          weightKg: (resolveCurrentWeight(weightCheckInRes.data, ownProfile.original_weight_kg) || {}).weightKg,
           heightCm: ownProfile.height_cm,
           activity: ownProfile.activity || "moderate",
         },
@@ -5130,6 +5187,14 @@ export default function CalorieTrackerApp() {
         style={inputStyle}
       />
 
+      <label style={labelStyle}>Weight (kg)</label>
+      <input
+        type="number"
+        value={newMeasurement.weightKg}
+        onChange={(e) => setNewMeasurement({ ...newMeasurement, weightKg: e.target.value })}
+        style={inputStyle}
+      />
+
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
         {MEASUREMENT_FIELDS.map((f) => (
           <div key={f.key}>
@@ -5174,9 +5239,10 @@ export default function CalorieTrackerApp() {
                 {shortDayLabel(String(m.measured_at).slice(0, 10))}
               </div>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT }}>
-                {MEASUREMENT_FIELDS.filter((f) => m[f.key] !== null && m[f.key] !== undefined)
-                  .map((f) => `${f.label} ${m[f.key]}cm`)
-                  .join(" · ") || "No values recorded"}
+                {[
+                  ...(m.weight_kg !== null && m.weight_kg !== undefined ? [`Weight ${m.weight_kg}kg`] : []),
+                  ...MEASUREMENT_FIELDS.filter((f) => m[f.key] !== null && m[f.key] !== undefined).map((f) => `${f.label} ${m[f.key]}cm`),
+                ].join(" · ") || "No values recorded"}
               </div>
             </div>
           ))
@@ -5371,8 +5437,8 @@ export default function CalorieTrackerApp() {
   );
 
   async function saveProfileInfoAll() {
-    const hasMeasurementInput = MEASUREMENT_FIELDS.some(
-      (f) => newMeasurement[f.key] !== "" && newMeasurement[f.key] !== null && newMeasurement[f.key] !== undefined
+    const hasMeasurementInput = ["weightKg", ...MEASUREMENT_FIELDS.map((f) => f.key)].some(
+      (k) => newMeasurement[k] !== "" && newMeasurement[k] !== null && newMeasurement[k] !== undefined
     );
     const hasPhotoInput = !!photoFile;
 
@@ -5786,8 +5852,20 @@ export default function CalorieTrackerApp() {
                 disabled={!!profile.dateOfBirth}
               />
 
-              <label style={labelStyle}>Weight (kg)</label>
-              <input type="number" value={profile.weightKg} onChange={(e) => setProfile({ ...profile, weightKg: e.target.value })} style={inputStyle} />
+              <label style={labelStyle}>Starting weight (kg)</label>
+              <input
+                type="number"
+                value={profile.originalWeightKg}
+                onChange={(e) => setProfile({ ...profile, originalWeightKg: e.target.value })}
+                style={hasWeightCheckIn ? { ...inputStyle, background: GRID, color: INK_SOFT } : inputStyle}
+                readOnly={hasWeightCheckIn}
+                disabled={hasWeightCheckIn}
+              />
+              {hasWeightCheckIn && (
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT, marginTop: -8, marginBottom: 14 }}>
+                  Locked after your first weigh-in. Log your current weight with your measurements.
+                </div>
+              )}
 
               <label style={labelStyle}>Height (cm)</label>
               <input type="number" value={profile.heightCm} onChange={(e) => setProfile({ ...profile, heightCm: e.target.value })} style={inputStyle} />
@@ -5854,6 +5932,10 @@ export default function CalorieTrackerApp() {
                       BMI {bmiInfo.bmi.toFixed(1)}
                       {bmiInfo.diffLabel !== "within" && ` · ${bmiInfo.percentDiff.toFixed(1)}% ${bmiInfo.diffLabel} standard`}
                     </span>
+                  </div>
+
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT, marginBottom: 8 }}>
+                    Based on {currentWeight.weightKg} kg · {weightSourceLabel(currentWeight)}
                   </div>
 
                   <p style={{ fontSize: 12.5, lineHeight: 1.6, color: INK, margin: "0 0 4px 0" }}>
@@ -8948,8 +9030,14 @@ export default function CalorieTrackerApp() {
                           <div style={{ fontSize: 13 }}>{clientDetail.age !== null && clientDetail.age !== undefined ? clientDetail.age : "—"}</div>
                         </div>
                         <div>
-                          <div style={labelStyle}>Weight</div>
-                          <div style={{ fontSize: 13 }}>{clientDetail.weightKg != null ? `${clientDetail.weightKg} kg` : "—"}</div>
+                          <div style={labelStyle}>{clientDetail.currentWeight && !clientDetail.currentWeight.measuredAt ? "Starting weight" : "Weight"}</div>
+                          <div style={{ fontSize: 13 }}>{clientDetail.currentWeight ? `${clientDetail.currentWeight.weightKg} kg` : "—"}</div>
+                          {clientDetail.currentWeight && clientDetail.currentWeight.measuredAt && (
+                            <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 2 }}>
+                              {weightSourceLabel(clientDetail.currentWeight)}
+                              {clientDetail.originalWeightKg != null && ` · started at ${clientDetail.originalWeightKg} kg`}
+                            </div>
+                          )}
                         </div>
                         <div>
                           <div style={labelStyle}>Height</div>
@@ -9012,6 +9100,11 @@ export default function CalorieTrackerApp() {
                               BMI {clientDetail.bmiInfo.bmi.toFixed(1)}
                             </span>
                           </div>
+                        ) : null}
+                        {clientDetail.bmiInfo ? (
+                          <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 4 }}>
+                            Based on {clientDetail.currentWeight.weightKg} kg · {weightSourceLabel(clientDetail.currentWeight)}
+                          </div>
                         ) : (
                           <div style={{ fontSize: 13, color: INK_SOFT }}>— (weight/height not set)</div>
                         )}
@@ -9020,6 +9113,10 @@ export default function CalorieTrackerApp() {
                       <div style={labelStyle}>Latest body measurements</div>
                       {clientDetail.latestMeasurement ? (
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 6 }}>
+                          <div style={{ fontSize: 12.5 }}>
+                            <span style={{ color: INK_SOFT }}>Weight:</span>{" "}
+                            {clientDetail.latestMeasurement.weightKg != null ? `${clientDetail.latestMeasurement.weightKg}kg` : "—"}
+                          </div>
                           {MEASUREMENT_FIELDS.map((f) => (
                             <div key={f.key} style={{ fontSize: 12.5 }}>
                               <span style={{ color: INK_SOFT }}>{f.label}:</span>{" "}

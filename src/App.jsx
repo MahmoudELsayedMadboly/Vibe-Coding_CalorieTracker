@@ -302,17 +302,6 @@ function splitPhoneByDialCode(phone) {
   return { code: match.code, number: phone.slice(match.code.length) };
 }
 
-function clientStatusMeta(client) {
-  if (!client) return { label: "Invited", color: AMBER, soft: AMBER_SOFT };
-  if (client.coachStatus === "inactive") {
-    return { label: "Deactivated", color: INK_SOFT, soft: GRID };
-  }
-  if (client.firstLoginAt) {
-    return { label: "Active", color: GREEN, soft: GREEN_SOFT };
-  }
-  return { label: "Invited", color: AMBER, soft: AMBER_SOFT };
-}
-
 // owner_coaches.status lifecycle: invited → active (first password change,
 // set by a DB trigger) → inactive (owner deactivated).
 const COACH_STATUSES = ["invited", "active", "inactive"];
@@ -321,6 +310,12 @@ function coachStatusMeta(status) {
   if (status === "active") return { label: "Active", color: GREEN, soft: GREEN_SOFT };
   if (status === "inactive") return { label: "Inactive", color: INK_SOFT, soft: GRID };
   return { label: "Invited", color: AMBER, soft: AMBER_SOFT };
+}
+
+// coach_clients.status follows the same invited → active → inactive
+// lifecycle as owner_coaches.status, so the badge reads it the same way.
+function clientStatusMeta(status) {
+  return coachStatusMeta(status);
 }
 
 function CoachStatusBadge({ status }) {
@@ -367,7 +362,7 @@ function planStatusMeta(status) {
   if (status === "active") return { label: "Active", color: GREEN, soft: GREEN_SOFT };
   if (status === "draft") return { label: "Draft", color: TEAL, soft: TEAL_SOFT };
   if (status === "inactive") return { label: "Inactive", color: INK_SOFT, soft: "#EEEEEC" };
-  return { label: "No status yet", color: INK_SOFT, soft: "#EEEEEC" };
+  return { label: "No plan yet", color: INK_SOFT, soft: "#EEEEEC" };
 }
 
 function eventKindLabel(kind) {
@@ -2278,12 +2273,16 @@ export default function CalorieTrackerApp() {
     try {
       const { data: links, error: linksErr } = await supabase
         .from("coach_clients")
-        .select("client_id")
+        .select("client_id, status")
         .eq("coach_id", session.user.id)
-        .eq("status", "active");
+        .in("status", COACH_STATUSES);
       if (linksErr) throw linksErr;
 
       const clientIds = (links || []).map((l) => l.client_id);
+      const statusById = {};
+      (links || []).forEach((l) => {
+        statusById[l.client_id] = l.status;
+      });
 
       if (clientIds.length === 0) {
         setClients([]);
@@ -2314,7 +2313,9 @@ export default function CalorieTrackerApp() {
           return {
             id,
             name: info.name || "(name unavailable)",
-            active: !!info.first_login_at,
+            status: statusById[id],
+            active: statusById[id] === "active",
+            firstLoginAt: info.first_login_at || null,
             dateFrom: clientProfile.date_from || null,
             dateTo: clientProfile.date_to || null,
           };
@@ -2650,11 +2651,13 @@ export default function CalorieTrackerApp() {
 
     let base;
     try {
+      // Invited clients are included so Needs attention can flag the ones
+      // who've never logged in; deactivated clients are left out.
       const { data: links, error: linksErr } = await supabase
         .from("coach_clients")
         .select("client_id")
         .eq("coach_id", session.user.id)
-        .eq("status", "active");
+        .in("status", ["invited", "active"]);
       if (linksErr) throw linksErr;
 
       const clientIds = (links || []).map((l) => l.client_id);
@@ -2731,9 +2734,14 @@ export default function CalorieTrackerApp() {
       const inactive = [];
       const overTarget = [];
       clientIds.forEach((id, i) => {
+        if (!(infoById[id] && infoById[id].first_login_at)) {
+          inactive.push({ id, kind: "inactive", daysSince: Infinity, reason: "Never logged in" });
+          return;
+        }
+
         const latestRow = (latestLogResults[i].data || [])[0];
         if (!latestRow) {
-          inactive.push({ id, kind: "inactive", daysSince: Infinity, reason: "Never logged" });
+          inactive.push({ id, kind: "inactive", daysSince: Infinity, reason: "No meals logged yet" });
           return;
         }
 
@@ -3939,32 +3947,63 @@ export default function CalorieTrackerApp() {
     setClientDetailError(null);
 
     try {
-      const [infoRes, profileRes, linkRes, ownProfileRes, latestMeasurementRes, notifRes] = await Promise.all([
+      const [infoRes, profileRes, linkRes, ownProfileRes, measurementsRes, photosRes, planFoodsRes, notifRes] = await Promise.all([
         supabase.from("user_info").select("id, name, email, phone, first_login_at").eq("id", clientId).maybeSingle(),
-        supabase.from("client_profile").select("user_id, date_from, date_to, plan_type_id").eq("user_id", clientId).maybeSingle(),
-        supabase.from("coach_clients").select("status").eq("coach_id", session.user.id).eq("client_id", clientId).maybeSingle(),
-        supabase.from("profile").select("date_of_birth, health_notes, weight_kg, height_cm").eq("user_id", clientId).maybeSingle(),
         supabase
-          .from("body_measurements")
-          .select("*")
+          .from("client_profile")
+          .select("user_id, date_from, date_to, plan_type_id, plan_status")
           .eq("user_id", clientId)
-          .order("measured_at", { ascending: false })
-          .limit(1)
           .maybeSingle(),
+        supabase.from("coach_clients").select("status").eq("coach_id", session.user.id).eq("client_id", clientId).maybeSingle(),
+        supabase
+          .from("profile")
+          .select("date_of_birth, age, sex, activity, goal_type, goal_rate, health_notes, weight_kg, height_cm")
+          .eq("user_id", clientId)
+          .maybeSingle(),
+        supabase.from("body_measurements").select("*").eq("user_id", clientId).order("measured_at", { ascending: false }),
+        supabase.from("progress_photos").select("*").eq("user_id", clientId).order("taken_at", { ascending: false }).limit(4),
+        supabase.from("plan_foods").select("id", { count: "exact", head: true }).eq("user_id", clientId),
         supabase.from("notification_settings").select("target, link_code").eq("user_id", clientId).maybeSingle(),
       ]);
       if (infoRes.error) throw infoRes.error;
       if (profileRes.error) throw profileRes.error;
       if (linkRes.error) throw linkRes.error;
       if (ownProfileRes.error) throw ownProfileRes.error;
-      if (latestMeasurementRes.error) throw latestMeasurementRes.error;
+      if (measurementsRes.error) throw measurementsRes.error;
+      if (photosRes.error) throw photosRes.error;
+      if (planFoodsRes.error) throw planFoodsRes.error;
 
       const info = infoRes.data || {};
       const clientProfile = profileRes.data || {};
       const link = linkRes.data || {};
       const ownProfile = ownProfileRes.data || {};
-      const latestMeasurement = latestMeasurementRes.data || null;
       const notif = notifRes.data || {};
+
+      // Latest by measurement date; created_at breaks ties between several
+      // entries logged for the same day.
+      const latestMeasurement =
+        [...(measurementsRes.data || [])].sort((a, b) => {
+          if (a.measured_at !== b.measured_at) return a.measured_at < b.measured_at ? 1 : -1;
+          return (b.created_at || "").localeCompare(a.created_at || "");
+        })[0] || null;
+
+      const photoRows = photosRes.data || [];
+      let progressPhotos = [];
+      if (photoRows.length > 0) {
+        // Photos are a nicety: if signing fails (e.g. storage policy), show
+        // the dates without images rather than failing the screen.
+        const { data: signedUrls, error: signedUrlErr } = await supabase.storage
+          .from("progress-photos")
+          .createSignedUrls(photoRows.map((row) => row.photo_path), 3600);
+        if (signedUrlErr) console.error("Couldn't create signed photo URLs:", signedUrlErr);
+        const urlByPath = {};
+        (signedUrls || []).forEach((u) => {
+          if (u.signedUrl) urlByPath[u.path] = u.signedUrl;
+        });
+        progressPhotos = photoRows.map((row) => ({ id: row.id, takenAt: row.taken_at, url: urlByPath[row.photo_path] || null }));
+      }
+
+      const hasPlan = (planFoodsRes.count || 0) > 0;
 
       let planTypeName = null;
       if (clientProfile.plan_type_id) {
@@ -3992,9 +4031,18 @@ export default function CalorieTrackerApp() {
         planTypeId: clientProfile.plan_type_id || null,
         planTypeName,
         firstLoginAt: info.first_login_at || null,
-        coachStatus: link.status || "active",
+        coachStatus: link.status || "invited",
+        hasActivePlan: hasPlan && clientProfile.plan_status === "active",
         dateOfBirth: ownProfile.date_of_birth || null,
-        age: ownProfile.date_of_birth ? calcAgeFromDOB(ownProfile.date_of_birth) : null,
+        // Age from DOB when the client set one; otherwise the age they typed in.
+        age: ownProfile.date_of_birth ? calcAgeFromDOB(ownProfile.date_of_birth) : ownProfile.age ?? null,
+        sex: ownProfile.sex || null,
+        weightKg: ownProfile.weight_kg ?? null,
+        heightCm: ownProfile.height_cm ?? null,
+        activity: ownProfile.activity || null,
+        goalType: ownProfile.goal_type || null,
+        goalRate: ownProfile.goal_rate || null,
+        progressPhotos,
         healthNotes: ownProfile.health_notes || null,
         bmiInfo: computeBMI({ weightKg: ownProfile.weight_kg, heightCm: ownProfile.height_cm }),
         latestMeasurement: latestMeasurement
@@ -4119,20 +4167,27 @@ export default function CalorieTrackerApp() {
   }
 
   async function toggleClientStatus(client) {
-    const nextStatus = client.coachStatus === "inactive" ? "active" : "inactive";
+    // Deactivating works from both "invited" and "active". Reactivating
+    // restores whichever of those the client would otherwise be in.
+    const reactivatedStatus = client.firstLoginAt ? "active" : "invited";
+    const nextStatus = client.coachStatus === "inactive" ? reactivatedStatus : "inactive";
 
     setClientDetailBusy(true);
     setClientDetailError(null);
 
     try {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from("coach_clients")
         .update({ status: nextStatus })
         .eq("coach_id", session.user.id)
-        .eq("client_id", client.id);
+        .eq("client_id", client.id)
+        .select("client_id");
       if (error) throw error;
+      // An update RLS refuses matches zero rows instead of erroring.
+      if (!data || data.length === 0) throw new Error("You don't have permission to change this client's status.");
 
       loadClientDetail(client.id);
+      loadClients();
     } catch (err) {
       setClientDetailError(err && err.message ? err.message : "Couldn't update this client's status. Please try again.");
     } finally {
@@ -5023,8 +5078,9 @@ export default function CalorieTrackerApp() {
   }
 
   const totalClientsCount = clients.length;
-  const activeClientsCount = clients.filter((c) => c.active).length;
-  const invitedClientsCount = totalClientsCount - activeClientsCount;
+  const activeClientsCount = clients.filter((c) => c.status === "active").length;
+  const invitedClientsCount = clients.filter((c) => c.status === "invited").length;
+  const inactiveClientsCount = clients.filter((c) => c.status === "inactive").length;
 
   const CLIENTS_PAGE_SIZE = 10;
   const gridClients = clientsIdFilter ? clients.filter((c) => clientsIdFilter.ids.includes(c.id)) : clients;
@@ -6961,6 +7017,21 @@ export default function CalorieTrackerApp() {
                     >
                       {invitedClientsCount} Invited
                     </span>
+                    {inactiveClientsCount > 0 && (
+                      <span
+                        style={{
+                          padding: "4px 10px",
+                          borderRadius: 999,
+                          background: GRID,
+                          color: INK_SOFT,
+                          fontFamily: "'Space Grotesk', sans-serif",
+                          fontSize: 12,
+                          fontWeight: 700,
+                        }}
+                      >
+                        {inactiveClientsCount} Inactive
+                      </span>
+                    )}
                   </div>
 
                   <button
@@ -7517,23 +7588,7 @@ export default function CalorieTrackerApp() {
                                   <td style={tdStyle}>{c.name}</td>
                                   <td style={tdStyle}>{planDurationLabel(c.dateFrom, c.dateTo)}</td>
                                   <td style={tdStyle}>
-                                    <span
-                                      style={{
-                                        display: "inline-flex",
-                                        alignItems: "center",
-                                        padding: "3px 8px",
-                                        borderRadius: 4,
-                                        background: c.active ? GREEN_SOFT : AMBER_SOFT,
-                                        color: c.active ? GREEN : AMBER,
-                                        fontFamily: "'Space Grotesk', sans-serif",
-                                        fontSize: 10.5,
-                                        fontWeight: 700,
-                                        textTransform: "uppercase",
-                                        letterSpacing: 0.4,
-                                      }}
-                                    >
-                                      {c.active ? "Active" : "Invited"}
-                                    </span>
+                                    <CoachStatusBadge status={c.status} />
                                   </td>
                                   <td style={tdStyle}>
                                     <button
@@ -7688,7 +7743,9 @@ export default function CalorieTrackerApp() {
                                 >
                                   <td style={tdStyle}>{c.name}</td>
                                   <td style={tdStyle}>
-                                    <PlanStatusBadge status={clientPlanStatuses[c.id]} />
+                                    {/* client_profile.plan_status can be set before any plan
+                                        exists; only show it once plan_foods rows do. */}
+                                    <PlanStatusBadge status={hasPlan ? clientPlanStatuses[c.id] : null} />
                                   </td>
                                   <td style={tdStyle}>
                                     {hasPlan ? (
@@ -7975,7 +8032,7 @@ export default function CalorieTrackerApp() {
                     ) : (
                       <>
                         <div style={{ marginBottom: 16 }}>
-                          <PlanStatusBadge status={planDetailsStatus} />
+                          <PlanStatusBadge status={planDetailsFoods.length > 0 ? planDetailsStatus : null} />
                         </div>
 
                         <div style={{ marginBottom: 18 }}>
@@ -8826,7 +8883,7 @@ export default function CalorieTrackerApp() {
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
                       <SectionTitle>{clientDetail.name}</SectionTitle>
                       {(() => {
-                        const meta = clientStatusMeta(clientDetail);
+                        const meta = clientStatusMeta(clientDetail.coachStatus);
                         return (
                           <span
                             style={{
@@ -8879,12 +8936,44 @@ export default function CalorieTrackerApp() {
 
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
                         <div>
+                          <div style={labelStyle}>Gender</div>
+                          <div style={{ fontSize: 13 }}>{clientDetail.sex === "female" ? "Female" : clientDetail.sex === "male" ? "Male" : "—"}</div>
+                        </div>
+                        <div>
                           <div style={labelStyle}>Date of birth</div>
                           <div style={{ fontSize: 13 }}>{clientDetail.dateOfBirth || "—"}</div>
                         </div>
                         <div>
                           <div style={labelStyle}>Age</div>
                           <div style={{ fontSize: 13 }}>{clientDetail.age !== null && clientDetail.age !== undefined ? clientDetail.age : "—"}</div>
+                        </div>
+                        <div>
+                          <div style={labelStyle}>Weight</div>
+                          <div style={{ fontSize: 13 }}>{clientDetail.weightKg != null ? `${clientDetail.weightKg} kg` : "—"}</div>
+                        </div>
+                        <div>
+                          <div style={labelStyle}>Height</div>
+                          <div style={{ fontSize: 13 }}>{clientDetail.heightCm != null ? `${clientDetail.heightCm} cm` : "—"}</div>
+                        </div>
+                        <div>
+                          <div style={labelStyle}>Activity level</div>
+                          <div style={{ fontSize: 13 }}>
+                            {(ACTIVITY_LEVELS.find((a) => a.id === clientDetail.activity) || {}).label || "—"}
+                          </div>
+                        </div>
+                        <div>
+                          <div style={labelStyle}>Goal</div>
+                          <div style={{ fontSize: 13 }}>
+                            {clientDetail.goalType === "cut" ? "Cut" : clientDetail.goalType === "bulk" ? "Bulk" : clientDetail.goalType === "maintain" ? "Maintain" : "—"}
+                          </div>
+                        </div>
+                        <div>
+                          <div style={labelStyle}>Pace</div>
+                          <div style={{ fontSize: 13 }}>
+                            {clientDetail.goalType === "cut" || clientDetail.goalType === "bulk"
+                              ? (RATES.find((r) => r.id === clientDetail.goalRate) || {}).label || "—"
+                              : "—"}
+                          </div>
                         </div>
                       </div>
 
@@ -8943,6 +9032,31 @@ export default function CalorieTrackerApp() {
                       ) : (
                         <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 4 }}>No measurements logged yet.</div>
                       )}
+                      {clientDetail.latestMeasurement && (
+                        <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 6 }}>Measured {clientDetail.latestMeasurement.measuredAt}</div>
+                      )}
+
+                      <div style={{ ...labelStyle, marginTop: 16 }}>Progress photos</div>
+                      {clientDetail.progressPhotos.length > 0 ? (
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 10, marginTop: 6 }}>
+                          {clientDetail.progressPhotos.map((ph) => (
+                            <div key={ph.id}>
+                              {ph.url ? (
+                                <img
+                                  src={ph.url}
+                                  alt={`Progress photo ${ph.takenAt}`}
+                                  style={{ width: "100%", aspectRatio: "3 / 4", objectFit: "cover", borderRadius: 4, border: `1px solid ${GRID}` }}
+                                />
+                              ) : (
+                                <div style={{ width: "100%", aspectRatio: "3 / 4", borderRadius: 4, background: GRID }} />
+                              )}
+                              <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 4 }}>{ph.takenAt}</div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 4 }}>No progress photos yet.</div>
+                      )}
                     </div>
 
                     <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
@@ -8988,7 +9102,12 @@ export default function CalorieTrackerApp() {
                     </div>
 
                     <div style={{ display: "flex", gap: 10 }}>
-                      <button onClick={() => openClientMealLog(clientDetail.id)} style={primaryButtonStyle} disabled={clientDetailBusy}>
+                      <button
+                        onClick={() => openClientMealLog(clientDetail.id)}
+                        style={planActionButtonStyle(primaryButtonStyle, !clientDetail.hasActivePlan)}
+                        disabled={clientDetailBusy || !clientDetail.hasActivePlan}
+                        title={clientDetail.hasActivePlan ? undefined : "Available once this client has an active plan"}
+                      >
                         View meal log
                       </button>
                       <button onClick={() => startEditClient(clientDetail)} style={secondaryButtonStyle} disabled={clientDetailBusy}>

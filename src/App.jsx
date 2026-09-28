@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X, Send, User, StickyNote, Clock, Search, Coffee, Dumbbell, Utensils, Zap, Moon, Apple, ChevronLeft, ChevronRight } from "lucide-react";
+import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X, Send, User, StickyNote, Clock, Search, Coffee, Dumbbell, Utensils, Zap, Moon, Apple, ChevronLeft, ChevronRight, Camera } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const INK = "#1B2430";
@@ -216,18 +216,23 @@ function computeBMI(profile) {
 
 // Weight used for BMI and plan math: the most recent check-in that recorded
 // a weight (body_measurements.weight_kg), else the fixed starting weight
-// (profile.original_weight_kg). measuredAt is null for the fallback so the
-// UI can label it "Starting weight" instead of a check-in date.
+// (profile.original_weight_kg). measuredAt and row are null for the fallback
+// so the UI can label it "Starting weight" instead of a check-in date.
 function resolveCurrentWeight(measurementRows, originalWeightKg) {
-  const latest = (measurementRows || [])
-    .filter((m) => m.weight_kg !== null && m.weight_kg !== undefined)
-    .sort((a, b) => {
-      if (a.measured_at !== b.measured_at) return a.measured_at < b.measured_at ? 1 : -1;
-      return (b.created_at || "").localeCompare(a.created_at || "");
-    })[0];
-  if (latest) return { weightKg: Number(latest.weight_kg), measuredAt: String(latest.measured_at).slice(0, 10) };
+  const latest = sortMeasurementsNewestFirst(measurementRows).find(
+    (m) => m.weight_kg !== null && m.weight_kg !== undefined
+  );
+  if (latest) return { weightKg: Number(latest.weight_kg), measuredAt: String(latest.measured_at).slice(0, 10), row: latest };
   const original = Number(originalWeightKg);
-  return original > 0 ? { weightKg: original, measuredAt: null } : null;
+  return original > 0 ? { weightKg: original, measuredAt: null, row: null } : null;
+}
+
+// Newest check-in first; created_at breaks ties between entries on the same day.
+function sortMeasurementsNewestFirst(measurementRows) {
+  return [...(measurementRows || [])].sort((a, b) => {
+    if (a.measured_at !== b.measured_at) return a.measured_at < b.measured_at ? 1 : -1;
+    return (b.created_at || "").localeCompare(a.created_at || "");
+  });
 }
 
 function weightSourceLabel(currentWeight) {
@@ -746,6 +751,14 @@ export default function CalorieTrackerApp() {
   // "<clientId>|<date>" of the latest meal-log request, so a slow response
   // for a previous day can't overwrite the one now on screen.
   const mealLogRequestKeyRef = useRef(null);
+
+  // Coach's full-screen check-in History (view "client-checkin-history", for
+  // selectedClientId). The ref holds the client of the latest request so a
+  // slow response for a previous client can't overwrite the current one.
+  const [checkInHistory, setCheckInHistory] = useState({ status: "loading", data: null, error: null });
+  const checkInHistoryClientRef = useRef(null);
+  // Progress photo shown full-size over the page (Client Details and History).
+  const [lightboxPhoto, setLightboxPhoto] = useState(null);
 
   // Coach Notes tab (coach_notes table).
   const [notes, setNotes] = useState([]);
@@ -3038,6 +3051,72 @@ export default function CalorieTrackerApp() {
     setNotes((prev) => prev.map((n) => (n.id === noteId ? { ...n, reminder_dismissed: true } : n)));
   }
 
+  function openClientCheckInHistory(clientId) {
+    setSelectedClientId(clientId);
+    setView("client-checkin-history");
+  }
+
+  // Every check-in (newest first), the client's height for per-row BMI, and
+  // all progress photos grouped by taken_at date. Photos and measurements
+  // are independent — they are never paired row-to-row.
+  async function loadClientCheckInHistory(clientId) {
+    checkInHistoryClientRef.current = clientId;
+    const isCurrent = () => checkInHistoryClientRef.current === clientId;
+    setCheckInHistory({ status: "loading", data: null, error: null });
+
+    try {
+      const [profileRes, measurementsRes, photosRes] = await Promise.all([
+        supabase.from("profile").select("height_cm").eq("user_id", clientId).maybeSingle(),
+        supabase.from("body_measurements").select("*").eq("user_id", clientId),
+        supabase
+          .from("progress_photos")
+          .select("*")
+          .eq("user_id", clientId)
+          .order("taken_at", { ascending: false })
+          .order("created_at", { ascending: true }),
+      ]);
+      if (profileRes.error) throw profileRes.error;
+      if (measurementsRes.error) throw measurementsRes.error;
+      if (photosRes.error) throw photosRes.error;
+
+      const photoRows = photosRes.data || [];
+      const urlByPath = {};
+      if (photoRows.length > 0) {
+        const { data: signedUrls, error: signedUrlErr } = await supabase.storage
+          .from("progress-photos")
+          .createSignedUrls(photoRows.map((row) => row.photo_path), 3600);
+        if (signedUrlErr) console.error("Couldn't create signed photo URLs:", signedUrlErr);
+        (signedUrls || []).forEach((u) => {
+          if (u.signedUrl) urlByPath[u.path] = u.signedUrl;
+        });
+      }
+
+      // Rows arrive newest date first, so same-date photos are adjacent.
+      const photoGroups = [];
+      photoRows.forEach((row) => {
+        const date = String(row.taken_at).slice(0, 10);
+        const photo = { id: row.id, takenAt: date, url: urlByPath[row.photo_path] || null };
+        const last = photoGroups[photoGroups.length - 1];
+        if (last && last.date === date) last.photos.push(photo);
+        else photoGroups.push({ date, photos: [photo] });
+      });
+
+      if (!isCurrent()) return;
+      setCheckInHistory({
+        status: "ready",
+        data: {
+          heightCm: profileRes.data ? profileRes.data.height_cm : null,
+          measurements: sortMeasurementsNewestFirst(measurementsRes.data),
+          photoGroups,
+        },
+        error: null,
+      });
+    } catch (err) {
+      if (!isCurrent()) return;
+      setCheckInHistory({ status: "error", data: null, error: err && err.message ? err.message : "Couldn't load check-in history." });
+    }
+  }
+
   function openClientMealLog(clientId) {
     setSelectedClientId(clientId);
     setMealLogDate(todayStr());
@@ -3752,6 +3831,18 @@ export default function CalorieTrackerApp() {
   }, [view, roleId, selectedClientId, session]);
 
   useEffect(() => {
+    if (roleId === 2 && view === "client-checkin-history" && selectedClientId) {
+      loadClientCheckInHistory(selectedClientId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, roleId, selectedClientId, session]);
+
+  // The photo overlay belongs to the screen that opened it.
+  useEffect(() => {
+    setLightboxPhoto(null);
+  }, [view]);
+
+  useEffect(() => {
     if (roleId === 3) {
       loadMyCoach();
     }
@@ -4005,7 +4096,13 @@ export default function CalorieTrackerApp() {
           .eq("user_id", clientId)
           .maybeSingle(),
         supabase.from("body_measurements").select("*").eq("user_id", clientId).order("measured_at", { ascending: false }),
-        supabase.from("progress_photos").select("*").eq("user_id", clientId).order("taken_at", { ascending: false }).limit(4),
+        supabase
+          .from("progress_photos")
+          .select("*")
+          .eq("user_id", clientId)
+          .order("taken_at", { ascending: false })
+          .order("created_at", { ascending: false })
+          .limit(4),
         supabase.from("plan_foods").select("id", { count: "exact", head: true }).eq("user_id", clientId),
         supabase.from("notification_settings").select("target, link_code").eq("user_id", clientId).maybeSingle(),
       ]);
@@ -4023,15 +4120,12 @@ export default function CalorieTrackerApp() {
       const ownProfile = ownProfileRes.data || {};
       const notif = notifRes.data || {};
 
-      // Latest by measurement date; created_at breaks ties between several
-      // entries logged for the same day.
-      const latestMeasurement =
-        [...(measurementsRes.data || [])].sort((a, b) => {
-          if (a.measured_at !== b.measured_at) return a.measured_at < b.measured_at ? 1 : -1;
-          return (b.created_at || "").localeCompare(a.created_at || "");
-        })[0] || null;
+      const measurementRows = measurementsRes.data || [];
 
-      const currentWeight = resolveCurrentWeight(measurementsRes.data, ownProfile.original_weight_kg);
+      const currentWeight = resolveCurrentWeight(measurementRows, ownProfile.original_weight_kg);
+      // The "Latest check-in" card shows measurements from the same row that
+      // supplied the weight; on the starting-weight fallback, the newest row.
+      const checkInRow = (currentWeight && currentWeight.row) || sortMeasurementsNewestFirst(measurementRows)[0] || null;
 
       const photoRows = photosRes.data || [];
       let progressPhotos = [];
@@ -4092,18 +4186,8 @@ export default function CalorieTrackerApp() {
         progressPhotos,
         healthNotes: ownProfile.health_notes || null,
         bmiInfo: computeBMI({ weightKg: currentWeight ? currentWeight.weightKg : null, heightCm: ownProfile.height_cm }),
-        latestMeasurement: latestMeasurement
-          ? {
-              measuredAt: latestMeasurement.measured_at,
-              weightKg: latestMeasurement.weight_kg ?? null,
-              neck: latestMeasurement.neck,
-              waist: latestMeasurement.waist,
-              shoulder: latestMeasurement.shoulder,
-              chest: latestMeasurement.chest,
-              abdomen: latestMeasurement.abdomen,
-              thighs: latestMeasurement.thighs,
-            }
-          : null,
+        checkInRow,
+        checkInCount: measurementRows.length,
         telegramTarget: notif.target || null,
         telegramLinkCode: notif.link_code || null,
       });
@@ -5648,6 +5732,7 @@ export default function CalorieTrackerApp() {
             {view === "client-detail" && "Client details"}
             {view === "coach-detail" && "Coach details"}
             {view === "client-meal-log" && "Meal log"}
+            {view === "client-checkin-history" && "Check-in history"}
           </h1>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
@@ -9030,14 +9115,8 @@ export default function CalorieTrackerApp() {
                           <div style={{ fontSize: 13 }}>{clientDetail.age !== null && clientDetail.age !== undefined ? clientDetail.age : "—"}</div>
                         </div>
                         <div>
-                          <div style={labelStyle}>{clientDetail.currentWeight && !clientDetail.currentWeight.measuredAt ? "Starting weight" : "Weight"}</div>
-                          <div style={{ fontSize: 13 }}>{clientDetail.currentWeight ? `${clientDetail.currentWeight.weightKg} kg` : "—"}</div>
-                          {clientDetail.currentWeight && clientDetail.currentWeight.measuredAt && (
-                            <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 2 }}>
-                              {weightSourceLabel(clientDetail.currentWeight)}
-                              {clientDetail.originalWeightKg != null && ` · started at ${clientDetail.originalWeightKg} kg`}
-                            </div>
-                          )}
+                          <div style={labelStyle}>Starting weight</div>
+                          <div style={{ fontSize: 13 }}>{clientDetail.originalWeightKg != null ? `${clientDetail.originalWeightKg} kg` : "—"}</div>
                         </div>
                         <div>
                           <div style={labelStyle}>Height</div>
@@ -9070,68 +9149,15 @@ export default function CalorieTrackerApp() {
                         <div style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{clientDetail.healthNotes || "None reported"}</div>
                       </div>
 
-                      <div style={{ marginBottom: 16 }}>
-                        <div style={labelStyle}>BMI</div>
-                        {clientDetail.bmiInfo ? (
-                          <div
-                            style={{
-                              display: "inline-flex",
-                              alignItems: "baseline",
-                              gap: 8,
-                              padding: "6px 10px",
-                              background: STATUS_META[clientDetail.bmiInfo.status].soft,
-                              borderRadius: 4,
-                              marginTop: 4,
-                            }}
-                          >
-                            <span
-                              style={{
-                                fontFamily: "'Space Grotesk', sans-serif",
-                                fontSize: 12,
-                                fontWeight: 700,
-                                color: STATUS_META[clientDetail.bmiInfo.status].color,
-                                textTransform: "uppercase",
-                                letterSpacing: 0.5,
-                              }}
-                            >
-                              {clientDetail.bmiInfo.category}
-                            </span>
-                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: STATUS_META[clientDetail.bmiInfo.status].color }}>
-                              BMI {clientDetail.bmiInfo.bmi.toFixed(1)}
-                            </span>
-                          </div>
-                        ) : null}
-                        {clientDetail.bmiInfo ? (
-                          <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 4 }}>
-                            Based on {clientDetail.currentWeight.weightKg} kg · {weightSourceLabel(clientDetail.currentWeight)}
-                          </div>
-                        ) : (
-                          <div style={{ fontSize: 13, color: INK_SOFT }}>— (weight/height not set)</div>
-                        )}
-                      </div>
-
-                      <div style={labelStyle}>Latest body measurements</div>
-                      {clientDetail.latestMeasurement ? (
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 6 }}>
-                          <div style={{ fontSize: 12.5 }}>
-                            <span style={{ color: INK_SOFT }}>Weight:</span>{" "}
-                            {clientDetail.latestMeasurement.weightKg != null ? `${clientDetail.latestMeasurement.weightKg}kg` : "—"}
-                          </div>
-                          {MEASUREMENT_FIELDS.map((f) => (
-                            <div key={f.key} style={{ fontSize: 12.5 }}>
-                              <span style={{ color: INK_SOFT }}>{f.label}:</span>{" "}
-                              {clientDetail.latestMeasurement[f.key] !== null && clientDetail.latestMeasurement[f.key] !== undefined
-                                ? `${clientDetail.latestMeasurement[f.key]}cm`
-                                : "—"}
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 4 }}>No measurements logged yet.</div>
-                      )}
-                      {clientDetail.latestMeasurement && (
-                        <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 6 }}>Measured {clientDetail.latestMeasurement.measuredAt}</div>
-                      )}
+                      <LatestCheckInCard
+                        currentWeight={clientDetail.currentWeight}
+                        bmiInfo={clientDetail.bmiInfo}
+                        checkInRow={clientDetail.checkInRow}
+                        checkInCount={clientDetail.checkInCount}
+                        latestPhoto={clientDetail.progressPhotos[0] || null}
+                        onOpenHistory={() => openClientCheckInHistory(clientDetail.id)}
+                        onOpenPhoto={setLightboxPhoto}
+                      />
 
                       <div style={{ ...labelStyle, marginTop: 16 }}>Progress photos</div>
                       {clientDetail.progressPhotos.length > 0 ? (
@@ -9242,6 +9268,21 @@ export default function CalorieTrackerApp() {
                 trend={mealLogTrend}
               />
             )}
+
+            {view === "client-checkin-history" && (
+              <CoachCheckInHistory
+                clientName={
+                  (clientDetail && clientDetail.id === selectedClientId && clientDetail.name) ||
+                  (clients.find((c) => c.id === selectedClientId) || {}).name ||
+                  "Client"
+                }
+                onBack={() => setView("client-detail")}
+                state={checkInHistory}
+                onOpenPhoto={setLightboxPhoto}
+              />
+            )}
+
+            {lightboxPhoto && <PhotoLightbox photo={lightboxPhoto} onClose={() => setLightboxPhoto(null)} />}
           </div>
         </div>
       )}
@@ -9748,6 +9789,236 @@ const MEAL_ICONS = {
 
 // Coach's read-only view of one client's meal_logs for a single day, plus a
 // per-meal breakdown chart and a 7-day trend against the calorie target.
+function BmiBadge({ bmiInfo }) {
+  const meta = STATUS_META[bmiInfo.status];
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "baseline",
+        gap: 6,
+        padding: "4px 9px",
+        background: meta.soft,
+        color: meta.color,
+        borderRadius: 4,
+        fontFamily: "'Space Grotesk', sans-serif",
+        fontSize: 11.5,
+        fontWeight: 700,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {bmiInfo.category}
+      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 400 }}>· BMI {bmiInfo.bmi.toFixed(1)}</span>
+    </span>
+  );
+}
+
+function ProgressPhotoThumb({ photo, width, onOpen }) {
+  const frame = { width, aspectRatio: "3 / 4", borderRadius: 4, border: `1px solid ${GRID}`, flexShrink: 0, display: "block" };
+  if (!photo || !photo.url) {
+    return (
+      <div style={{ ...frame, background: PAPER, display: "flex", alignItems: "center", justifyContent: "center", color: INK_SOFT }}>
+        <Camera size={22} strokeWidth={1.75} aria-label={photo ? "Photo unavailable" : "No progress photo yet"} />
+      </div>
+    );
+  }
+  return (
+    <button onClick={() => onOpen(photo)} style={{ ...frame, padding: 0, overflow: "hidden", cursor: "zoom-in", background: PAPER }} aria-label={`Open progress photo from ${photo.takenAt}`}>
+      <img src={photo.url} alt={`Progress photo from ${photo.takenAt}`} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+    </button>
+  );
+}
+
+// Coach's Client Details "Latest check-in" card. Weight/BMI come from
+// resolveCurrentWeight(); the measurements grid is from the same check-in row
+// (or the newest row when the weight is the starting-weight fallback).
+function LatestCheckInCard({ currentWeight, bmiInfo, checkInRow, checkInCount, latestPhoto, onOpenHistory, onOpenPhoto }) {
+  const hasMeasurements = !!checkInRow && MEASUREMENT_FIELDS.some((f) => checkInRow[f.key] !== null && checkInRow[f.key] !== undefined);
+
+  let dateCaption;
+  if (currentWeight && currentWeight.measuredAt) dateCaption = `Recorded ${currentWeight.measuredAt}`;
+  else if (checkInCount === 0) dateCaption = currentWeight ? "Starting weight, no check-ins yet" : "No check-ins yet";
+  else dateCaption = `${currentWeight ? "Starting weight" : "No weight logged"} · measurements recorded ${String(checkInRow.measured_at).slice(0, 10)}`;
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 8 }}>
+        <div style={{ ...labelStyle, marginBottom: 0 }}>Latest check-in</div>
+        <button onClick={onOpenHistory} style={{ ...secondaryButtonStyle, fontSize: 11, padding: "5px 10px" }}>
+          <Clock size={12} />
+          History
+        </button>
+      </div>
+
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
+        <ProgressPhotoThumb photo={latestPhoto} width={120} onOpen={onOpenPhoto} />
+
+        <div style={{ flex: "1 1 220px", minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 30, fontWeight: 700, lineHeight: 1 }}>
+              {currentWeight ? currentWeight.weightKg : "—"}
+              <span style={{ fontSize: 14, fontWeight: 600, color: INK_SOFT, marginLeft: 4 }}>kg</span>
+            </span>
+            {bmiInfo && <BmiBadge bmiInfo={bmiInfo} />}
+          </div>
+          <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 6 }}>
+            {bmiInfo
+              ? `Based on ${currentWeight.weightKg} kg · ${weightSourceLabel(currentWeight)}`
+              : currentWeight
+              ? "BMI unavailable (height not set)"
+              : "BMI unavailable (weight not set)"}
+          </div>
+
+          {hasMeasurements ? (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginTop: 12 }}>
+              {MEASUREMENT_FIELDS.map((f) => (
+                <div key={f.key}>
+                  <div style={{ ...labelStyle, marginBottom: 2 }}>{f.label}</div>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }}>
+                    {checkInRow[f.key] !== null && checkInRow[f.key] !== undefined ? `${checkInRow[f.key]} cm` : "—"}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 12 }}>No measurements recorded</div>
+          )}
+
+          <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 10 }}>{dateCaption}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const HISTORY_MEASUREMENT_COLUMNS = ["waist", "chest", "abdomen", "neck", "shoulder", "thighs"].map((key) =>
+  MEASUREMENT_FIELDS.find((f) => f.key === key)
+);
+
+// Coach's full-screen check-in History: every body_measurements row as a
+// table, then progress photos grouped by date. The two are independent.
+function CoachCheckInHistory({ clientName, onBack, state, onOpenPhoto }) {
+  const cell = (v, unit) => (v !== null && v !== undefined ? `${v}${unit}` : "");
+
+  let body;
+  if (state.status === "loading") {
+    body = <div style={{ fontSize: 12, color: INK_SOFT }}>Loading check-in history…</div>;
+  } else if (state.status === "error") {
+    body = <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>{state.error}</div>;
+  } else {
+    const { heightCm, measurements, photoGroups } = state.data;
+    body = (
+      <>
+        <div style={panelStyle}>
+          <SectionTitle>Measurements &amp; weight</SectionTitle>
+          {measurements.length === 0 ? (
+            <div style={{ fontSize: 12, color: INK_SOFT }}>No check-ins logged yet.</div>
+          ) : (
+            <div style={{ border: `1px solid ${GRID}`, borderRadius: 4, overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, whiteSpace: "nowrap" }}>
+                <thead>
+                  <tr style={{ background: TEAL_SOFT }}>
+                    <th style={thStyle}>Date</th>
+                    <th style={thStyle}>Weight</th>
+                    <th style={thStyle}>BMI</th>
+                    {HISTORY_MEASUREMENT_COLUMNS.map((f) => (
+                      <th key={f.key} style={thStyle}>{f.label}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {measurements.map((m, i) => {
+                    const bmi = m.weight_kg !== null && m.weight_kg !== undefined ? computeBMI({ weightKg: m.weight_kg, heightCm }) : null;
+                    const isBaseline = i === measurements.length - 1;
+                    return (
+                      <tr key={m.id} style={{ borderTop: `1px solid ${GRID}` }}>
+                        <td style={tdStyle}>
+                          {String(m.measured_at).slice(0, 10)}
+                          {isBaseline && (
+                            <span style={{ marginLeft: 6, fontSize: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.4 }}>baseline</span>
+                          )}
+                        </td>
+                        <td style={tdStyle}>{cell(m.weight_kg, " kg")}</td>
+                        <td style={tdStyle}>{bmi ? bmi.bmi.toFixed(1) : ""}</td>
+                        {HISTORY_MEASUREMENT_COLUMNS.map((f) => (
+                          <td key={f.key} style={tdStyle}>{cell(m[f.key], " cm")}</td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div style={panelStyle}>
+          <SectionTitle>Progress photos</SectionTitle>
+          {photoGroups.length === 0 ? (
+            <div style={{ fontSize: 12, color: INK_SOFT }}>No progress photos yet.</div>
+          ) : (
+            <div style={{ display: "grid", gap: 16 }}>
+              {photoGroups.map((g) => (
+                <div key={g.date}>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT, marginBottom: 6 }}>
+                    {g.date} · {g.photos.length} photo{g.photos.length === 1 ? "" : "s"}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 4 }}>
+                    {g.photos.map((ph) => (
+                      <ProgressPhotoThumb key={ph.id} photo={ph} width={96} onOpen={onOpenPhoto} />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <div>
+        <button onClick={onBack} style={{ ...linkButtonStyle, marginBottom: 4 }}>
+          ← Back to client details
+        </button>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 18, fontWeight: 700 }}>{clientName}</div>
+      </div>
+      {body}
+    </div>
+  );
+}
+
+function PhotoLightbox({ photo, onClose }) {
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      onClick={onClose}
+      role="dialog"
+      aria-label={`Progress photo from ${photo.takenAt}`}
+      style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(10, 14, 20, 0.88)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 16, gap: 10 }}
+    >
+      <button
+        onClick={onClose}
+        aria-label="Close photo"
+        style={{ position: "absolute", top: 12, right: 12, border: "none", background: "transparent", color: "#fff", cursor: "pointer", padding: 6 }}
+      >
+        <X size={22} />
+      </button>
+      <img src={photo.url} alt={`Progress photo from ${photo.takenAt}`} style={{ maxWidth: "100%", maxHeight: "calc(100% - 40px)", objectFit: "contain", borderRadius: 4 }} />
+      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: "#fff" }}>{photo.takenAt}</div>
+    </div>
+  );
+}
+
 function CoachMealLog({ clientName, date, onDateChange, onBack, day, trend }) {
   const today = todayStr();
   const target = (day.data && day.data.target) || 0;

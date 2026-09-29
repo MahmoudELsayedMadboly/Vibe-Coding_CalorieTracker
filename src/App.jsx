@@ -235,9 +235,15 @@ function sortMeasurementsNewestFirst(measurementRows) {
   });
 }
 
-function weightSourceLabel(currentWeight) {
-  if (!currentWeight) return null;
-  return currentWeight.measuredAt ? `Check-in ${currentWeight.measuredAt}` : "Starting weight";
+// Most recent check-in that recorded at least one body measurement. Resolved
+// independently of resolveCurrentWeight(): a weight-only entry doesn't hide
+// older measurements, and vice versa.
+function resolveLatestMeasurements(measurementRows) {
+  return (
+    sortMeasurementsNewestFirst(measurementRows).find((m) =>
+      MEASUREMENT_FIELDS.some((f) => m[f.key] !== null && m[f.key] !== undefined)
+    ) || null
+  );
 }
 
 function computePlan(profile, goal) {
@@ -4102,7 +4108,7 @@ export default function CalorieTrackerApp() {
           .eq("user_id", clientId)
           .order("taken_at", { ascending: false })
           .order("created_at", { ascending: false })
-          .limit(4),
+          .limit(1),
         supabase.from("plan_foods").select("id", { count: "exact", head: true }).eq("user_id", clientId),
         supabase.from("notification_settings").select("target, link_code").eq("user_id", clientId).maybeSingle(),
       ]);
@@ -4123,9 +4129,7 @@ export default function CalorieTrackerApp() {
       const measurementRows = measurementsRes.data || [];
 
       const currentWeight = resolveCurrentWeight(measurementRows, ownProfile.original_weight_kg);
-      // The "Latest check-in" card shows measurements from the same row that
-      // supplied the weight; on the starting-weight fallback, the newest row.
-      const checkInRow = (currentWeight && currentWeight.row) || sortMeasurementsNewestFirst(measurementRows)[0] || null;
+      const latestMeasurementsRow = resolveLatestMeasurements(measurementRows);
 
       const photoRows = photosRes.data || [];
       let progressPhotos = [];
@@ -4186,8 +4190,7 @@ export default function CalorieTrackerApp() {
         progressPhotos,
         healthNotes: ownProfile.health_notes || null,
         bmiInfo: computeBMI({ weightKg: currentWeight ? currentWeight.weightKg : null, heightCm: ownProfile.height_cm }),
-        checkInRow,
-        checkInCount: measurementRows.length,
+        latestMeasurementsRow,
         telegramTarget: notif.target || null,
         telegramLinkCode: notif.link_code || null,
       });
@@ -6017,10 +6020,6 @@ export default function CalorieTrackerApp() {
                       BMI {bmiInfo.bmi.toFixed(1)}
                       {bmiInfo.diffLabel !== "within" && ` · ${bmiInfo.percentDiff.toFixed(1)}% ${bmiInfo.diffLabel} standard`}
                     </span>
-                  </div>
-
-                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT, marginBottom: 8 }}>
-                    Based on {currentWeight.weightKg} kg · {weightSourceLabel(currentWeight)}
                   </div>
 
                   <p style={{ fontSize: 12.5, lineHeight: 1.6, color: INK, margin: "0 0 4px 0" }}>
@@ -9152,34 +9151,11 @@ export default function CalorieTrackerApp() {
                       <LatestCheckInCard
                         currentWeight={clientDetail.currentWeight}
                         bmiInfo={clientDetail.bmiInfo}
-                        checkInRow={clientDetail.checkInRow}
-                        checkInCount={clientDetail.checkInCount}
+                        latestMeasurementsRow={clientDetail.latestMeasurementsRow}
                         latestPhoto={clientDetail.progressPhotos[0] || null}
                         onOpenHistory={() => openClientCheckInHistory(clientDetail.id)}
                         onOpenPhoto={setLightboxPhoto}
                       />
-
-                      <div style={{ ...labelStyle, marginTop: 16 }}>Progress photos</div>
-                      {clientDetail.progressPhotos.length > 0 ? (
-                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 10, marginTop: 6 }}>
-                          {clientDetail.progressPhotos.map((ph) => (
-                            <div key={ph.id}>
-                              {ph.url ? (
-                                <img
-                                  src={ph.url}
-                                  alt={`Progress photo ${ph.takenAt}`}
-                                  style={{ width: "100%", aspectRatio: "3 / 4", objectFit: "cover", borderRadius: 4, border: `1px solid ${GRID}` }}
-                                />
-                              ) : (
-                                <div style={{ width: "100%", aspectRatio: "3 / 4", borderRadius: 4, background: GRID }} />
-                              )}
-                              <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 4 }}>{ph.takenAt}</div>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 4 }}>No progress photos yet.</div>
-                      )}
                     </div>
 
                     <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
@@ -9830,15 +9806,17 @@ function ProgressPhotoThumb({ photo, width, onOpen }) {
 }
 
 // Coach's Client Details "Latest check-in" card. Weight/BMI come from
-// resolveCurrentWeight(); the measurements grid is from the same check-in row
-// (or the newest row when the weight is the starting-weight fallback).
-function LatestCheckInCard({ currentWeight, bmiInfo, checkInRow, checkInCount, latestPhoto, onOpenHistory, onOpenPhoto }) {
-  const hasMeasurements = !!checkInRow && MEASUREMENT_FIELDS.some((f) => checkInRow[f.key] !== null && checkInRow[f.key] !== undefined);
+// resolveCurrentWeight() and the measurements grid from
+// resolveLatestMeasurements(); the two can be different check-ins, so each
+// carries its own date caption.
+function LatestCheckInCard({ currentWeight, bmiInfo, latestMeasurementsRow, latestPhoto, onOpenHistory, onOpenPhoto }) {
+  const captionStyle = { fontSize: 11, color: INK_SOFT, marginTop: 6 };
 
-  let dateCaption;
-  if (currentWeight && currentWeight.measuredAt) dateCaption = `Recorded ${currentWeight.measuredAt}`;
-  else if (checkInCount === 0) dateCaption = currentWeight ? "Starting weight, no check-ins yet" : "No check-ins yet";
-  else dateCaption = `${currentWeight ? "Starting weight" : "No weight logged"} · measurements recorded ${String(checkInRow.measured_at).slice(0, 10)}`;
+  let weightCaption;
+  if (!currentWeight) weightCaption = "Not recorded";
+  else if (currentWeight.measuredAt) weightCaption = `Recorded ${currentWeight.measuredAt}`;
+  else weightCaption = "Starting weight";
+  if (currentWeight && !bmiInfo) weightCaption += " · BMI unavailable (height not set)";
 
   return (
     <div style={{ marginBottom: 16 }}>
@@ -9855,36 +9833,37 @@ function LatestCheckInCard({ currentWeight, bmiInfo, checkInRow, checkInCount, l
 
         <div style={{ flex: "1 1 220px", minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 30, fontWeight: 700, lineHeight: 1 }}>
-              {currentWeight ? currentWeight.weightKg : "—"}
-              <span style={{ fontSize: 14, fontWeight: 600, color: INK_SOFT, marginLeft: 4 }}>kg</span>
-            </span>
+            {currentWeight ? (
+              <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 30, fontWeight: 700, lineHeight: 1 }}>
+                {currentWeight.weightKg}
+                <span style={{ fontSize: 14, fontWeight: 600, color: INK_SOFT, marginLeft: 4 }}>kg</span>
+              </span>
+            ) : (
+              <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 600, color: INK_SOFT }}>Weight not recorded</span>
+            )}
             {bmiInfo && <BmiBadge bmiInfo={bmiInfo} />}
           </div>
-          <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 6 }}>
-            {bmiInfo
-              ? `Based on ${currentWeight.weightKg} kg · ${weightSourceLabel(currentWeight)}`
-              : currentWeight
-              ? "BMI unavailable (height not set)"
-              : "BMI unavailable (weight not set)"}
-          </div>
+          {currentWeight && <div style={captionStyle}>{weightCaption}</div>}
 
-          {hasMeasurements ? (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginTop: 12 }}>
-              {MEASUREMENT_FIELDS.map((f) => (
-                <div key={f.key}>
-                  <div style={{ ...labelStyle, marginBottom: 2 }}>{f.label}</div>
-                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }}>
-                    {checkInRow[f.key] !== null && checkInRow[f.key] !== undefined ? `${checkInRow[f.key]} cm` : "—"}
+          {latestMeasurementsRow ? (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginTop: 12 }}>
+                {MEASUREMENT_FIELDS.map((f) => (
+                  <div key={f.key}>
+                    <div style={{ ...labelStyle, marginBottom: 2 }}>{f.label}</div>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }}>
+                      {latestMeasurementsRow[f.key] !== null && latestMeasurementsRow[f.key] !== undefined
+                        ? `${latestMeasurementsRow[f.key]} cm`
+                        : "—"}
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+              <div style={captionStyle}>Recorded {String(latestMeasurementsRow.measured_at).slice(0, 10)}</div>
+            </>
           ) : (
             <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 12 }}>No measurements recorded</div>
           )}
-
-          <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 10 }}>{dateCaption}</div>
         </div>
       </div>
     </div>

@@ -1802,7 +1802,11 @@ export default function CalorieTrackerApp() {
     setPhotoError(null);
 
     try {
-      const path = `${userId}/${Date.now()}-${photoFile.name}`;
+      // Don't put the original filename in the key: spaces and other
+      // characters outside Storage's allowed charset fail with "Invalid key".
+      const extMatch = /\.([a-zA-Z0-9]+)$/.exec(photoFile.name);
+      const ext = extMatch ? extMatch[1].toLowerCase() : "jpg";
+      const path = `${userId}/${Date.now()}.${ext}`;
 
       const { error: uploadErr } = await supabase.storage.from("progress-photos").upload(path, photoFile);
       if (uploadErr) throw uploadErr;

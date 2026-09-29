@@ -4290,16 +4290,26 @@ export default function CalorieTrackerApp() {
     setClientDetailError(null);
 
     try {
-      const { error } = await supabase.from("user_info").delete().eq("id", clientId);
-      if (error) throw error;
+      // Goes through delete-user (service role) so the login account is
+      // removed too, and a refusal comes back as a reason instead of a
+      // silent zero-row delete.
+      const data = await invokeEdgeFunction("delete-user", { target_role: "client", target_id: clientId });
 
-      setSelectedClientId(null);
-      setClientDetail(null);
-      setView("clients");
-      setClientsView("grid");
-      loadClients();
+      if (data && data.ok) {
+        setSelectedClientId(null);
+        setClientDetail(null);
+        setView("clients");
+        setClientsView("grid");
+        loadClients();
+      } else if (data && data.reason === "not_authorized") {
+        setClientDetailError("You can only remove your own clients.");
+      } else {
+        setClientDetailError(
+          data && data.reason ? `Couldn't remove this client: ${data.reason}` : "Couldn't remove this client. Please try again."
+        );
+      }
     } catch (err) {
-      setClientDetailError(err && err.message ? err.message : "Couldn't remove this client. Please try again.");
+      setClientDetailError("Couldn't remove this client. Please try again.");
     } finally {
       setClientDetailBusy(false);
     }

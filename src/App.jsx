@@ -4307,9 +4307,8 @@ export default function CalorieTrackerApp() {
 
   async function toggleClientStatus(client) {
     // Deactivating works from both "invited" and "active". Reactivating
-    // restores whichever of those the client would otherwise be in.
-    const reactivatedStatus = client.firstLoginAt ? "active" : "invited";
-    const nextStatus = client.coachStatus === "inactive" ? reactivatedStatus : "inactive";
+    // always goes back to "active".
+    const nextStatus = client.coachStatus === "inactive" ? "active" : "inactive";
 
     setClientDetailBusy(true);
     setClientDetailError(null);
@@ -9811,16 +9810,15 @@ function ProgressPhotoThumb({ photo, width, onOpen }) {
 
 // Coach's Client Details "Latest check-in" card. Weight/BMI come from
 // resolveCurrentWeight() and the measurements grid from
-// resolveLatestMeasurements(); the two can be different check-ins, so each
-// carries its own date caption.
+// resolveLatestMeasurements(); the two can be different check-ins. Dates
+// are shown only in the History screen.
 function LatestCheckInCard({ currentWeight, bmiInfo, latestMeasurementsRow, latestPhoto, onOpenHistory, onOpenPhoto }) {
   const captionStyle = { fontSize: 11, color: INK_SOFT, marginTop: 6 };
 
-  let weightCaption;
-  if (!currentWeight) weightCaption = "Not recorded";
-  else if (currentWeight.measuredAt) weightCaption = `Recorded ${currentWeight.measuredAt}`;
-  else weightCaption = "Starting weight";
-  if (currentWeight && !bmiInfo) weightCaption += " · BMI unavailable (height not set)";
+  const weightCaptionParts = [];
+  if (currentWeight && !currentWeight.measuredAt) weightCaptionParts.push("Starting weight");
+  if (currentWeight && !bmiInfo) weightCaptionParts.push("BMI unavailable (height not set)");
+  const weightCaption = weightCaptionParts.join(" · ");
 
   return (
     <div style={{ marginBottom: 16 }}>
@@ -9847,24 +9845,21 @@ function LatestCheckInCard({ currentWeight, bmiInfo, latestMeasurementsRow, late
             )}
             {bmiInfo && <BmiBadge bmiInfo={bmiInfo} />}
           </div>
-          {currentWeight && <div style={captionStyle}>{weightCaption}</div>}
+          {weightCaption && <div style={captionStyle}>{weightCaption}</div>}
 
           {latestMeasurementsRow ? (
-            <>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginTop: 12 }}>
-                {MEASUREMENT_FIELDS.map((f) => (
-                  <div key={f.key}>
-                    <div style={{ ...labelStyle, marginBottom: 2 }}>{f.label}</div>
-                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }}>
-                      {latestMeasurementsRow[f.key] !== null && latestMeasurementsRow[f.key] !== undefined
-                        ? `${latestMeasurementsRow[f.key]} cm`
-                        : "—"}
-                    </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginTop: 12 }}>
+              {MEASUREMENT_FIELDS.map((f) => (
+                <div key={f.key}>
+                  <div style={{ ...labelStyle, marginBottom: 2 }}>{f.label}</div>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }}>
+                    {latestMeasurementsRow[f.key] !== null && latestMeasurementsRow[f.key] !== undefined
+                      ? `${latestMeasurementsRow[f.key]} cm`
+                      : "—"}
                   </div>
-                ))}
-              </div>
-              <div style={captionStyle}>Recorded {String(latestMeasurementsRow.measured_at).slice(0, 10)}</div>
-            </>
+                </div>
+              ))}
+            </div>
           ) : (
             <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 12 }}>No measurements recorded</div>
           )}

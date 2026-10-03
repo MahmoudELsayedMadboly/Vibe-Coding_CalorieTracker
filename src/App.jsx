@@ -405,6 +405,25 @@ function resolvePlanStatus(storedStatus, hasFoods) {
   return "draft";
 }
 
+// Coach-facing status. Unsent changes (draft rows) show as "Draft" even
+// when the client still sees an active/inactive published plan underneath.
+function coachPlanStatus(storedStatus, hasPublished, hasDraft) {
+  return hasDraft ? "draft" : resolvePlanStatus(storedStatus, hasPublished);
+}
+
+// Splits a client's plan_foods rows into the published plan
+// (is_draft = false, what the client sees) and the coach's draft.
+// Coach screens show the draft when one exists.
+function splitPlanVersions(rows) {
+  const draft = rows.filter((r) => r.is_draft);
+  const published = rows.filter((r) => !r.is_draft);
+  return {
+    hasDraft: draft.length > 0,
+    hasPublished: published.length > 0,
+    coachRows: draft.length > 0 ? draft : published,
+  };
+}
+
 function planStatusMeta(status) {
   if (status === "active") return { label: "Active", color: GREEN, soft: GREEN_SOFT };
   if (status === "draft") return { label: "Draft", color: TEAL, soft: TEAL_SOFT };
@@ -940,6 +959,11 @@ export default function CalorieTrackerApp() {
   const [planDetailsDeactivateBusy, setPlanDetailsDeactivateBusy] = useState(false);
   const [planDetailsTargets, setPlanDetailsTargets] = useState({ calories: null, protein: null, carbs: null, fat: null });
   const [planDetailsToggleError, setPlanDetailsToggleError] = useState(null);
+  const [planDetailsHasDraft, setPlanDetailsHasDraft] = useState(false);
+  const [planDetailsDraftBusy, setPlanDetailsDraftBusy] = useState(null);
+  const [planDetailsDraftError, setPlanDetailsDraftError] = useState(null);
+  const [clientPlanHasDraft, setClientPlanHasDraft] = useState(false);
+  const [clientPlanDiscardBusy, setClientPlanDiscardBusy] = useState(false);
   const [planListSendingClientId, setPlanListSendingClientId] = useState(null);
   const [planListSendError, setPlanListSendError] = useState(null);
   const [planDetailsRemoveBusy, setPlanDetailsRemoveBusy] = useState(false);
@@ -1327,7 +1351,8 @@ export default function CalorieTrackerApp() {
 
         const [personalFoodsRes, planFoodsRes, logsRes, measurementsRes, photosRes] = await Promise.all([
           supabase.from("food_list").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
-          supabase.from("plan_foods").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
+          // Never the coach's unsent draft (also enforced by RLS).
+          supabase.from("plan_foods").select("*").eq("user_id", userId).eq("is_draft", false).order("created_at", { ascending: true }),
           supabase.from("meal_logs").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
           supabase.from("body_measurements").select("*").eq("user_id", userId).order("measured_at", { ascending: false }),
           supabase.from("progress_photos").select("*").eq("user_id", userId).order("taken_at", { ascending: false }),
@@ -4196,7 +4221,7 @@ export default function CalorieTrackerApp() {
           .order("taken_at", { ascending: false })
           .order("created_at", { ascending: false })
           .limit(1),
-        supabase.from("plan_foods").select("id", { count: "exact", head: true }).eq("user_id", clientId),
+        supabase.from("plan_foods").select("id", { count: "exact", head: true }).eq("user_id", clientId).eq("is_draft", false),
         supabase.from("notification_settings").select("target, link_code").eq("user_id", clientId).maybeSingle(),
       ]);
       if (infoRes.error) throw infoRes.error;
@@ -4544,11 +4569,16 @@ export default function CalorieTrackerApp() {
     setNewClientPlanFood({ foodKey: "", grams: "", calories: "", meal: "Breakfast", course: "Main" });
 
     try {
-      const [planFoodsRes, profileRes, ownProfileRes, weightCheckInRes] = await Promise.all([
+      const [planFoodsRes, profileRes, draftRes, ownProfileRes, weightCheckInRes] = await Promise.all([
         supabase.from("plan_foods").select("*").eq("user_id", clientId).order("created_at", { ascending: true }),
         supabase
           .from("client_profile")
           .select("date_from, date_to, plan_status, target_calories, target_protein_g, target_carb_g, target_fat_g")
+          .eq("user_id", clientId)
+          .maybeSingle(),
+        supabase
+          .from("client_plan_drafts")
+          .select("date_from, date_to, target_calories, target_protein_g, target_carb_g, target_fat_g")
           .eq("user_id", clientId)
           .maybeSingle(),
         supabase
@@ -4567,11 +4597,15 @@ export default function CalorieTrackerApp() {
       ]);
       if (planFoodsRes.error) throw planFoodsRes.error;
       if (profileRes.error) throw profileRes.error;
+      if (draftRes.error) throw draftRes.error;
       if (ownProfileRes.error) throw ownProfileRes.error;
       if (weightCheckInRes.error) throw weightCheckInRes.error;
 
-      const rows = planFoodsRes.data || [];
-      const clientProfile = profileRes.data || {};
+      const versions = splitPlanVersions(planFoodsRes.data || []);
+      const rows = versions.coachRows;
+      // Draft targets/dates win while a draft exists, so the coach keeps
+      // editing what they last saved rather than the published plan.
+      const clientProfile = { ...(profileRes.data || {}), ...(versions.hasDraft && draftRes.data ? draftRes.data : {}) };
       const ownProfile = ownProfileRes.data || {};
 
       setClientPlanFoods(
@@ -4585,7 +4619,8 @@ export default function CalorieTrackerApp() {
         }))
       );
       setClientPlanName((rows[0] && rows[0].plan_name) || "");
-      setClientPlanStatus(resolvePlanStatus(clientProfile.plan_status, rows.length > 0));
+      setClientPlanStatus(coachPlanStatus(clientProfile.plan_status, versions.hasPublished, versions.hasDraft));
+      setClientPlanHasDraft(versions.hasDraft);
 
       if (rows.length > 0) {
         setClientPlanDateFrom(rows[0].plan_date_from || "");
@@ -4645,21 +4680,24 @@ export default function CalorieTrackerApp() {
 
     try {
       const [foodsRes, profilesRes] = await Promise.all([
-        supabase.from("plan_foods").select("user_id, meal").in("user_id", clientIds),
+        supabase.from("plan_foods").select("user_id, meal, is_draft").in("user_id", clientIds),
         supabase.from("client_profile").select("user_id, plan_status").in("user_id", clientIds),
       ]);
       if (foodsRes.error) throw foodsRes.error;
       if (profilesRes.error) throw profilesRes.error;
 
-      const mealsByClient = {};
+      const rowsByClient = {};
       (foodsRes.data || []).forEach((row) => {
-        if (!mealsByClient[row.user_id]) mealsByClient[row.user_id] = new Set();
-        mealsByClient[row.user_id].add(row.meal);
+        if (!rowsByClient[row.user_id]) rowsByClient[row.user_id] = [];
+        rowsByClient[row.user_id].push(row);
       });
 
       const summaries = {};
-      Object.keys(mealsByClient).forEach((id) => {
-        summaries[id] = mealsByClient[id].size;
+      const versionsByClient = {};
+      Object.keys(rowsByClient).forEach((id) => {
+        const versions = splitPlanVersions(rowsByClient[id]);
+        versionsByClient[id] = versions;
+        summaries[id] = new Set(versions.coachRows.map((r) => r.meal)).size;
       });
 
       const storedStatuses = {};
@@ -4668,7 +4706,8 @@ export default function CalorieTrackerApp() {
       });
       const statuses = {};
       clientIds.forEach((id) => {
-        statuses[id] = resolvePlanStatus(storedStatuses[id], !!summaries[id]);
+        const versions = versionsByClient[id] || { hasPublished: false, hasDraft: false };
+        statuses[id] = coachPlanStatus(storedStatuses[id], versions.hasPublished, versions.hasDraft);
       });
 
       setClientPlanSummaries(summaries);
@@ -4751,49 +4790,34 @@ export default function CalorieTrackerApp() {
       return;
     }
 
-    // Saving never un-sends a plan: an active (or deactivated) plan keeps its
-    // status and the edits apply to it directly. Only an unsent plan is a draft.
-    const nextStatus = clientPlanStatus === "active" || clientPlanStatus === "inactive" ? clientPlanStatus : "draft";
-
     setClientPlanSaveBusy(true);
 
     try {
-      const { error: delErr } = await supabase.from("plan_foods").delete().eq("user_id", planBuilderClientId);
-      if (delErr) throw delErr;
-
-      if (clientPlanFoods.length > 0) {
-        const rows = clientPlanFoods.map((f) => ({
-          id: f.id,
-          user_id: planBuilderClientId,
+      // Writes only the draft (plan_foods is_draft rows + client_plan_drafts);
+      // the client keeps seeing the published plan until Send. Nothing is
+      // written until this point, so leaving the builder unsaved is a no-op.
+      const { error } = await supabase.rpc("save_client_plan", {
+        p_client_id: planBuilderClientId,
+        p_foods: clientPlanFoods.map((f) => ({
           name: f.name,
           grams: f.grams,
           meal: f.meal,
           course: f.course,
           calories: f.calories,
-          plan_name: clientPlanName || null,
-          plan_date_from: clientPlanDateFrom || null,
-          plan_date_to: clientPlanDateTo || null,
-        }));
-        const { error: insErr } = await supabase.from("plan_foods").insert(rows);
-        if (insErr) throw insErr;
-      }
+        })),
+        p_plan_name: clientPlanName || null,
+        p_date_from: clientPlanDateFrom || null,
+        p_date_to: clientPlanDateTo || null,
+        p_target_calories: Number(clientPlanTargetCalories),
+        p_target_protein_g: Number(clientPlanTargetProtein),
+        p_target_carb_g: Number(clientPlanTargetCarb),
+        p_target_fat_g: Number(clientPlanTargetFat),
+      });
+      if (error) throw error;
 
-      const { error: profileErr } = await supabase
-        .from("client_profile")
-        .update({
-          date_from: clientPlanDateFrom || null,
-          date_to: clientPlanDateTo || null,
-          plan_status: nextStatus,
-          target_calories: clientPlanTargetCalories !== "" ? Number(clientPlanTargetCalories) : null,
-          target_protein_g: clientPlanTargetProtein !== "" ? Number(clientPlanTargetProtein) : null,
-          target_carb_g: clientPlanTargetCarb !== "" ? Number(clientPlanTargetCarb) : null,
-          target_fat_g: clientPlanTargetFat !== "" ? Number(clientPlanTargetFat) : null,
-        })
-        .eq("user_id", planBuilderClientId);
-      if (profileErr) throw profileErr;
-
-      setClientPlanStatus(nextStatus);
-      setClientPlanStatuses((prev) => ({ ...prev, [planBuilderClientId]: nextStatus }));
+      setClientPlanStatus("draft");
+      setClientPlanHasDraft(true);
+      setClientPlanStatuses((prev) => ({ ...prev, [planBuilderClientId]: "draft" }));
       setClientPlanSummaries((prev) => ({
         ...prev,
         [planBuilderClientId]: new Set(clientPlanFoods.map((f) => f.meal)).size,
@@ -4806,20 +4830,39 @@ export default function CalorieTrackerApp() {
   }
 
   // Same send action from the Plan Builder and from the Plans list.
+  // Publishes the draft in one transaction: replaces the client-visible
+  // rows and targets, marks the plan active/sent, and clears the draft.
   async function markClientPlanSent(clientId) {
-    const { data, error } = await supabase
-      .from("client_profile")
-      .update({ plan_status: "active", plan_sent_at: new Date().toISOString() })
-      .eq("user_id", clientId)
-      .eq("plan_status", "draft")
-      .select("user_id");
+    const { error } = await supabase.rpc("send_client_plan", { p_client_id: clientId });
     if (error) throw error;
-    if (!data || data.length === 0) throw new Error("This plan is no longer a draft. Reload the page to see its current status.");
     setClientPlanStatuses((prev) => ({ ...prev, [clientId]: "active" }));
   }
 
+  // Throws away the draft; the published plan (if any) is untouched.
+  async function discardClientPlanDraftById(clientId) {
+    const { error } = await supabase.rpc("discard_client_plan_draft", { p_client_id: clientId });
+    if (error) throw error;
+  }
+
+  async function discardClientPlanDraft() {
+    if (!planBuilderClientId || !clientPlanHasDraft) return;
+    if (!window.confirm("Discard all saved changes and go back to the last sent version of this plan? This can't be undone.")) return;
+
+    setClientPlanSaveError(null);
+    setClientPlanDiscardBusy(true);
+
+    try {
+      await discardClientPlanDraftById(planBuilderClientId);
+      await loadClientPlan(planBuilderClientId);
+    } catch (err) {
+      setClientPlanSaveError(err && err.message ? err.message : "Couldn't discard the draft. Please try again.");
+    } finally {
+      setClientPlanDiscardBusy(false);
+    }
+  }
+
   async function sendClientPlan() {
-    if (!planBuilderClientId || clientPlanStatus !== "draft") return;
+    if (!planBuilderClientId || !clientPlanHasDraft) return;
 
     setClientPlanSendError(null);
     setClientPlanSendBusy(true);
@@ -4827,6 +4870,7 @@ export default function CalorieTrackerApp() {
     try {
       await markClientPlanSent(planBuilderClientId);
       setClientPlanStatus("active");
+      setClientPlanHasDraft(false);
     } catch (err) {
       setClientPlanSendError(err && err.message ? err.message : "Couldn't send this plan. Please try again.");
     } finally {
@@ -4848,7 +4892,7 @@ export default function CalorieTrackerApp() {
   }
 
   // What's still needed before the Plan Builder can save. Mirrored
-  // server-side by the client_profile_plan_save_guard trigger.
+  // server-side in save_client_plan.
   function clientPlanMissingRequirements() {
     const missing = [];
     const filled = (v) => v !== "" && v !== null && v !== undefined && Number(v) > 0;
@@ -4864,24 +4908,32 @@ export default function CalorieTrackerApp() {
     setPlanDetailsLoading(true);
     setPlanDetailsError(null);
     setPlanDetailsToggleError(null);
+    setPlanDetailsDraftError(null);
 
     try {
-      const [planFoodsRes, profileRes] = await Promise.all([
+      const [planFoodsRes, profileRes, draftRes] = await Promise.all([
         supabase.from("plan_foods").select("*").eq("user_id", clientId).order("created_at", { ascending: true }),
         supabase
           .from("client_profile")
           .select("plan_status, target_calories, target_protein_g, target_carb_g, target_fat_g")
           .eq("user_id", clientId)
           .maybeSingle(),
+        supabase
+          .from("client_plan_drafts")
+          .select("target_calories, target_protein_g, target_carb_g, target_fat_g")
+          .eq("user_id", clientId)
+          .maybeSingle(),
       ]);
       if (planFoodsRes.error) throw planFoodsRes.error;
       if (profileRes.error) throw profileRes.error;
+      if (draftRes.error) throw draftRes.error;
 
-      const rows = planFoodsRes.data || [];
+      const versions = splitPlanVersions(planFoodsRes.data || []);
       const clientProfile = profileRes.data || {};
+      const targets = versions.hasDraft && draftRes.data ? draftRes.data : clientProfile;
 
       setPlanDetailsFoods(
-        rows.map((f) => ({
+        versions.coachRows.map((f) => ({
           id: f.id,
           name: f.name,
           grams: f.grams,
@@ -4890,17 +4942,37 @@ export default function CalorieTrackerApp() {
           calories: f.calories,
         }))
       );
-      setPlanDetailsStatus(resolvePlanStatus(clientProfile.plan_status, rows.length > 0));
+      // planDetailsStatus is the published (client-visible) status, which
+      // Deactivate/Reactivate acts on; the badge layers the draft on top.
+      setPlanDetailsStatus(resolvePlanStatus(clientProfile.plan_status, versions.hasPublished));
+      setPlanDetailsHasDraft(versions.hasDraft);
       setPlanDetailsTargets({
-        calories: clientProfile.target_calories ?? null,
-        protein: clientProfile.target_protein_g ?? null,
-        carbs: clientProfile.target_carb_g ?? null,
-        fat: clientProfile.target_fat_g ?? null,
+        calories: targets.target_calories ?? null,
+        protein: targets.target_protein_g ?? null,
+        carbs: targets.target_carb_g ?? null,
+        fat: targets.target_fat_g ?? null,
       });
     } catch (err) {
       setPlanDetailsError(err && err.message ? err.message : "Couldn't load this client's plan.");
     } finally {
       setPlanDetailsLoading(false);
+    }
+  }
+
+  async function runPlanDetailsDraftAction(clientId, action) {
+    if (action === "discard" && !window.confirm("Discard all saved changes and go back to the last sent version of this plan? This can't be undone.")) return;
+
+    setPlanDetailsDraftError(null);
+    setPlanDetailsDraftBusy(action);
+
+    try {
+      if (action === "send") await markClientPlanSent(clientId);
+      else await discardClientPlanDraftById(clientId);
+      await loadPlanDetails(clientId);
+    } catch (err) {
+      setPlanDetailsDraftError(err && err.message ? err.message : `Couldn't ${action} this draft. Please try again.`);
+    } finally {
+      setPlanDetailsDraftBusy(null);
     }
   }
 
@@ -4917,7 +4989,7 @@ export default function CalorieTrackerApp() {
 
     if (planDetailsStatus !== "active" && planDetailsStatus !== "inactive") {
       setPlanDetailsToggleError(
-        planDetailsStatus === "draft"
+        planDetailsStatus === "draft" || planDetailsHasDraft
           ? "This plan hasn't been sent yet, so there's nothing to deactivate. Send it first."
           : "This client doesn't have a plan yet."
       );
@@ -4959,6 +5031,9 @@ export default function CalorieTrackerApp() {
     try {
       const { error } = await supabase.from("plan_foods").delete().eq("user_id", clientId);
       if (error) throw error;
+
+      const { error: draftErr } = await supabase.from("client_plan_drafts").delete().eq("user_id", clientId);
+      if (draftErr) throw draftErr;
 
       const { error: statusErr } = await supabase
         .from("client_profile")
@@ -8076,12 +8151,12 @@ export default function CalorieTrackerApp() {
                                 >
                                   <td style={tdStyle}>{c.name}</td>
                                   <td style={tdStyle}>
-                                    <PlanStatusBadge status={resolvePlanStatus(clientPlanStatuses[c.id], hasPlan)} />
+                                    <PlanStatusBadge status={hasPlan ? clientPlanStatuses[c.id] : "no_plan"} />
                                   </td>
                                   <td style={tdStyle}>
                                     {hasPlan ? (
                                       <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                                      {resolvePlanStatus(clientPlanStatuses[c.id], hasPlan) === "draft" && (
+                                      {clientPlanStatuses[c.id] === "draft" && (
                                         <button
                                           onClick={(e) => { e.stopPropagation(); sendClientPlanFromList(c.id); }}
                                           style={{ ...secondaryButtonStyle, width: "auto", background: TEAL, border: `1px solid ${TEAL}`, color: "#FFFFFF" }}
@@ -8342,10 +8417,19 @@ export default function CalorieTrackerApp() {
                           <button
                             onClick={sendClientPlan}
                             style={{ ...secondaryButtonStyle, width: "auto", background: TEAL, border: `1px solid ${TEAL}`, color: "#FFFFFF" }}
-                            disabled={clientPlanStatus !== "draft" || clientPlanSendBusy}
+                            disabled={!clientPlanHasDraft || clientPlanSendBusy}
                           >
                             {clientPlanSendBusy ? "Sending…" : "Send"}
                           </button>
+                          {clientPlanHasDraft && (
+                            <button
+                              onClick={discardClientPlanDraft}
+                              style={{ ...secondaryButtonStyle, width: "auto", border: `1px solid ${RED}`, color: RED }}
+                              disabled={clientPlanDiscardBusy}
+                            >
+                              {clientPlanDiscardBusy ? "Discarding…" : "Discard draft"}
+                            </button>
+                          )}
                           <PlanStatusBadge status={clientPlanStatus} />
                         </div>
 
@@ -8390,8 +8474,37 @@ export default function CalorieTrackerApp() {
                     ) : (
                       <>
                         <div style={{ marginBottom: 16 }}>
-                          <PlanStatusBadge status={planDetailsStatus} />
+                          <PlanStatusBadge status={planDetailsHasDraft ? "draft" : planDetailsStatus} />
                         </div>
+
+                        {planDetailsHasDraft && (
+                          <div style={{ marginBottom: 16, padding: "10px 12px", background: TEAL_SOFT, borderRadius: 4, fontSize: 12, color: INK }}>
+                            {planDetailsStatus === "active" || planDetailsStatus === "inactive"
+                              ? `Showing unsent changes. The client still sees the last sent version${planDetailsStatus === "inactive" ? " (currently deactivated)" : ""} until you send.`
+                              : "This plan hasn't been sent yet. The client sees no plan until you send it."}
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+                              <button
+                                onClick={() => runPlanDetailsDraftAction(planDetailsClientId, "send")}
+                                style={{ ...secondaryButtonStyle, width: "auto", background: TEAL, border: `1px solid ${TEAL}`, color: "#FFFFFF" }}
+                                disabled={!!planDetailsDraftBusy}
+                              >
+                                {planDetailsDraftBusy === "send" ? "Sending…" : "Send"}
+                              </button>
+                              <button
+                                onClick={() => runPlanDetailsDraftAction(planDetailsClientId, "discard")}
+                                style={{ ...secondaryButtonStyle, width: "auto", border: `1px solid ${RED}`, color: RED }}
+                                disabled={!!planDetailsDraftBusy}
+                              >
+                                {planDetailsDraftBusy === "discard" ? "Discarding…" : "Discard draft"}
+                              </button>
+                            </div>
+                            {planDetailsDraftError && (
+                              <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                                {planDetailsDraftError}
+                              </div>
+                            )}
+                          </div>
+                        )}
 
                         {planDetailsFoods.length > 0 && (
                           <DailyTargetCard

@@ -15,6 +15,7 @@ const AMBER = "#B4790C";
 const AMBER_SOFT = "#F5E9D3";
 const RED = "#A13A2E";
 const RED_SOFT = "#F5E0DC";
+const MACRO_COLORS = { protein: TEAL, carbs: AMBER, fat: RED };
 
 const TOLERANCE = 0.05;
 
@@ -390,6 +391,20 @@ async function invokeEdgeFunction(name, body) {
   throw error;
 }
 
+// client_profile.plan_status lifecycle:
+//   no_plan  — no plan_foods rows yet
+//   draft    — plan saved but never sent (plan_sent_at is null)
+//   active   — plan sent to the client
+//   inactive — coach deactivated a previously sent plan
+// plan_foods is the source of truth for whether a plan exists at all, so a
+// stored status without any foods (or a legacy null with foods) is
+// normalized here rather than trusted as-is.
+function resolvePlanStatus(storedStatus, hasFoods) {
+  if (!hasFoods) return "no_plan";
+  if (storedStatus === "active" || storedStatus === "inactive" || storedStatus === "draft") return storedStatus;
+  return "draft";
+}
+
 function planStatusMeta(status) {
   if (status === "active") return { label: "Active", color: GREEN, soft: GREEN_SOFT };
   if (status === "draft") return { label: "Draft", color: TEAL, soft: TEAL_SOFT };
@@ -585,6 +600,59 @@ function MetricRow({ label, actual, target, unit }) {
   );
 }
 
+// Daily target block: calories as the headline number, macros as a dot
+// legend underneath. Used on the client's My Plan screen and on the coach's
+// Plan Builder / Plan Details screens. Missing values render as "—".
+function DailyTargetCard({ calories, protein, carbs, fat, style }) {
+  const show = (v, unit) => (v === null || v === undefined || v === "" ? "—" : `${v}${unit}`);
+
+  return (
+    <div
+      style={{
+        display: "inline-block",
+        maxWidth: "100%",
+        boxSizing: "border-box",
+        padding: "10px 14px",
+        background: TEAL_SOFT,
+        borderRadius: 6,
+        ...style,
+      }}
+    >
+      <div
+        style={{
+          fontFamily: "'Space Grotesk', sans-serif",
+          fontSize: 11,
+          fontWeight: 700,
+          color: TEAL,
+          textTransform: "uppercase",
+          letterSpacing: 0.5,
+        }}
+      >
+        Daily target
+      </div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 5, margin: "2px 0 8px" }}>
+        <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700, lineHeight: 1.1, color: INK }}>
+          {show(calories, "")}
+        </span>
+        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: INK_SOFT }}>kcal</span>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", columnGap: 16, rowGap: 4 }}>
+        {[
+          { key: "protein", label: "Protein", value: protein },
+          { key: "carbs", label: "Carbs", value: carbs },
+          { key: "fat", label: "Fat", value: fat },
+        ].map((m) => (
+          <span key={m.key} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, whiteSpace: "nowrap" }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: MACRO_COLORS[m.key], flexShrink: 0 }} />
+            <span style={{ color: INK_SOFT }}>{m.label}</span>
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: INK }}>{show(m.value, "g")}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // Shared "cards per meal" layout used by the coach's Plan Builder, the
 // coach's Plan Details screen, and the client's My Plan screen — all three
 // display the same grouped meal/course/food structure, editable only in
@@ -597,7 +665,6 @@ function MealPlanCards({ foods, onRemoveFood }) {
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
       {mealsWithFood.map((mealName) => {
         const mealFoods = foods.filter((f) => f.meal === mealName);
-        const mealTotalCal = mealFoods.reduce((sum, f) => sum + f.calories, 0);
 
         return (
           <div key={mealName} style={{ background: PANEL, border: `1px solid ${GRID}`, borderRadius: 6, padding: 14 }}>
@@ -623,9 +690,6 @@ function MealPlanCards({ foods, onRemoveFood }) {
                 }}
               >
                 {mealName}
-              </span>
-              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
-                {mealTotalCal} kcal total
               </span>
             </div>
 
@@ -874,6 +938,10 @@ export default function CalorieTrackerApp() {
   const [planDetailsFoods, setPlanDetailsFoods] = useState([]);
   const [planDetailsStatus, setPlanDetailsStatus] = useState(null);
   const [planDetailsDeactivateBusy, setPlanDetailsDeactivateBusy] = useState(false);
+  const [planDetailsTargets, setPlanDetailsTargets] = useState({ calories: null, protein: null, carbs: null, fat: null });
+  const [planDetailsToggleError, setPlanDetailsToggleError] = useState(null);
+  const [planListSendingClientId, setPlanListSendingClientId] = useState(null);
+  const [planListSendError, setPlanListSendError] = useState(null);
   const [planDetailsRemoveBusy, setPlanDetailsRemoveBusy] = useState(false);
 
   const [ownPlanStatus, setOwnPlanStatus] = useState("active");
@@ -985,8 +1053,18 @@ export default function CalorieTrackerApp() {
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      setSession(newSession);
+    // supabase-js re-checks the session whenever the tab becomes visible
+    // again and emits SIGNED_IN / TOKEN_REFRESHED with a fresh session object
+    // for the same user. Every loader effect depends on `session`, so
+    // swapping the object would refetch every screen and wipe unsaved form
+    // state (e.g. the Plan Builder). The client keeps the refreshed token
+    // internally; React only needs a new object when the user changes.
+    const { data: listener } = supabase.auth.onAuthStateChange((event, newSession) => {
+      setSession((prev) => {
+        const sameUser = prev && newSession && prev.user && newSession.user && prev.user.id === newSession.user.id;
+        if (sameUser && (event === "SIGNED_IN" || event === "TOKEN_REFRESHED")) return prev;
+        return newSession;
+      });
     });
 
     return () => listener.subscription.unsubscribe();
@@ -1199,10 +1277,11 @@ export default function CalorieTrackerApp() {
         }
 
         // A standalone user (no coach) has no client_profile row at all, so
-        // their own plan stays effectively "active" by default. Only a
-        // coach's client has this row, and only a coach can set it to
-        // "draft" or "inactive".
+        // their own plan stays effectively "active" by default. A coach's
+        // client has this row, and their plan is only visible once the coach
+        // has sent it (resolved against plan_foods below, after it loads).
         let ownPlanStatusValue = "active";
+        let hasSelfClientProfile = false;
         let ownPlanDateFrom = null;
         let ownPlanDateTo = null;
         let ownPlanTypeName = null;
@@ -1214,7 +1293,8 @@ export default function CalorieTrackerApp() {
             .eq("user_id", userId)
             .maybeSingle();
           if (selfClientProfileRow) {
-            if (selfClientProfileRow.plan_status) ownPlanStatusValue = selfClientProfileRow.plan_status;
+            hasSelfClientProfile = true;
+            ownPlanStatusValue = selfClientProfileRow.plan_status || null;
             ownPlanDateFrom = selfClientProfileRow.date_from || null;
             ownPlanDateTo = selfClientProfileRow.date_to || null;
             ownPlanTargets = {
@@ -1235,7 +1315,6 @@ export default function CalorieTrackerApp() {
         } catch (e) {
           // No client_profile row / not a coach's client — stays "active".
         }
-        setOwnPlanStatus(ownPlanStatusValue);
         setCoachSetPlanTargets(ownPlanTargets);
         setCoachOwnedInfo({
           name: userInfoRow?.name || "",
@@ -1257,6 +1336,9 @@ export default function CalorieTrackerApp() {
         if (personalFoodsRes.error) throw personalFoodsRes.error;
         if (planFoodsRes.error) throw planFoodsRes.error;
         if (logsRes.error) throw logsRes.error;
+        setOwnPlanStatus(
+          hasSelfClientProfile ? resolvePlanStatus(ownPlanStatusValue, (planFoodsRes.data || []).length > 0) : ownPlanStatusValue
+        );
         // Measurements/photos are a secondary section of the load — a failure here
         // (e.g. a bad column name or transient DB error) must not abort the rest of
         // load(), which still needs to run and set roleId below.
@@ -2887,11 +2969,12 @@ export default function CalorieTrackerApp() {
         planStatusById[row.user_id] = row.plan_status || null;
       });
 
-      // plan_status is null (no client_profile row / never built), "draft",
-      // "active" or "inactive" — only null/draft mean no plan has been sent.
+      // plan_status is null (no client_profile row / legacy), "no_plan",
+      // "draft", "active" or "inactive" — only active/inactive mean a plan
+      // has been sent.
       const noPlan = clientIds
-        .filter((id) => !planStatusById[id] || planStatusById[id] === "draft")
-        .map((id) => ({ id, name: nameOf(id), planStatus: planStatusById[id] || null }))
+        .filter((id) => planStatusById[id] !== "active" && planStatusById[id] !== "inactive")
+        .map((id) => ({ id, name: nameOf(id), planStatus: planStatusById[id] === "draft" ? "draft" : null }))
         .sort((a, b) => a.name.localeCompare(b.name));
 
       setHomePending({ status: "ready", data: { noPlan, requestsCount: requestsRes.count || 0 }, error: null });
@@ -4502,7 +4585,7 @@ export default function CalorieTrackerApp() {
         }))
       );
       setClientPlanName((rows[0] && rows[0].plan_name) || "");
-      setClientPlanStatus(clientProfile.plan_status || null);
+      setClientPlanStatus(resolvePlanStatus(clientProfile.plan_status, rows.length > 0));
 
       if (rows.length > 0) {
         setClientPlanDateFrom(rows[0].plan_date_from || "");
@@ -4579,9 +4662,13 @@ export default function CalorieTrackerApp() {
         summaries[id] = mealsByClient[id].size;
       });
 
-      const statuses = {};
+      const storedStatuses = {};
       (profilesRes.data || []).forEach((row) => {
-        statuses[row.user_id] = row.plan_status || null;
+        storedStatuses[row.user_id] = row.plan_status || null;
+      });
+      const statuses = {};
+      clientIds.forEach((id) => {
+        statuses[id] = resolvePlanStatus(storedStatuses[id], !!summaries[id]);
       });
 
       setClientPlanSummaries(summaries);
@@ -4657,6 +4744,17 @@ export default function CalorieTrackerApp() {
     if (!planBuilderClientId) return;
 
     setClientPlanSaveError(null);
+
+    const missing = clientPlanMissingRequirements();
+    if (missing.length > 0) {
+      setClientPlanSaveError(`Can't save yet. Missing: ${missing.join(", ")}.`);
+      return;
+    }
+
+    // Saving never un-sends a plan: an active (or deactivated) plan keeps its
+    // status and the edits apply to it directly. Only an unsent plan is a draft.
+    const nextStatus = clientPlanStatus === "active" || clientPlanStatus === "inactive" ? clientPlanStatus : "draft";
+
     setClientPlanSaveBusy(true);
 
     try {
@@ -4685,7 +4783,7 @@ export default function CalorieTrackerApp() {
         .update({
           date_from: clientPlanDateFrom || null,
           date_to: clientPlanDateTo || null,
-          plan_status: "draft",
+          plan_status: nextStatus,
           target_calories: clientPlanTargetCalories !== "" ? Number(clientPlanTargetCalories) : null,
           target_protein_g: clientPlanTargetProtein !== "" ? Number(clientPlanTargetProtein) : null,
           target_carb_g: clientPlanTargetCarb !== "" ? Number(clientPlanTargetCarb) : null,
@@ -4694,7 +4792,8 @@ export default function CalorieTrackerApp() {
         .eq("user_id", planBuilderClientId);
       if (profileErr) throw profileErr;
 
-      setClientPlanStatus("draft");
+      setClientPlanStatus(nextStatus);
+      setClientPlanStatuses((prev) => ({ ...prev, [planBuilderClientId]: nextStatus }));
       setClientPlanSummaries((prev) => ({
         ...prev,
         [planBuilderClientId]: new Set(clientPlanFoods.map((f) => f.meal)).size,
@@ -4706,6 +4805,19 @@ export default function CalorieTrackerApp() {
     }
   }
 
+  // Same send action from the Plan Builder and from the Plans list.
+  async function markClientPlanSent(clientId) {
+    const { data, error } = await supabase
+      .from("client_profile")
+      .update({ plan_status: "active", plan_sent_at: new Date().toISOString() })
+      .eq("user_id", clientId)
+      .eq("plan_status", "draft")
+      .select("user_id");
+    if (error) throw error;
+    if (!data || data.length === 0) throw new Error("This plan is no longer a draft. Reload the page to see its current status.");
+    setClientPlanStatuses((prev) => ({ ...prev, [clientId]: "active" }));
+  }
+
   async function sendClientPlan() {
     if (!planBuilderClientId || clientPlanStatus !== "draft") return;
 
@@ -4713,12 +4825,7 @@ export default function CalorieTrackerApp() {
     setClientPlanSendBusy(true);
 
     try {
-      const { error } = await supabase
-        .from("client_profile")
-        .update({ plan_status: "active" })
-        .eq("user_id", planBuilderClientId);
-      if (error) throw error;
-
+      await markClientPlanSent(planBuilderClientId);
       setClientPlanStatus("active");
     } catch (err) {
       setClientPlanSendError(err && err.message ? err.message : "Couldn't send this plan. Please try again.");
@@ -4727,19 +4834,51 @@ export default function CalorieTrackerApp() {
     }
   }
 
+  async function sendClientPlanFromList(clientId) {
+    setPlanListSendError(null);
+    setPlanListSendingClientId(clientId);
+
+    try {
+      await markClientPlanSent(clientId);
+    } catch (err) {
+      setPlanListSendError(err && err.message ? err.message : "Couldn't send this plan. Please try again.");
+    } finally {
+      setPlanListSendingClientId(null);
+    }
+  }
+
+  // What's still needed before the Plan Builder can save. Mirrored
+  // server-side by the client_profile_plan_save_guard trigger.
+  function clientPlanMissingRequirements() {
+    const missing = [];
+    const filled = (v) => v !== "" && v !== null && v !== undefined && Number(v) > 0;
+    if (!filled(clientPlanTargetCalories)) missing.push("target calories");
+    if (!filled(clientPlanTargetProtein)) missing.push("target protein");
+    if (!filled(clientPlanTargetCarb)) missing.push("target carbs");
+    if (!filled(clientPlanTargetFat)) missing.push("target fat");
+    if (clientPlanFoods.length === 0) missing.push("at least one food");
+    return missing;
+  }
+
   async function loadPlanDetails(clientId) {
     setPlanDetailsLoading(true);
     setPlanDetailsError(null);
+    setPlanDetailsToggleError(null);
 
     try {
       const [planFoodsRes, profileRes] = await Promise.all([
         supabase.from("plan_foods").select("*").eq("user_id", clientId).order("created_at", { ascending: true }),
-        supabase.from("client_profile").select("plan_status").eq("user_id", clientId).maybeSingle(),
+        supabase
+          .from("client_profile")
+          .select("plan_status, target_calories, target_protein_g, target_carb_g, target_fat_g")
+          .eq("user_id", clientId)
+          .maybeSingle(),
       ]);
       if (planFoodsRes.error) throw planFoodsRes.error;
       if (profileRes.error) throw profileRes.error;
 
       const rows = planFoodsRes.data || [];
+      const clientProfile = profileRes.data || {};
 
       setPlanDetailsFoods(
         rows.map((f) => ({
@@ -4751,7 +4890,13 @@ export default function CalorieTrackerApp() {
           calories: f.calories,
         }))
       );
-      setPlanDetailsStatus((profileRes.data && profileRes.data.plan_status) || null);
+      setPlanDetailsStatus(resolvePlanStatus(clientProfile.plan_status, rows.length > 0));
+      setPlanDetailsTargets({
+        calories: clientProfile.target_calories ?? null,
+        protein: clientProfile.target_protein_g ?? null,
+        carbs: clientProfile.target_carb_g ?? null,
+        fat: clientProfile.target_fat_g ?? null,
+      });
     } catch (err) {
       setPlanDetailsError(err && err.message ? err.message : "Couldn't load this client's plan.");
     } finally {
@@ -4764,20 +4909,39 @@ export default function CalorieTrackerApp() {
     setPlansView("details");
   }
 
-  async function deactivateClientPlan(clientId) {
-    setPlanDetailsError(null);
+  // Deactivate ↔ Reactivate. Only an already-sent plan can be toggled; the
+  // button itself is never disabled by status (only while busy), so a draft
+  // or missing plan gets an explanation instead.
+  async function toggleClientPlanActive(clientId) {
+    setPlanDetailsToggleError(null);
+
+    if (planDetailsStatus !== "active" && planDetailsStatus !== "inactive") {
+      setPlanDetailsToggleError(
+        planDetailsStatus === "draft"
+          ? "This plan hasn't been sent yet, so there's nothing to deactivate. Send it first."
+          : "This client doesn't have a plan yet."
+      );
+      return;
+    }
+
+    const nextStatus = planDetailsStatus === "active" ? "inactive" : "active";
     setPlanDetailsDeactivateBusy(true);
 
     try {
       const { error } = await supabase
         .from("client_profile")
-        .update({ plan_status: "inactive" })
+        .update({ plan_status: nextStatus })
         .eq("user_id", clientId);
       if (error) throw error;
 
-      setPlanDetailsStatus("inactive");
+      setPlanDetailsStatus(nextStatus);
+      setClientPlanStatuses((prev) => ({ ...prev, [clientId]: nextStatus }));
     } catch (err) {
-      setPlanDetailsError(err && err.message ? err.message : "Couldn't deactivate this plan. Please try again.");
+      setPlanDetailsToggleError(
+        err && err.message
+          ? err.message
+          : `Couldn't ${nextStatus === "inactive" ? "deactivate" : "reactivate"} this plan. Please try again.`
+      );
     } finally {
       setPlanDetailsDeactivateBusy(false);
     }
@@ -4796,7 +4960,14 @@ export default function CalorieTrackerApp() {
       const { error } = await supabase.from("plan_foods").delete().eq("user_id", clientId);
       if (error) throw error;
 
+      const { error: statusErr } = await supabase
+        .from("client_profile")
+        .update({ plan_status: "no_plan", plan_sent_at: null })
+        .eq("user_id", clientId);
+      if (statusErr) throw statusErr;
+
       setClientPlanSummaries((prev) => ({ ...prev, [clientId]: 0 }));
+      setClientPlanStatuses((prev) => ({ ...prev, [clientId]: "no_plan" }));
       setPlansView("list");
       setPlanDetailsClientId(null);
     } catch (err) {
@@ -5271,6 +5442,7 @@ export default function CalorieTrackerApp() {
   // (coach_clients row with status "active") — never inferred from role_id
   // alone, since a standalone user also has roleId 3 but no coach.
   const isManagedClient = !!myCoachId;
+  const clientPlanMissing = clientPlanMissingRequirements();
 
   // Shared between the standalone "Measurements"/"Progress photos" sub-tabs
   // (unmanaged users, own Save button) and the merged Profile Info screen
@@ -6162,27 +6334,13 @@ export default function CalorieTrackerApp() {
                     </div>
                   )}
 
-                  <div style={{ marginBottom: 18 }}>
-                    <span
-                      style={{
-                        display: "inline-block",
-                        padding: "3px 8px",
-                        background: TEAL_SOFT,
-                        color: TEAL,
-                        borderRadius: 4,
-                        fontSize: 12,
-                        fontWeight: 700,
-                      }}
-                    >
-                      Daily target: {coachSetPlanTargets.calories ?? effectivePlan.calories} kcal
-                      {" · "}
-                      {coachSetPlanTargets.protein ?? effectivePlan.protein}g protein
-                      {" · "}
-                      {coachSetPlanTargets.carb ?? effectivePlan.carbs}g carbs
-                      {" · "}
-                      {coachSetPlanTargets.fat ?? effectivePlan.fat}g fat
-                    </span>
-                  </div>
+                  <DailyTargetCard
+                    calories={coachSetPlanTargets.calories ?? effectivePlan.calories}
+                    protein={coachSetPlanTargets.protein ?? effectivePlan.protein}
+                    carbs={coachSetPlanTargets.carb ?? effectivePlan.carbs}
+                    fat={coachSetPlanTargets.fat ?? effectivePlan.fat}
+                    style={{ marginBottom: 18 }}
+                  />
 
                   {foods.length === 0 ? (
                     <div style={{ fontSize: 12, color: INK_SOFT }}>Your coach hasn't added any foods to your plan yet.</div>
@@ -6377,7 +6535,6 @@ export default function CalorieTrackerApp() {
                   const mealFoods = foods.filter((f) => f.meal === mealName);
                   if (mealFoods.length === 0) return null;
 
-                  const mealTotalCal = mealFoods.reduce((sum, f) => sum + f.calories, 0);
 
                   return (
                     <div key={mealName} style={{ marginBottom: 16 }}>
@@ -6403,9 +6560,6 @@ export default function CalorieTrackerApp() {
                           }}
                         >
                           {mealName}
-                        </span>
-                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
-                          {mealTotalCal} kcal total
                         </span>
                       </div>
                       {COURSES.map((courseName) => {
@@ -7922,12 +8076,20 @@ export default function CalorieTrackerApp() {
                                 >
                                   <td style={tdStyle}>{c.name}</td>
                                   <td style={tdStyle}>
-                                    {/* client_profile.plan_status can be set before any plan
-                                        exists; only show it once plan_foods rows do. */}
-                                    <PlanStatusBadge status={hasPlan ? clientPlanStatuses[c.id] : null} />
+                                    <PlanStatusBadge status={resolvePlanStatus(clientPlanStatuses[c.id], hasPlan)} />
                                   </td>
                                   <td style={tdStyle}>
                                     {hasPlan ? (
+                                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                                      {resolvePlanStatus(clientPlanStatuses[c.id], hasPlan) === "draft" && (
+                                        <button
+                                          onClick={(e) => { e.stopPropagation(); sendClientPlanFromList(c.id); }}
+                                          style={{ ...secondaryButtonStyle, width: "auto", background: TEAL, border: `1px solid ${TEAL}`, color: "#FFFFFF" }}
+                                          disabled={clientPlanSummariesLoading || planListSendingClientId === c.id}
+                                        >
+                                          {planListSendingClientId === c.id ? "Sending…" : "Send"}
+                                        </button>
+                                      )}
                                       <button
                                         onClick={(e) => { e.stopPropagation(); openClientPlanDetails(c.id); }}
                                         style={secondaryButtonStyle}
@@ -7935,6 +8097,7 @@ export default function CalorieTrackerApp() {
                                       >
                                         View details
                                       </button>
+                                      </div>
                                     ) : (
                                       <button
                                         onClick={(e) => { e.stopPropagation(); editClientPlan(c.id); }}
@@ -7952,6 +8115,11 @@ export default function CalorieTrackerApp() {
                         </table>
                         {clientPlanSummariesLoading && (
                           <div style={{ fontSize: 12, color: INK_SOFT, padding: "8px 10px" }}>Loading plan status…</div>
+                        )}
+                        {planListSendError && (
+                          <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                            {planListSendError}
+                          </div>
                         )}
                       </div>
                     )}
@@ -8063,6 +8231,14 @@ export default function CalorieTrackerApp() {
                           </div>
                         </div>
 
+                        <DailyTargetCard
+                          calories={clientPlanTargetCalories}
+                          protein={clientPlanTargetProtein}
+                          carbs={clientPlanTargetCarb}
+                          fat={clientPlanTargetFat}
+                          style={{ marginBottom: 18 }}
+                        />
+
                         <div style={{ marginBottom: 14 }}>
                           <label style={labelStyle}>Food name</label>
                           <select
@@ -8151,12 +8327,13 @@ export default function CalorieTrackerApp() {
                           <MealPlanCards foods={clientPlanFoods} onRemoveFood={removeClientPlanFood} />
                         </div>
 
-                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 18, paddingTop: 14, borderTop: `1px solid ${GRID}` }}>
+                        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginTop: 18, paddingTop: 14, borderTop: `1px solid ${GRID}` }}>
                           <button
                             onClick={saveClientPlan}
-                            style={primaryButtonStyle}
+                            style={planActionButtonStyle(primaryButtonStyle, clientPlanMissing.length > 0)}
                             disabled={
                               clientPlanSaveBusy ||
+                              clientPlanMissing.length > 0 ||
                               (clientPlanDateFrom && clientPlanDateTo && clientPlanDateTo < clientPlanDateFrom)
                             }
                           >
@@ -8169,12 +8346,14 @@ export default function CalorieTrackerApp() {
                           >
                             {clientPlanSendBusy ? "Sending…" : "Send"}
                           </button>
-                          {clientPlanStatus && (
-                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                              Status: {clientPlanStatus}
-                            </span>
-                          )}
+                          <PlanStatusBadge status={clientPlanStatus} />
                         </div>
+
+                        {clientPlanMissing.length > 0 && (
+                          <div style={{ marginTop: 10, fontSize: 12, color: INK_SOFT }}>
+                            To save, add: {clientPlanMissing.join(", ")}.
+                          </div>
+                        )}
 
                         {clientPlanSaveError && (
                           <div style={{ marginTop: 10, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
@@ -8211,8 +8390,18 @@ export default function CalorieTrackerApp() {
                     ) : (
                       <>
                         <div style={{ marginBottom: 16 }}>
-                          <PlanStatusBadge status={planDetailsFoods.length > 0 ? planDetailsStatus : null} />
+                          <PlanStatusBadge status={planDetailsStatus} />
                         </div>
+
+                        {planDetailsFoods.length > 0 && (
+                          <DailyTargetCard
+                            calories={planDetailsTargets.calories}
+                            protein={planDetailsTargets.protein}
+                            carbs={planDetailsTargets.carbs}
+                            fat={planDetailsTargets.fat}
+                            style={{ marginBottom: 18 }}
+                          />
+                        )}
 
                         <div style={{ marginBottom: 18 }}>
                           {planDetailsFoods.length === 0 && (
@@ -8223,22 +8412,28 @@ export default function CalorieTrackerApp() {
 
                         {(() => {
                           const noPlanYet = planDetailsFoods.length === 0;
-                          const deactivateDisabled = noPlanYet || planDetailsStatus === "inactive";
                           const editDisabled = noPlanYet;
                           const removeDisabled = noPlanYet;
 
                           return (
                             <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-                              <button
-                                onClick={() => deactivateClientPlan(planDetailsClientId)}
-                                style={planActionButtonStyle(
-                                  { ...secondaryButtonStyle, border: `1px solid ${AMBER}`, color: AMBER },
-                                  deactivateDisabled
-                                )}
-                                disabled={planDetailsDeactivateBusy || deactivateDisabled}
-                              >
-                                {planDetailsDeactivateBusy ? "Deactivating…" : "Deactivate"}
-                              </button>
+                              {planDetailsStatus === "inactive" ? (
+                                <button
+                                  onClick={() => toggleClientPlanActive(planDetailsClientId)}
+                                  style={{ ...secondaryButtonStyle, border: `1px solid ${GREEN}`, color: GREEN }}
+                                  disabled={planDetailsDeactivateBusy}
+                                >
+                                  {planDetailsDeactivateBusy ? "Reactivating…" : "Reactivate"}
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => toggleClientPlanActive(planDetailsClientId)}
+                                  style={{ ...secondaryButtonStyle, border: `1px solid ${AMBER}`, color: AMBER }}
+                                  disabled={planDetailsDeactivateBusy}
+                                >
+                                  {planDetailsDeactivateBusy ? "Deactivating…" : "Deactivate"}
+                                </button>
+                              )}
                               <button
                                 onClick={() => editClientPlan(planDetailsClientId)}
                                 style={planActionButtonStyle(
@@ -8264,6 +8459,11 @@ export default function CalorieTrackerApp() {
                               >
                                 {planDetailsRemoveBusy ? "Removing…" : "Remove"}
                               </button>
+                              {planDetailsToggleError && (
+                                <div style={{ flexBasis: "100%", padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                                  {planDetailsToggleError}
+                                </div>
+                              )}
                             </div>
                           );
                         })()}

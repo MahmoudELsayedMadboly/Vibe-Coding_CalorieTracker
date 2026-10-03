@@ -49,8 +49,10 @@ create policy "draft plan rows are coach only"
   );
 
 -- 2. Draft targets/dates. One row per client while a draft exists.
+--    Cascades from auth.users: the delete-user Edge Function only calls
+--    auth.admin.deleteUser(), so the row must go with the user.
 create table if not exists client_plan_drafts (
-  user_id uuid primary key,
+  user_id uuid primary key references auth.users(id) on delete cascade,
   target_calories integer,
   target_protein_g integer,
   target_carb_g integer,

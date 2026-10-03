@@ -15,6 +15,7 @@ const AMBER = "#B4790C";
 const AMBER_SOFT = "#F5E9D3";
 const RED = "#A13A2E";
 const RED_SOFT = "#F5E0DC";
+const MACRO_COLORS = { protein: TEAL, carbs: AMBER, fat: RED };
 
 const TOLERANCE = 0.05;
 
@@ -6162,26 +6163,48 @@ export default function CalorieTrackerApp() {
                     </div>
                   )}
 
-                  <div style={{ marginBottom: 18 }}>
-                    <span
+                  <div
+                    style={{
+                      display: "inline-block",
+                      maxWidth: "100%",
+                      boxSizing: "border-box",
+                      padding: "10px 14px",
+                      background: TEAL_SOFT,
+                      borderRadius: 6,
+                      marginBottom: 18,
+                    }}
+                  >
+                    <div
                       style={{
-                        display: "inline-block",
-                        padding: "3px 8px",
-                        background: TEAL_SOFT,
-                        color: TEAL,
-                        borderRadius: 4,
-                        fontSize: 12,
+                        fontFamily: "'Space Grotesk', sans-serif",
+                        fontSize: 11,
                         fontWeight: 700,
+                        color: TEAL,
+                        textTransform: "uppercase",
+                        letterSpacing: 0.5,
                       }}
                     >
-                      Daily target: {coachSetPlanTargets.calories ?? effectivePlan.calories} kcal
-                      {" · "}
-                      {coachSetPlanTargets.protein ?? effectivePlan.protein}g protein
-                      {" · "}
-                      {coachSetPlanTargets.carb ?? effectivePlan.carbs}g carbs
-                      {" · "}
-                      {coachSetPlanTargets.fat ?? effectivePlan.fat}g fat
-                    </span>
+                      Daily target
+                    </div>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 5, margin: "2px 0 8px" }}>
+                      <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700, lineHeight: 1.1, color: INK }}>
+                        {coachSetPlanTargets.calories ?? effectivePlan.calories}
+                      </span>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: INK_SOFT }}>kcal</span>
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", columnGap: 16, rowGap: 4 }}>
+                      {[
+                        { key: "protein", label: "Protein", value: coachSetPlanTargets.protein ?? effectivePlan.protein },
+                        { key: "carbs", label: "Carbs", value: coachSetPlanTargets.carb ?? effectivePlan.carbs },
+                        { key: "fat", label: "Fat", value: coachSetPlanTargets.fat ?? effectivePlan.fat },
+                      ].map((m) => (
+                        <span key={m.key} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, whiteSpace: "nowrap" }}>
+                          <span style={{ width: 8, height: 8, borderRadius: "50%", background: MACRO_COLORS[m.key], flexShrink: 0 }} />
+                          <span style={{ color: INK_SOFT }}>{m.label}</span>
+                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: INK }}>{m.value}g</span>
+                        </span>
+                      ))}
+                    </div>
                   </div>
 
                   {foods.length === 0 ? (

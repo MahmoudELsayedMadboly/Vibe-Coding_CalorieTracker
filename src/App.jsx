@@ -862,6 +862,14 @@ export default function CalorieTrackerApp() {
   const [noteFormReminderAt, setNoteFormReminderAt] = useState("");
   const [noteFormBusy, setNoteFormBusy] = useState(false);
   const [noteFormError, setNoteFormError] = useState(null);
+  // Reminder pop-ups (coaches and owners). The mute flag lives on
+  // user_info.reminder_sound_muted; the refresh key tells the watcher to
+  // reload after a note or reminder changes.
+  const [reminderSoundMuted, setReminderSoundMuted] = useState(false);
+  const [notificationPermission, setNotificationPermission] = useState(
+    typeof Notification === "undefined" ? "unsupported" : Notification.permission
+  );
+  const [reminderRefreshKey, setReminderRefreshKey] = useState(0);
   // Set right before navigating to Plans so the "reset Plans to list" effect
   // opens the builder for this client instead.
   const pendingPlanBuilderClientIdRef = useRef(null);
@@ -877,6 +885,13 @@ export default function CalorieTrackerApp() {
   // Owner Home / Users: this owner's coaches (owner_coaches), same
   // { status, data, error } shape as the coach Home cards.
   const [ownerCoaches, setOwnerCoaches] = useState({ status: "loading", data: null, error: null });
+  // Owner Clients screen: every client of this owner's coaches, from the
+  // owner_list_clients() RPC (name, email, coach, link status, first login).
+  const [ownerClients, setOwnerClients] = useState({ status: "loading", data: null, error: null });
+  const [ownerClientsSearch, setOwnerClientsSearch] = useState("");
+  const [ownerClientsFilter, setOwnerClientsFilter] = useState("all");
+  const [ownerClientBusyId, setOwnerClientBusyId] = useState(null);
+  const [ownerClientsActionError, setOwnerClientsActionError] = useState(null);
   const [newCoachFormOpen, setNewCoachFormOpen] = useState(false);
   const [newCoachName, setNewCoachName] = useState("");
   const [newCoachEmail, setNewCoachEmail] = useState("");
@@ -970,7 +985,11 @@ export default function CalorieTrackerApp() {
 
   const [ownPlanStatus, setOwnPlanStatus] = useState("active");
 
-  const [chatSelectedClientId, setChatSelectedClientId] = useState(null);
+  // The other side of the open chat thread: a client (coach view), the
+  // owner (coach view), or a coach (owner view). Clients use myCoachId.
+  const [chatPeerId, setChatPeerId] = useState(null);
+  // Coach view: the owner they belong to, pinned at the top of their chat list.
+  const [chatOwner, setChatOwner] = useState(null);
   const [myCoachId, setMyCoachId] = useState(null);
   const [myCoachName, setMyCoachName] = useState(null);
   const [myCoachLoading, setMyCoachLoading] = useState(false);
@@ -2555,6 +2574,78 @@ export default function CalorieTrackerApp() {
     }
   }
 
+  async function loadOwnerClients() {
+    if (!session) return;
+
+    setOwnerClients((prev) => ({ status: "loading", data: prev.data, error: null }));
+
+    try {
+      const { data, error } = await supabase.rpc("owner_list_clients");
+      if (error) throw error;
+      setOwnerClients({
+        status: "ready",
+        data: (data || []).map((row) => ({
+          id: row.client_id,
+          name: row.name || "(name unavailable)",
+          email: row.email || "",
+          status: COACH_STATUSES.includes(row.status) ? row.status : "invited",
+          coachId: row.coach_id,
+          coachName: row.coach_name || "(name unavailable)",
+          firstLoginAt: row.first_login_at,
+        })),
+        error: null,
+      });
+    } catch (err) {
+      setOwnerClients({ status: "error", data: null, error: err && err.message ? err.message : "Couldn't load your clients." });
+    }
+  }
+
+  async function ownerToggleClientStatus(client) {
+    // Same transitions as the coach's toggle: deactivate from invited or
+    // active, reactivate always to active.
+    const nextStatus = client.status === "inactive" ? "active" : "inactive";
+
+    setOwnerClientBusyId(client.id);
+    setOwnerClientsActionError(null);
+
+    try {
+      const { error } = await supabase.rpc("owner_set_client_status", { p_client_id: client.id, p_status: nextStatus });
+      if (error) throw error;
+      loadOwnerClients();
+      loadOwnerCoaches();
+    } catch (err) {
+      setOwnerClientsActionError(err && err.message ? err.message : "Couldn't update this client's status. Please try again.");
+    } finally {
+      setOwnerClientBusyId(null);
+    }
+  }
+
+  async function ownerAssignClient(client, coachId) {
+    if (!coachId || coachId === client.coachId) return;
+    const newCoach = (ownerCoaches.data || []).find((c) => c.id === coachId);
+    const newCoachName = newCoach ? newCoach.name : "the new coach";
+    const confirmed = window.confirm(
+      `Move ${client.name} from ${client.coachName} to ${newCoachName}?\n\n` +
+        `Their sent plan and targets stay. Any unsent plan changes, their plan type, and ${client.coachName}'s notification rules for them are removed. ` +
+        `${client.coachName} will no longer see their data.`
+    );
+    if (!confirmed) return;
+
+    setOwnerClientBusyId(client.id);
+    setOwnerClientsActionError(null);
+
+    try {
+      const { error } = await supabase.rpc("owner_assign_client", { p_client_id: client.id, p_coach_id: coachId });
+      if (error) throw error;
+      loadOwnerClients();
+      loadOwnerCoaches();
+    } catch (err) {
+      setOwnerClientsActionError(err && err.message ? err.message : "Couldn't move this client. Please try again.");
+    } finally {
+      setOwnerClientBusyId(null);
+    }
+  }
+
   function startNewCoach() {
     setNewCoachName("");
     setNewCoachEmail("");
@@ -2625,7 +2716,7 @@ export default function CalorieTrackerApp() {
     } catch (_) {
       // Keep the generic wording if the count itself can't be read.
     }
-    return `This coach has ${countLabel} client(s). Remove them before ${action} this coach.`;
+    return `This coach has ${countLabel} client(s). Move them to another coach (Clients) or remove them before ${action} this coach.`;
   }
 
   function startEditCoach(coach) {
@@ -3117,7 +3208,7 @@ export default function CalorieTrackerApp() {
   }
 
   function openChatWithClient(clientId) {
-    setChatSelectedClientId(clientId);
+    setChatPeerId(clientId);
     setView("chat");
   }
 
@@ -3136,21 +3227,23 @@ export default function CalorieTrackerApp() {
   }
 
   // Non-dismissed reminders due within the next 48 hours, plus any already
-  // overdue (no lower bound on reminder_at).
+  // overdue (no lower bound on reminder_at). Shows the first few; `total`
+  // drives the card's "+N more → Notes" link.
   async function loadHomeReminders() {
     try {
       const horizon = new Date(Date.now() + REMINDER_WINDOW_MS).toISOString();
-      const { data, error } = await supabase
+      const { data, error, count } = await supabase
         .from("coach_notes")
-        .select("*")
-        .eq("coach_id", session.user.id)
+        .select("*", { count: "exact" })
+        .eq("user_id", session.user.id)
         .eq("reminder_dismissed", false)
         .not("reminder_at", "is", null)
         .lte("reminder_at", horizon)
         .order("reminder_at", { ascending: true })
-        .limit(5);
+        .limit(HOME_REMINDERS_SHOWN);
       if (error) throw error;
-      setHomeReminders({ status: "ready", data: data || [], error: null });
+      const items = data || [];
+      setHomeReminders({ status: "ready", data: { items, total: count ?? items.length }, error: null });
     } catch (err) {
       setHomeReminders({ status: "error", data: null, error: err && err.message ? err.message : "Couldn't load reminders." });
     }
@@ -3158,7 +3251,7 @@ export default function CalorieTrackerApp() {
 
   async function dismissReminder(noteId) {
     // Optimistic: drop the row right away, resync from the server on failure.
-    setHomeReminders((prev) => (prev.data ? { ...prev, data: prev.data.filter((n) => n.id !== noteId) } : prev));
+    removeHomeReminder(noteId);
 
     const { error } = await supabase.from("coach_notes").update({ reminder_dismissed: true }).eq("id", noteId);
     if (error) {
@@ -3166,7 +3259,41 @@ export default function CalorieTrackerApp() {
       loadHomeReminders();
       return;
     }
+    markReminderDismissedLocally(noteId);
+  }
+
+  function removeHomeReminder(noteId) {
+    setHomeReminders((prev) => {
+      if (!prev.data || !prev.data.items.some((n) => n.id === noteId)) return prev;
+      return { ...prev, data: { items: prev.data.items.filter((n) => n.id !== noteId), total: prev.data.total - 1 } };
+    });
+  }
+
+  // After a reminder is dismissed (Home card or the due pop-up): update the
+  // Notes list and Home card, and let the reminder watcher drop it.
+  function markReminderDismissedLocally(noteId) {
+    removeHomeReminder(noteId);
     setNotes((prev) => prev.map((n) => (n.id === noteId ? { ...n, reminder_dismissed: true } : n)));
+    setReminderRefreshKey((k) => k + 1);
+  }
+
+  async function toggleReminderSound() {
+    const next = !reminderSoundMuted;
+    setReminderSoundMuted(next);
+    const { error } = await supabase.from("user_info").update({ reminder_sound_muted: next }).eq("id", session.user.id);
+    if (error) {
+      console.error("Couldn't save the reminder sound setting:", error);
+      setReminderSoundMuted(!next);
+    }
+  }
+
+  async function enableSystemNotifications() {
+    if (typeof Notification === "undefined") return;
+    try {
+      setNotificationPermission(await Notification.requestPermission());
+    } catch (err) {
+      console.error("Notification permission request failed:", err);
+    }
   }
 
   function openClientCheckInHistory(clientId) {
@@ -3323,7 +3450,7 @@ export default function CalorieTrackerApp() {
       const { data, error } = await supabase
         .from("coach_notes")
         .select("*")
-        .eq("coach_id", session.user.id)
+        .eq("user_id", session.user.id)
         .order("updated_at", { ascending: false, nullsFirst: false })
         .order("created_at", { ascending: false });
       if (error) throw error;
@@ -3396,25 +3523,23 @@ export default function CalorieTrackerApp() {
 
     try {
       if (editingNote) {
-        const previousMs = editingNote.reminder_at ? new Date(editingNote.reminder_at).getTime() : null;
-        const nextMs = reminderAt ? new Date(reminderAt).getTime() : null;
+        // A new or changed reminder_at is reset (pop-ups pending, not
+        // dismissed) by the coach_notes_reset_reminder_state trigger.
         const update = { ...fields, updated_at: new Date().toISOString() };
-        // A new or changed reminder should fire again even if the old one
-        // had been dismissed.
-        if (previousMs !== nextMs) update.reminder_dismissed = false;
 
         const { error } = await supabase.from("coach_notes").update(update).eq("id", editingNote.id);
         if (error) throw error;
       } else {
         const { error } = await supabase
           .from("coach_notes")
-          .insert({ ...fields, coach_id: session.user.id, reminder_dismissed: false });
+          .insert({ ...fields, user_id: session.user.id, reminder_dismissed: false });
         if (error) throw error;
       }
 
       setEditingNote(null);
       setNotesView("list");
       loadNotes();
+      setReminderRefreshKey((k) => k + 1);
     } catch (err) {
       setNoteFormError(err && err.message ? err.message : "Couldn't save that note.");
     } finally {
@@ -3433,6 +3558,8 @@ export default function CalorieTrackerApp() {
     }
 
     setNotes((prev) => prev.filter((n) => n.id !== note.id));
+    removeHomeReminder(note.id);
+    setReminderRefreshKey((k) => k + 1);
     if (editingNote && editingNote.id === note.id) cancelNoteForm();
   }
 
@@ -3800,10 +3927,26 @@ export default function CalorieTrackerApp() {
     if (roleId === 4 && (view === "home" || view === "users")) {
       loadOwnerCoaches();
     }
+    if (roleId === 4 && (view === "home" || view === "clients")) {
+      loadOwnerClients();
+    }
+    if (roleId === 4 && (view === "clients" || view === "chat")) {
+      loadOwnerCoaches();
+    }
+    if (roleId === 2 && view === "chat") {
+      loadChatOwner();
+    }
+    if (roleId === 4 && view === "home") {
+      setHomeReminders((prev) => ({ status: "loading", data: prev.data, error: null }));
+      loadHomeReminders();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, roleId, session]);
 
   useEffect(() => {
+    if (view !== "clients") {
+      setOwnerClientsActionError(null);
+    }
     if (view !== "users") {
       setNewCoachFormOpen(false);
       setEditingCoachId(null);
@@ -3854,11 +3997,34 @@ export default function CalorieTrackerApp() {
   }, [view, roleId, selectedClientId, mealLogDate, session]);
 
   useEffect(() => {
-    if (roleId === 2 && view === "notes") {
+    if ((roleId === 2 || roleId === 4) && view === "notes") {
       loadNotes();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, roleId, session]);
+
+  // Read separately from the login user_info query so a missing column
+  // (frontend deployed before the migration) can't break sign-in.
+  useEffect(() => {
+    if (!session || (roleId !== 2 && roleId !== 4)) return;
+    let cancelled = false;
+    supabase
+      .from("user_info")
+      .select("reminder_sound_muted")
+      .eq("id", session.user.id)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) {
+          console.error("Couldn't load the reminder sound setting:", error);
+          return;
+        }
+        setReminderSoundMuted(!!(data && data.reminder_sound_muted));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session, roleId]);
 
   // Leaving Notes always returns it to the list; entering it keeps whatever
   // openNoteFromHome set up (same pattern as the Chat selection).
@@ -3969,7 +4135,7 @@ export default function CalorieTrackerApp() {
 
   useEffect(() => {
     if (view !== "chat") {
-      setChatSelectedClientId(null);
+      setChatPeerId(null);
       setChatMessages([]);
       setChatError(null);
       setChatInput("");
@@ -4006,7 +4172,7 @@ export default function CalorieTrackerApp() {
     if (view !== "chat" || !session) return;
 
     const myId = session.user.id;
-    const otherId = roleId === 2 ? chatSelectedClientId : myCoachId;
+    const otherId = roleId === 2 || roleId === 4 ? chatPeerId : myCoachId;
     if (!otherId) {
       setChatMessages([]);
       return;
@@ -4041,7 +4207,32 @@ export default function CalorieTrackerApp() {
       supabase.removeChannel(channel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, roleId, chatSelectedClientId, myCoachId, session]);
+  }, [view, roleId, chatPeerId, myCoachId, session]);
+
+  // Coach view: the owner they belong to (owner_coaches), for the pinned
+  // chat thread. Coaches can already read their owner's user_info row.
+  async function loadChatOwner() {
+    if (!session) return;
+
+    try {
+      const { data: link, error: linkErr } = await supabase
+        .from("owner_coaches")
+        .select("owner_id")
+        .eq("coach_id", session.user.id)
+        .maybeSingle();
+      if (linkErr) throw linkErr;
+      if (!link || !link.owner_id) {
+        setChatOwner(null);
+        return;
+      }
+
+      const { data: owner } = await supabase.from("user_info").select("name").eq("id", link.owner_id).maybeSingle();
+      setChatOwner({ id: link.owner_id, name: (owner && owner.name) || "Owner" });
+    } catch (err) {
+      console.error("Couldn't load your owner for chat:", err);
+      setChatOwner(null);
+    }
+  }
 
   async function loadMyCoach() {
     if (!session) return;
@@ -5966,6 +6157,316 @@ export default function CalorieTrackerApp() {
     </div>
   );
 
+  // Shared by coach and owner Home.
+  function renderRemindersCard() {
+    return (
+      <HomeCard
+        title="🔔 Upcoming reminders"
+        accent={
+          !homeReminders.data || homeReminders.data.items.length === 0
+            ? GREEN
+            : homeReminders.data.items.some((n) => new Date(n.reminder_at).getTime() < Date.now())
+            ? RED
+            : AMBER
+        }
+        state={homeReminders}
+      >
+        {({ items, total }) =>
+          items.length === 0 ? (
+            <HomeEmptyState>No upcoming reminders.</HomeEmptyState>
+          ) : (
+            <>
+              {items.map((note) => (
+                <HomeRow key={note.id}>
+                  <button
+                    onClick={() => openNoteFromHome(note)}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      flex: 1,
+                      minWidth: 0,
+                      border: "none",
+                      background: "transparent",
+                      padding: 0,
+                      cursor: "pointer",
+                      textAlign: "left",
+                    }}
+                  >
+                    <span style={{ ...homeRowNameStyle, maxWidth: "100%" }}>{noteDisplayTitle(note)}</span>
+                    <span
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 4,
+                        fontFamily: "'IBM Plex Mono', monospace",
+                        fontSize: 11,
+                        color: reminderColor(note.reminder_at),
+                        fontWeight: new Date(note.reminder_at).getTime() < Date.now() ? 700 : 400,
+                      }}
+                    >
+                      <Clock size={11} />
+                      {formatReminderLabel(note.reminder_at)}
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => dismissReminder(note.id)}
+                    title="Dismiss reminder"
+                    aria-label={`Dismiss reminder for ${noteDisplayTitle(note)}`}
+                    style={{ ...iconButtonStyle, border: `1px solid ${GRID}`, borderRadius: 4, padding: 5, color: GREEN }}
+                  >
+                    <Check size={14} />
+                  </button>
+                </HomeRow>
+              ))}
+              {total > items.length && (
+                <button onClick={() => setView("notes")} style={{ ...linkButtonStyle, marginTop: 10 }}>
+                  +{total - items.length} more → Notes
+                </button>
+              )}
+            </>
+          )
+        }
+      </HomeCard>
+    );
+  }
+
+  // Shared by the coach and owner Notes tabs.
+  function renderNotesScreen() {
+    return (
+      <div>
+        {notesView === "form" ? (
+          <div style={{ ...panelStyle, maxWidth: 640 }}>
+            <SectionTitle>{editingNote ? "Edit note" : "New note"}</SectionTitle>
+
+            <label style={labelStyle}>Title (optional)</label>
+            <input
+              type="text"
+              placeholder="e.g. Check in with Sara about carbs"
+              value={noteFormTitle}
+              onChange={(e) => setNoteFormTitle(e.target.value)}
+              style={inputStyle}
+              disabled={noteFormBusy}
+            />
+
+            <label style={labelStyle}>Note</label>
+            <textarea
+              placeholder="Write your note…"
+              value={noteFormContent}
+              onChange={(e) => setNoteFormContent(e.target.value)}
+              rows={8}
+              style={{ ...inputStyle, resize: "vertical", fontFamily: "'IBM Plex Mono', monospace" }}
+              disabled={noteFormBusy}
+            />
+
+            <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 13, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={noteFormReminderOn}
+                onChange={(e) => toggleNoteFormReminder(e.target.checked)}
+                disabled={noteFormBusy}
+              />
+              <Clock size={14} color={TEAL} />
+              Remind me
+            </label>
+            {noteFormReminderOn && (
+              <input
+                type="datetime-local"
+                value={noteFormReminderAt}
+                onChange={(e) => setNoteFormReminderAt(e.target.value)}
+                style={{ ...inputStyle, maxWidth: 260 }}
+                disabled={noteFormBusy}
+              />
+            )}
+            {editingNote && editingNote.reminder_dismissed && editingNote.reminder_at && noteFormReminderOn && (
+              <div style={{ fontSize: 11.5, color: INK_SOFT, marginTop: -8, marginBottom: 14 }}>
+                This reminder was dismissed. Change the time to turn it back on.
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={submitNoteForm} style={primaryButtonStyle} disabled={noteFormBusy}>
+                {noteFormBusy ? "Saving…" : "Save note"}
+              </button>
+              <button onClick={cancelNoteForm} style={secondaryButtonStyle} disabled={noteFormBusy}>
+                Cancel
+              </button>
+              {editingNote && (
+                <button
+                  onClick={() => deleteNote(editingNote)}
+                  style={{ ...secondaryButtonStyle, marginLeft: "auto", color: RED }}
+                  disabled={noteFormBusy}
+                >
+                  <Trash2 size={13} /> Delete
+                </button>
+              )}
+            </div>
+
+            {noteFormError && (
+              <div style={{ marginTop: 12, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                {noteFormError}
+              </div>
+            )}
+          </div>
+        ) : (
+          (() => {
+            const query = notesSearch.trim().toLowerCase();
+            const visibleNotes = query
+              ? notes.filter((n) => `${n.title || ""}\n${n.content || ""}`.toLowerCase().includes(query))
+              : notes;
+
+            return (
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 16 }}>
+                  <div style={{ position: "relative", flex: 1, maxWidth: 320 }}>
+                    <Search size={14} color={INK_SOFT} style={{ position: "absolute", left: 10, top: 10 }} />
+                    <input
+                      type="text"
+                      placeholder="Search notes"
+                      value={notesSearch}
+                      onChange={(e) => setNotesSearch(e.target.value)}
+                      style={{ ...inputStyle, marginBottom: 0, paddingLeft: 30 }}
+                    />
+                  </div>
+                  <button onClick={startNewNote} style={primaryButtonStyle}>
+                    + New note
+                  </button>
+                </div>
+
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 16, marginBottom: 16, fontSize: 12.5, color: INK_SOFT }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                    <input type="checkbox" checked={!reminderSoundMuted} onChange={toggleReminderSound} />
+                    Play a sound with reminders
+                  </label>
+                  {notificationPermission === "default" && (
+                    <button onClick={enableSystemNotifications} style={linkButtonStyle}>
+                      <Bell size={13} style={{ verticalAlign: -2, marginRight: 4 }} />
+                      Enable notifications
+                    </button>
+                  )}
+                  {notificationPermission === "granted" && <span>Notifications on</span>}
+                  {notificationPermission === "denied" && <span>Notifications are blocked in your browser settings.</span>}
+                </div>
+
+                {notesLoading && notes.length === 0 ? (
+                  <div style={{ fontSize: 12, color: INK_SOFT }}>Loading notes…</div>
+                ) : notesError ? (
+                  <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                    {notesError}
+                  </div>
+                ) : notes.length === 0 ? (
+                  <div style={{ ...panelStyle, textAlign: "center" }}>
+                    <div style={{ fontSize: 13, color: INK_SOFT, marginBottom: 16 }}>No notes yet</div>
+                    <button onClick={startNewNote} style={{ ...primaryButtonStyle, display: "inline-flex" }}>
+                      + New note
+                    </button>
+                  </div>
+                ) : visibleNotes.length === 0 ? (
+                  <div style={{ fontSize: 12.5, color: INK_SOFT }}>No notes match "{notesSearch.trim()}".</div>
+                ) : (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
+                    {visibleNotes.map((note) => {
+                      const active = isActiveReminder(note);
+                      const edited = note.updated_at && new Date(note.updated_at).getTime() - new Date(note.created_at).getTime() > 1000;
+                      return (
+                        <div
+                          key={note.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => startEditNote(note)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") startEditNote(note);
+                          }}
+                          style={{
+                            ...panelStyle,
+                            padding: "0.9rem 1rem",
+                            cursor: "pointer",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 6,
+                            borderLeft: `3px solid ${active ? reminderColor(note.reminder_at) : GRID}`,
+                          }}
+                        >
+                          <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                            <div style={{ ...homeRowNameStyle, flex: 1, minWidth: 0 }}>{noteDisplayTitle(note)}</div>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteNote(note);
+                              }}
+                              aria-label={`Delete ${noteDisplayTitle(note)}`}
+                              style={{ ...iconButtonStyle, color: INK_SOFT, padding: 2 }}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+
+                          {note.title && note.title.trim() && (
+                            <div
+                              style={{
+                                fontSize: 12.5,
+                                color: INK_SOFT,
+                                whiteSpace: "pre-wrap",
+                                overflow: "hidden",
+                                display: "-webkit-box",
+                                WebkitLineClamp: 3,
+                                WebkitBoxOrient: "vertical",
+                              }}
+                            >
+                              {note.content}
+                            </div>
+                          )}
+
+                          {note.reminder_at && (
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 4,
+                                fontFamily: "'IBM Plex Mono', monospace",
+                                fontSize: 11,
+                                color: active ? reminderColor(note.reminder_at) : INK_SOFT,
+                                textDecoration: active ? "none" : "line-through",
+                              }}
+                              title={active ? "Active reminder" : "Reminder dismissed"}
+                            >
+                              <Clock size={11} />
+                              {formatNoteTimestamp(note.reminder_at)}
+                              {active && (
+                                <span
+                                  style={{
+                                    marginLeft: 4,
+                                    padding: "1px 6px",
+                                    borderRadius: 999,
+                                    background: reminderColor(note.reminder_at) === RED ? RED_SOFT : reminderColor(note.reminder_at) === AMBER ? AMBER_SOFT : TEAL_SOFT,
+                                    fontFamily: "'Space Grotesk', sans-serif",
+                                    fontSize: 10,
+                                    fontWeight: 700,
+                                    textTransform: "uppercase",
+                                    letterSpacing: 0.4,
+                                  }}
+                                >
+                                  {reminderColor(note.reminder_at) === RED ? "Due" : "Reminder"}
+                                </span>
+                              )}
+                            </div>
+                          )}
+
+                          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT, marginTop: "auto" }}>
+                            {edited ? `Updated ${formatNoteTimestamp(note.updated_at)}` : `Created ${formatNoteTimestamp(note.created_at)}`}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()
+        )}
+      </div>
+    );
+  }
+
   return (
     <div style={{ fontFamily: "'Inter', sans-serif", background: PAPER, color: INK, padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
       <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -7620,288 +8121,12 @@ export default function CalorieTrackerApp() {
                     }
                   </HomeCard>
 
-                  <HomeCard
-                    title="🔔 Upcoming reminders"
-                    accent={
-                      !homeReminders.data || homeReminders.data.length === 0
-                        ? GREEN
-                        : homeReminders.data.some((n) => new Date(n.reminder_at).getTime() < Date.now())
-                        ? RED
-                        : AMBER
-                    }
-                    state={homeReminders}
-                  >
-                    {(reminders) =>
-                      reminders.length === 0 ? (
-                        <HomeEmptyState>No upcoming reminders.</HomeEmptyState>
-                      ) : (
-                        reminders.map((note) => (
-                          <HomeRow key={note.id}>
-                            <button
-                              onClick={() => openNoteFromHome(note)}
-                              style={{
-                                display: "flex",
-                                flexDirection: "column",
-                                flex: 1,
-                                minWidth: 0,
-                                border: "none",
-                                background: "transparent",
-                                padding: 0,
-                                cursor: "pointer",
-                                textAlign: "left",
-                              }}
-                            >
-                              <span style={{ ...homeRowNameStyle, maxWidth: "100%" }}>{noteDisplayTitle(note)}</span>
-                              <span
-                                style={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 4,
-                                  fontFamily: "'IBM Plex Mono', monospace",
-                                  fontSize: 11,
-                                  color: reminderColor(note.reminder_at),
-                                  fontWeight: new Date(note.reminder_at).getTime() < Date.now() ? 700 : 400,
-                                }}
-                              >
-                                <Clock size={11} />
-                                {formatReminderLabel(note.reminder_at)}
-                              </span>
-                            </button>
-                            <button
-                              onClick={() => dismissReminder(note.id)}
-                              title="Dismiss reminder"
-                              aria-label={`Dismiss reminder for ${noteDisplayTitle(note)}`}
-                              style={{ ...iconButtonStyle, border: `1px solid ${GRID}`, borderRadius: 4, padding: 5, color: GREEN }}
-                            >
-                              <Check size={14} />
-                            </button>
-                          </HomeRow>
-                        ))
-                      )
-                    }
-                  </HomeCard>
+                  {renderRemindersCard()}
                 </div>
               </div>
             )}
 
-            {view === "notes" && (
-              <div>
-                {notesView === "form" ? (
-                  <div style={{ ...panelStyle, maxWidth: 640 }}>
-                    <SectionTitle>{editingNote ? "Edit note" : "New note"}</SectionTitle>
-
-                    <label style={labelStyle}>Title (optional)</label>
-                    <input
-                      type="text"
-                      placeholder="e.g. Check in with Sara about carbs"
-                      value={noteFormTitle}
-                      onChange={(e) => setNoteFormTitle(e.target.value)}
-                      style={inputStyle}
-                      disabled={noteFormBusy}
-                    />
-
-                    <label style={labelStyle}>Note</label>
-                    <textarea
-                      placeholder="Write your note…"
-                      value={noteFormContent}
-                      onChange={(e) => setNoteFormContent(e.target.value)}
-                      rows={8}
-                      style={{ ...inputStyle, resize: "vertical", fontFamily: "'IBM Plex Mono', monospace" }}
-                      disabled={noteFormBusy}
-                    />
-
-                    <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 13, cursor: "pointer" }}>
-                      <input
-                        type="checkbox"
-                        checked={noteFormReminderOn}
-                        onChange={(e) => toggleNoteFormReminder(e.target.checked)}
-                        disabled={noteFormBusy}
-                      />
-                      <Clock size={14} color={TEAL} />
-                      Remind me
-                    </label>
-                    {noteFormReminderOn && (
-                      <input
-                        type="datetime-local"
-                        value={noteFormReminderAt}
-                        onChange={(e) => setNoteFormReminderAt(e.target.value)}
-                        style={{ ...inputStyle, maxWidth: 260 }}
-                        disabled={noteFormBusy}
-                      />
-                    )}
-                    {editingNote && editingNote.reminder_dismissed && editingNote.reminder_at && noteFormReminderOn && (
-                      <div style={{ fontSize: 11.5, color: INK_SOFT, marginTop: -8, marginBottom: 14 }}>
-                        This reminder was dismissed. Change the time to turn it back on.
-                      </div>
-                    )}
-
-                    <div style={{ display: "flex", gap: 10 }}>
-                      <button onClick={submitNoteForm} style={primaryButtonStyle} disabled={noteFormBusy}>
-                        {noteFormBusy ? "Saving…" : "Save note"}
-                      </button>
-                      <button onClick={cancelNoteForm} style={secondaryButtonStyle} disabled={noteFormBusy}>
-                        Cancel
-                      </button>
-                      {editingNote && (
-                        <button
-                          onClick={() => deleteNote(editingNote)}
-                          style={{ ...secondaryButtonStyle, marginLeft: "auto", color: RED }}
-                          disabled={noteFormBusy}
-                        >
-                          <Trash2 size={13} /> Delete
-                        </button>
-                      )}
-                    </div>
-
-                    {noteFormError && (
-                      <div style={{ marginTop: 12, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                        {noteFormError}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  (() => {
-                    const query = notesSearch.trim().toLowerCase();
-                    const visibleNotes = query
-                      ? notes.filter((n) => `${n.title || ""}\n${n.content || ""}`.toLowerCase().includes(query))
-                      : notes;
-
-                    return (
-                      <div>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 16 }}>
-                          <div style={{ position: "relative", flex: 1, maxWidth: 320 }}>
-                            <Search size={14} color={INK_SOFT} style={{ position: "absolute", left: 10, top: 10 }} />
-                            <input
-                              type="text"
-                              placeholder="Search notes"
-                              value={notesSearch}
-                              onChange={(e) => setNotesSearch(e.target.value)}
-                              style={{ ...inputStyle, marginBottom: 0, paddingLeft: 30 }}
-                            />
-                          </div>
-                          <button onClick={startNewNote} style={primaryButtonStyle}>
-                            + New note
-                          </button>
-                        </div>
-
-                        {notesLoading && notes.length === 0 ? (
-                          <div style={{ fontSize: 12, color: INK_SOFT }}>Loading notes…</div>
-                        ) : notesError ? (
-                          <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                            {notesError}
-                          </div>
-                        ) : notes.length === 0 ? (
-                          <div style={{ ...panelStyle, textAlign: "center" }}>
-                            <div style={{ fontSize: 13, color: INK_SOFT, marginBottom: 16 }}>No notes yet</div>
-                            <button onClick={startNewNote} style={{ ...primaryButtonStyle, display: "inline-flex" }}>
-                              + New note
-                            </button>
-                          </div>
-                        ) : visibleNotes.length === 0 ? (
-                          <div style={{ fontSize: 12.5, color: INK_SOFT }}>No notes match "{notesSearch.trim()}".</div>
-                        ) : (
-                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
-                            {visibleNotes.map((note) => {
-                              const active = isActiveReminder(note);
-                              const edited = note.updated_at && new Date(note.updated_at).getTime() - new Date(note.created_at).getTime() > 1000;
-                              return (
-                                <div
-                                  key={note.id}
-                                  role="button"
-                                  tabIndex={0}
-                                  onClick={() => startEditNote(note)}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") startEditNote(note);
-                                  }}
-                                  style={{
-                                    ...panelStyle,
-                                    padding: "0.9rem 1rem",
-                                    cursor: "pointer",
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: 6,
-                                    borderLeft: `3px solid ${active ? reminderColor(note.reminder_at) : GRID}`,
-                                  }}
-                                >
-                                  <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                                    <div style={{ ...homeRowNameStyle, flex: 1, minWidth: 0 }}>{noteDisplayTitle(note)}</div>
-                                    <button
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        deleteNote(note);
-                                      }}
-                                      aria-label={`Delete ${noteDisplayTitle(note)}`}
-                                      style={{ ...iconButtonStyle, color: INK_SOFT, padding: 2 }}
-                                    >
-                                      <Trash2 size={13} />
-                                    </button>
-                                  </div>
-
-                                  {note.title && note.title.trim() && (
-                                    <div
-                                      style={{
-                                        fontSize: 12.5,
-                                        color: INK_SOFT,
-                                        whiteSpace: "pre-wrap",
-                                        overflow: "hidden",
-                                        display: "-webkit-box",
-                                        WebkitLineClamp: 3,
-                                        WebkitBoxOrient: "vertical",
-                                      }}
-                                    >
-                                      {note.content}
-                                    </div>
-                                  )}
-
-                                  {note.reminder_at && (
-                                    <div
-                                      style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: 4,
-                                        fontFamily: "'IBM Plex Mono', monospace",
-                                        fontSize: 11,
-                                        color: active ? reminderColor(note.reminder_at) : INK_SOFT,
-                                        textDecoration: active ? "none" : "line-through",
-                                      }}
-                                      title={active ? "Active reminder" : "Reminder dismissed"}
-                                    >
-                                      <Clock size={11} />
-                                      {formatNoteTimestamp(note.reminder_at)}
-                                      {active && (
-                                        <span
-                                          style={{
-                                            marginLeft: 4,
-                                            padding: "1px 6px",
-                                            borderRadius: 999,
-                                            background: reminderColor(note.reminder_at) === RED ? RED_SOFT : reminderColor(note.reminder_at) === AMBER ? AMBER_SOFT : TEAL_SOFT,
-                                            fontFamily: "'Space Grotesk', sans-serif",
-                                            fontSize: 10,
-                                            fontWeight: 700,
-                                            textTransform: "uppercase",
-                                            letterSpacing: 0.4,
-                                          }}
-                                        >
-                                          {reminderColor(note.reminder_at) === RED ? "Due" : "Reminder"}
-                                        </span>
-                                      )}
-                                    </div>
-                                  )}
-
-                                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT, marginTop: "auto" }}>
-                                    {edited ? `Updated ${formatNoteTimestamp(note.updated_at)}` : `Created ${formatNoteTimestamp(note.created_at)}`}
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()
-                )}
-              </div>
-            )}
+            {view === "notes" && renderNotesScreen()}
 
             {view === "clients" && (
               <div>
@@ -8977,84 +9202,52 @@ export default function CalorieTrackerApp() {
               </div>
             )}
 
-            {view === "chat" && (
-              <div style={panelStyle}>
-                <SectionTitle>Chat</SectionTitle>
-                {clientsLoading ? (
-                  <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
-                ) : clientsError ? (
-                  <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                    {clientsError}
-                  </div>
-                ) : activePlanClients.length === 0 ? (
-                  <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any active clients yet.</div>
-                ) : (
-                  <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
-                    <div
-                      style={{
-                        width: 220,
-                        flexShrink: 0,
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 4,
-                        maxHeight: 480,
-                        overflowY: "auto",
-                      }}
-                    >
-                      {activePlanClients.map((c) => {
-                        const unread = chatUnreadByClient[c.id] || 0;
-                        const selected = chatSelectedClientId === c.id;
-                        return (
-                          <button
-                            key={c.id}
-                            onClick={() => setChatSelectedClientId(c.id)}
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 8,
-                              padding: "9px 12px",
-                              borderRadius: 4,
-                              border: `1px solid ${selected ? TEAL : GRID}`,
-                              background: selected ? TEAL_SOFT : PANEL,
-                              color: selected ? TEAL : INK,
-                              fontFamily: "'Space Grotesk', sans-serif",
-                              fontSize: 13,
-                              fontWeight: 600,
-                              cursor: "pointer",
-                              textAlign: "left",
-                            }}
-                          >
-                            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {c.name}
-                            </span>
-                            {unread > 0 && <UnreadBadge count={unread} />}
-                          </button>
-                        );
-                      })}
-                    </div>
+            {view === "chat" && (() => {
+              // The owner (if any) is pinned above the active clients.
+              const peers = [
+                ...(chatOwner ? [{ id: chatOwner.id, name: chatOwner.name, tag: "Owner" }] : []),
+                ...activePlanClients.map((c) => ({ id: c.id, name: c.name })),
+              ];
+              const selectedPeer = peers.find((p) => p.id === chatPeerId);
 
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      {chatSelectedClientId ? (
+              return (
+                <div style={panelStyle}>
+                  <SectionTitle>Chat</SectionTitle>
+                  {clientsLoading && peers.length === 0 ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
+                  ) : clientsError && peers.length === 0 ? (
+                    <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                      {clientsError}
+                    </div>
+                  ) : peers.length === 0 ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any active clients yet.</div>
+                  ) : (
+                    <ChatLayout
+                      peers={peers}
+                      selectedId={chatPeerId}
+                      onSelect={setChatPeerId}
+                      unreadById={chatUnreadByClient}
+                      emptyLabel="Select a conversation."
+                    >
+                      {selectedPeer && (
                         <ChatThread
                           messages={chatMessages}
                           loading={chatLoading}
                           error={chatError}
                           currentUserId={session && session.user.id}
-                          headerLabel={(clients.find((c) => c.id === chatSelectedClientId) || {}).name}
+                          headerLabel={selectedPeer.name}
                           input={chatInput}
                           onInputChange={setChatInput}
-                          onSend={() => sendChatMessage(chatSelectedClientId)}
+                          onSend={() => sendChatMessage(chatPeerId)}
                           sending={chatSending}
                           sendError={chatSendError}
                         />
-                      ) : (
-                        <div style={{ fontSize: 12, color: INK_SOFT }}>Select a client to view your conversation.</div>
                       )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
+                    </ChatLayout>
+                  )}
+                </div>
+              );
+            })()}
 
             {view === "notifications" && (() => {
               const byEvent = notifView === "byEvent";
@@ -9595,6 +9788,9 @@ export default function CalorieTrackerApp() {
             items={[
               { id: "home", label: "Home", icon: Home },
               { id: "users", label: "Users", icon: Users },
+              { id: "clients", label: "Clients", icon: ClipboardList },
+              { id: "chat", label: "Chat", icon: MessageSquare, badge: chatUnreadTotal },
+              { id: "notes", label: "Notes", icon: StickyNote },
               { id: "account", label: "Account", icon: User },
             ]}
             view={view}
@@ -9603,23 +9799,206 @@ export default function CalorieTrackerApp() {
 
           <div style={{ flex: 1, minWidth: 0 }}>
             {view === "home" && (
-              <HomeCard title="Your coaches" accent={TEAL} state={ownerCoaches}>
-                {(coaches) =>
-                  coaches.length === 0 ? (
-                    <HomeEmptyState>You don't have any coaches yet. Add one from Users.</HomeEmptyState>
-                  ) : (
-                    <div>
-                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700, color: INK }}>
-                        {coaches.length}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16 }}>
+                <HomeCard title="Your coaches" accent={TEAL} state={ownerCoaches}>
+                  {(coaches) =>
+                    coaches.length === 0 ? (
+                      <HomeEmptyState>You don't have any coaches yet. Add one from Users.</HomeEmptyState>
+                    ) : (
+                      <div>
+                        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700, color: INK }}>
+                          {coaches.length}
+                        </div>
+                        <div style={{ fontSize: 12.5, color: INK_SOFT, marginTop: 4 }}>
+                          {COACH_STATUSES.map((st) => `${coaches.filter((c) => c.status === st).length} ${st}`).join(", ")}
+                        </div>
                       </div>
-                      <div style={{ fontSize: 12.5, color: INK_SOFT, marginTop: 4 }}>
-                        {COACH_STATUSES.map((st) => `${coaches.filter((c) => c.status === st).length} ${st}`).join(", ")}
+                    )
+                  }
+                </HomeCard>
+                <HomeCard title="Clients" accent={TEAL} state={ownerClients}>
+                  {(ownerClientRows) =>
+                    ownerClientRows.length === 0 ? (
+                      <HomeEmptyState>No clients yet.</HomeEmptyState>
+                    ) : (
+                      <div>
+                        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700, color: INK }}>
+                          {ownerClientRows.length}
+                        </div>
+                        <div style={{ fontSize: 12.5, color: INK_SOFT, marginTop: 4 }}>
+                          {COACH_STATUSES.map((st) => `${ownerClientRows.filter((c) => c.status === st).length} ${st}`).join(", ")}
+                        </div>
+                        <button onClick={() => setView("clients")} style={{ ...linkButtonStyle, marginTop: 10 }}>
+                          View all clients →
+                        </button>
                       </div>
-                    </div>
-                  )
-                }
-              </HomeCard>
+                    )
+                  }
+                </HomeCard>
+                {renderRemindersCard()}
+              </div>
             )}
+
+            {view === "clients" && (() => {
+              const activeCoaches = (ownerCoaches.data || []).filter((c) => c.status === "active");
+              const query = ownerClientsSearch.trim().toLowerCase();
+              const rows = (ownerClients.data || []).filter(
+                (c) =>
+                  (ownerClientsFilter === "all" || c.status === ownerClientsFilter) &&
+                  (!query || `${c.name}\n${c.email}\n${c.coachName}`.toLowerCase().includes(query))
+              );
+
+              return (
+                <div>
+                  <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, marginBottom: 16 }}>
+                    <div style={{ position: "relative", flex: 1, minWidth: 200, maxWidth: 320 }}>
+                      <Search size={14} color={INK_SOFT} style={{ position: "absolute", left: 10, top: 10 }} />
+                      <input
+                        type="text"
+                        placeholder="Search name, email or coach"
+                        value={ownerClientsSearch}
+                        onChange={(e) => setOwnerClientsSearch(e.target.value)}
+                        style={{ ...inputStyle, marginBottom: 0, paddingLeft: 30 }}
+                      />
+                    </div>
+                    <select
+                      value={ownerClientsFilter}
+                      onChange={(e) => setOwnerClientsFilter(e.target.value)}
+                      style={{ ...inputStyle, width: 160, marginBottom: 0 }}
+                      aria-label="Filter by status"
+                    >
+                      <option value="all">All statuses</option>
+                      {COACH_STATUSES.map((st) => (
+                        <option key={st} value={st}>
+                          {coachStatusMeta(st).label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {ownerClientsActionError && (
+                    <div style={{ marginBottom: 12, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                      {ownerClientsActionError}
+                    </div>
+                  )}
+
+                  {ownerClients.status === "error" ? (
+                    <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                      {ownerClients.error}
+                    </div>
+                  ) : ownerClients.data == null ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
+                  ) : ownerClients.data.length === 0 ? (
+                    <div style={{ ...panelStyle, fontSize: 13, color: INK_SOFT }}>Your coaches don't have any clients yet.</div>
+                  ) : rows.length === 0 ? (
+                    <div style={{ fontSize: 12.5, color: INK_SOFT }}>No clients match these filters.</div>
+                  ) : (
+                    <div style={{ ...panelStyle, padding: 0, overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr>
+                            <th style={thStyle}>Name</th>
+                            <th style={thStyle}>Email</th>
+                            <th style={thStyle}>Coach</th>
+                            <th style={thStyle}>Status</th>
+                            <th style={thStyle}>First login</th>
+                            <th style={thStyle}></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rows.map((c) => {
+                            const busy = ownerClientBusyId === c.id;
+                            // The current coach stays listed even if they're no
+                            // longer active, so the select shows who it is.
+                            const coachOptions = activeCoaches.some((co) => co.id === c.coachId)
+                              ? activeCoaches
+                              : [{ id: c.coachId, name: c.coachName, status: "inactive" }, ...activeCoaches];
+                            return (
+                              <tr key={c.id} style={{ borderTop: `1px solid ${GRID}` }}>
+                                <td style={tdStyle}>{c.name}</td>
+                                <td style={{ ...tdStyle, color: INK_SOFT }}>{c.email || "—"}</td>
+                                <td style={tdStyle}>
+                                  <select
+                                    value={c.coachId || ""}
+                                    onChange={(e) => ownerAssignClient(c, e.target.value)}
+                                    disabled={busy || activeCoaches.length === 0}
+                                    style={{ ...inputStyle, marginBottom: 0, minWidth: 150, padding: "5px 8px" }}
+                                    aria-label={`Coach for ${c.name}`}
+                                  >
+                                    {coachOptions.map((co) => (
+                                      <option key={co.id} value={co.id} disabled={co.status !== "active"}>
+                                        {co.name}
+                                        {co.status !== "active" ? " (not active)" : ""}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </td>
+                                <td style={tdStyle}>
+                                  <CoachStatusBadge status={c.status} />
+                                </td>
+                                <td style={{ ...tdStyle, color: INK_SOFT }}>{c.firstLoginAt ? formatNoteTimestamp(c.firstLoginAt) : "Never"}</td>
+                                <td style={tdStyle}>
+                                  <button onClick={() => ownerToggleClientStatus(c)} style={secondaryButtonStyle} disabled={busy}>
+                                    {busy ? "Saving…" : c.status === "inactive" ? "Reactivate" : "Deactivate"}
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {view === "chat" && (() => {
+              const peers = (ownerCoaches.data || [])
+                .filter((c) => c.status !== "inactive")
+                .map((c) => ({ id: c.id, name: c.name }));
+              const selectedPeer = peers.find((p) => p.id === chatPeerId);
+
+              return (
+                <div style={panelStyle}>
+                  <SectionTitle>Chat</SectionTitle>
+                  {ownerCoaches.status === "error" && peers.length === 0 ? (
+                    <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                      {ownerCoaches.error}
+                    </div>
+                  ) : ownerCoaches.data == null ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>Loading coaches…</div>
+                  ) : peers.length === 0 ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any active coaches yet.</div>
+                  ) : (
+                    <ChatLayout
+                      peers={peers}
+                      selectedId={chatPeerId}
+                      onSelect={setChatPeerId}
+                      unreadById={chatUnreadByClient}
+                      emptyLabel="Select a coach to view your conversation."
+                    >
+                      {selectedPeer && (
+                        <ChatThread
+                          messages={chatMessages}
+                          loading={chatLoading}
+                          error={chatError}
+                          currentUserId={session && session.user.id}
+                          headerLabel={selectedPeer.name}
+                          input={chatInput}
+                          onInputChange={setChatInput}
+                          onSend={() => sendChatMessage(chatPeerId)}
+                          sending={chatSending}
+                          sendError={chatSendError}
+                        />
+                      )}
+                    </ChatLayout>
+                  )}
+                </div>
+              );
+            })()}
+
+            {view === "notes" && renderNotesScreen()}
 
             {view === "users" && (
               <div>
@@ -9819,8 +10198,326 @@ export default function CalorieTrackerApp() {
           </div>
         </div>
       )}
+
+      {session && (roleId === 2 || roleId === 4) && (
+        <NoteReminderAlerts
+          userId={session.user.id}
+          muted={reminderSoundMuted}
+          refreshKey={reminderRefreshKey}
+          onDueDismissed={markReminderDismissedLocally}
+        />
+      )}
     </div>
   );
+}
+
+const REMINDER_LEAD_MS = 60 * 60 * 1000;
+const REMINDER_TICK_MS = 15 * 1000;
+const REMINDER_REFETCH_MS = 5 * 60 * 1000;
+
+// Watches the signed-in user's note reminders while the app is open and
+// shows each one twice: 1 hour before reminder_at ("pre") and at it
+// ("due"). Each pop-up is claimed with a conditional update (where
+// <column> is null), so across tabs and devices only the first to claim it
+// shows it. A reminder already past due shows only the due pop-up; one set
+// less than an hour ahead (reminder_set_at) skips the pre pop-up. Nothing
+// fires while the app is closed.
+function NoteReminderAlerts({ userId, muted, refreshKey, onDueDismissed }) {
+  const [popups, setPopups] = useState([]);
+  const pendingRef = useRef([]);
+  const claimingRef = useRef(new Set());
+  const mutedRef = useRef(muted);
+  const onDueDismissedRef = useRef(onDueDismissed);
+  mutedRef.current = muted;
+  onDueDismissedRef.current = onDueDismissed;
+
+  useEffect(() => {
+    let active = true;
+
+    async function claim(note, kind) {
+      const column = kind === "due" ? "due_reminder_shown_at" : "pre_reminder_shown_at";
+      const { data, error } = await supabase
+        .from("coach_notes")
+        .update({ [column]: new Date().toISOString() })
+        .eq("id", note.id)
+        .eq("reminder_at", note.reminder_at)
+        .eq("reminder_dismissed", false)
+        .is(column, null)
+        .select("id, title, content, reminder_at");
+      if (error) throw error;
+      return data && data.length > 0 ? data[0] : null;
+    }
+
+    async function evaluate() {
+      const now = Date.now();
+      const attempts = [];
+      for (const note of pendingRef.current) {
+        const dueMs = new Date(note.reminder_at).getTime();
+        if (Number.isNaN(dueMs)) continue;
+        const setMs = note.reminder_set_at ? new Date(note.reminder_set_at).getTime() : null;
+        const wantsPre = setMs === null || dueMs - setMs >= REMINDER_LEAD_MS;
+
+        let kind = null;
+        if (now >= dueMs) kind = "due";
+        else if (now >= dueMs - REMINDER_LEAD_MS && wantsPre && !note.pre_reminder_shown_at) kind = "pre";
+        if (!kind) continue;
+
+        // Includes reminder_at so a rescheduled reminder can fire again.
+        const key = `${note.id}:${kind}:${note.reminder_at}`;
+        if (claimingRef.current.has(key)) continue;
+        claimingRef.current.add(key);
+        attempts.push(
+          claim(note, kind).then(
+            (row) => {
+              // Won or lost, this pop-up is settled for this note.
+              if (kind === "due") pendingRef.current = pendingRef.current.filter((n) => n.id !== note.id);
+              else note.pre_reminder_shown_at = note.pre_reminder_shown_at || new Date().toISOString();
+              return row ? { key, noteId: row.id, kind, title: noteDisplayTitle(row), reminderAt: row.reminder_at } : null;
+            },
+            (err) => {
+              // Network or server error: let the next tick retry.
+              console.error("Couldn't claim note reminder:", err);
+              claimingRef.current.delete(key);
+              return null;
+            }
+          )
+        );
+      }
+      if (attempts.length === 0) return;
+
+      const won = (await Promise.all(attempts)).filter(Boolean);
+      if (!active || won.length === 0) return;
+
+      setPopups((prev) => {
+        // A due pop-up replaces that note's pre pop-up if it's still open.
+        const dueIds = new Set(won.filter((p) => p.kind === "due").map((p) => p.noteId));
+        return [...won, ...prev.filter((p) => !(p.kind === "pre" && dueIds.has(p.noteId)))];
+      });
+      if (!mutedRef.current) playReminderChime();
+      showSystemReminderNotification(won);
+    }
+
+    async function refetch() {
+      const { data, error } = await supabase
+        .from("coach_notes")
+        .select("id, title, content, reminder_at, reminder_set_at, pre_reminder_shown_at, due_reminder_shown_at")
+        .eq("user_id", userId)
+        .eq("reminder_dismissed", false)
+        .not("reminder_at", "is", null)
+        .is("due_reminder_shown_at", null)
+        .order("reminder_at", { ascending: true })
+        .limit(200);
+      if (!active) return;
+      if (error) {
+        console.error("Couldn't load note reminders:", error);
+        return;
+      }
+      pendingRef.current = data || [];
+      evaluate();
+    }
+
+    // Background tabs throttle timers (about once a minute in Chrome), so a
+    // reminder can fire up to a minute late there; coming back to the tab
+    // re-checks right away.
+    function onVisible() {
+      if (document.visibilityState === "visible") refetch();
+    }
+
+    refetch();
+    const tick = setInterval(evaluate, REMINDER_TICK_MS);
+    const refetchTimer = setInterval(refetch, REMINDER_REFETCH_MS);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", refetch);
+    return () => {
+      active = false;
+      clearInterval(tick);
+      clearInterval(refetchTimer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", refetch);
+    };
+  }, [userId, refreshKey]);
+
+  // Browsers only allow audio after the user has interacted with the page,
+  // so unlock the audio context on the first click or key press.
+  useEffect(() => {
+    function unlock() {
+      const ctx = getReminderAudioContext();
+      if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {});
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    }
+    window.addEventListener("pointerdown", unlock);
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
+
+  function close(popup) {
+    setPopups((prev) => prev.filter((p) => p.key !== popup.key));
+    if (popup.kind !== "due") return;
+    // Closing the due pop-up dismisses the reminder (it leaves the Home card).
+    supabase
+      .from("coach_notes")
+      .update({ reminder_dismissed: true })
+      .eq("id", popup.noteId)
+      .then(({ error }) => {
+        if (error) console.error("Couldn't dismiss reminder:", error);
+        else onDueDismissedRef.current(popup.noteId);
+      });
+  }
+
+  if (popups.length === 0) return null;
+
+  return (
+    <div
+      role="region"
+      aria-label="Reminders"
+      aria-live="assertive"
+      style={{
+        position: "fixed",
+        right: 16,
+        bottom: 16,
+        zIndex: 1100,
+        width: "min(360px, calc(100vw - 32px))",
+        maxHeight: "calc(100vh - 32px)",
+        overflowY: "auto",
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      {popups.length > 1 && (
+        <button onClick={() => popups.forEach(close)} style={{ ...secondaryButtonStyle, alignSelf: "flex-end", background: PANEL }}>
+          Close all ({popups.length})
+        </button>
+      )}
+      {popups.map((popup) => {
+        const due = popup.kind === "due";
+        const at = new Date(popup.reminderAt);
+        const time = at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+        const late = due && Date.now() - at.getTime() > 5 * 60 * 1000;
+        return (
+          <div
+            key={popup.key}
+            role="alert"
+            style={{
+              ...panelStyle,
+              padding: "0.9rem 1rem",
+              borderLeft: `3px solid ${due ? RED : AMBER}`,
+              boxShadow: "0 6px 24px rgba(27, 36, 48, 0.18)",
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 10,
+            }}
+          >
+            <Bell size={16} color={due ? RED : AMBER} style={{ flexShrink: 0, marginTop: 2 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: due ? RED : AMBER, marginBottom: 4 }}>
+                {due ? (late ? `Was due ${formatNoteTimestamp(popup.reminderAt)}` : `Due now · ${time}`) : `In 1 hour · ${time}`}
+              </div>
+              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 600, color: INK, overflowWrap: "anywhere" }}>
+                {popup.title}
+              </div>
+            </div>
+            <button
+              onClick={() => close(popup)}
+              aria-label={`Close reminder for ${popup.title}`}
+              title="Close"
+              style={{ ...iconButtonStyle, border: `1px solid ${GRID}`, borderRadius: 4, padding: 4, color: INK_SOFT }}
+            >
+              <X size={14} />
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+let reminderAudioContext = null;
+
+function getReminderAudioContext() {
+  if (typeof window === "undefined") return null;
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return null;
+  if (!reminderAudioContext) {
+    try {
+      reminderAudioContext = new AudioCtx();
+    } catch (err) {
+      return null;
+    }
+  }
+  return reminderAudioContext;
+}
+
+// A short, soft two-note chime generated with Web Audio (no audio file).
+// If the browser hasn't allowed audio yet it stays silent; the pop-up
+// shows either way.
+function playReminderChime() {
+  const ctx = getReminderAudioContext();
+  if (!ctx) return;
+
+  const play = () => {
+    const start = ctx.currentTime + 0.02;
+    [659.25, 880].forEach((freq, i) => {
+      const t = start + i * 0.18;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.12, t + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.95);
+    });
+  };
+
+  if (ctx.state === "running") {
+    play();
+    return;
+  }
+  // A blocked resume() can stay pending until the next click; don't play a
+  // stale chime then.
+  const requestedAt = Date.now();
+  ctx
+    .resume()
+    .then(() => {
+      if (ctx.state === "running" && Date.now() - requestedAt < 2000) play();
+    })
+    .catch(() => {});
+}
+
+// Only when the tab is hidden and the user turned notifications on from the
+// Notes screen; the in-app pop-up covers the visible case.
+function showSystemReminderNotification(popups) {
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  if (document.visibilityState === "visible") return;
+
+  const title = popups.length === 1 ? (popups[0].kind === "due" ? "Reminder due" : "Reminder in 1 hour") : `${popups.length} reminders`;
+  const body = popups.map((p) => p.title).join("\n");
+  const options = { body, tag: "note-reminders", icon: "/icons/pwa-192x192.png" };
+
+  const fallback = () => {
+    try {
+      const n = new Notification(title, options);
+      n.onclick = () => window.focus();
+    } catch (err) {
+      console.error("Couldn't show notification:", err);
+    }
+  };
+
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker
+      .getRegistration()
+      .then((reg) => (reg ? reg.showNotification(title, options) : fallback()))
+      .catch(fallback);
+  } else {
+    fallback();
+  }
 }
 
 // Left-hand nav used by the coach and owner layouts. An item's optional
@@ -10582,6 +11279,7 @@ function CoachMealLog({ clientName, date, onDateChange, onBack, day, trend }) {
 }
 
 const REMINDER_WINDOW_MS = 48 * 60 * 60 * 1000;
+const HOME_REMINDERS_SHOWN = 5;
 
 // "YYYY-MM-DDTHH:MM" in local time, the format <input type="datetime-local"> expects.
 function toDateTimeLocalValue(d) {
@@ -10641,6 +11339,60 @@ function formatChatTime(isoString) {
 
 const CHAT_INPUT_MIN_HEIGHT = 38;
 const CHAT_INPUT_MAX_HEIGHT = 110; // ~4-5 lines before internal scrolling kicks in
+
+// Conversation list on the left, the open thread on the right. Used by the
+// coach (owner + clients) and owner (coaches) Chat screens.
+function ChatLayout({ peers, selectedId, onSelect, unreadById, emptyLabel, children }) {
+  return (
+    <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+      <div
+        style={{
+          width: 220,
+          flexShrink: 0,
+          display: "flex",
+          flexDirection: "column",
+          gap: 4,
+          maxHeight: 480,
+          overflowY: "auto",
+        }}
+      >
+        {peers.map((p) => {
+          const unread = unreadById[p.id] || 0;
+          const selected = selectedId === p.id;
+          return (
+            <button
+              key={p.id}
+              onClick={() => onSelect(p.id)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "9px 12px",
+                borderRadius: 4,
+                border: `1px solid ${selected ? TEAL : GRID}`,
+                background: selected ? TEAL_SOFT : PANEL,
+                color: selected ? TEAL : INK,
+                fontFamily: "'Space Grotesk', sans-serif",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: "pointer",
+                textAlign: "left",
+              }}
+            >
+              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+              {p.tag && (
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: INK_SOFT, textTransform: "uppercase" }}>{p.tag}</span>
+              )}
+              {unread > 0 && <UnreadBadge count={unread} />}
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{ flex: 1, minWidth: 0 }}>{children || <div style={{ fontSize: 12, color: INK_SOFT }}>{emptyLabel}</div>}</div>
+    </div>
+  );
+}
 
 function ChatThread({ messages, loading, error, currentUserId, headerLabel, input, onInputChange, onSend, sending, sendError }) {
   const scrollRef = useRef(null);

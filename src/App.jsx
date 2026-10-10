@@ -885,6 +885,13 @@ export default function CalorieTrackerApp() {
   // Owner Home / Users: this owner's coaches (owner_coaches), same
   // { status, data, error } shape as the coach Home cards.
   const [ownerCoaches, setOwnerCoaches] = useState({ status: "loading", data: null, error: null });
+  // Owner Clients screen: every client of this owner's coaches, from the
+  // owner_list_clients() RPC (name, email, coach, link status, first login).
+  const [ownerClients, setOwnerClients] = useState({ status: "loading", data: null, error: null });
+  const [ownerClientsSearch, setOwnerClientsSearch] = useState("");
+  const [ownerClientsFilter, setOwnerClientsFilter] = useState("all");
+  const [ownerClientBusyId, setOwnerClientBusyId] = useState(null);
+  const [ownerClientsActionError, setOwnerClientsActionError] = useState(null);
   const [newCoachFormOpen, setNewCoachFormOpen] = useState(false);
   const [newCoachName, setNewCoachName] = useState("");
   const [newCoachEmail, setNewCoachEmail] = useState("");
@@ -978,7 +985,11 @@ export default function CalorieTrackerApp() {
 
   const [ownPlanStatus, setOwnPlanStatus] = useState("active");
 
-  const [chatSelectedClientId, setChatSelectedClientId] = useState(null);
+  // The other side of the open chat thread: a client (coach view), the
+  // owner (coach view), or a coach (owner view). Clients use myCoachId.
+  const [chatPeerId, setChatPeerId] = useState(null);
+  // Coach view: the owner they belong to, pinned at the top of their chat list.
+  const [chatOwner, setChatOwner] = useState(null);
   const [myCoachId, setMyCoachId] = useState(null);
   const [myCoachName, setMyCoachName] = useState(null);
   const [myCoachLoading, setMyCoachLoading] = useState(false);
@@ -2563,6 +2574,78 @@ export default function CalorieTrackerApp() {
     }
   }
 
+  async function loadOwnerClients() {
+    if (!session) return;
+
+    setOwnerClients((prev) => ({ status: "loading", data: prev.data, error: null }));
+
+    try {
+      const { data, error } = await supabase.rpc("owner_list_clients");
+      if (error) throw error;
+      setOwnerClients({
+        status: "ready",
+        data: (data || []).map((row) => ({
+          id: row.client_id,
+          name: row.name || "(name unavailable)",
+          email: row.email || "",
+          status: COACH_STATUSES.includes(row.status) ? row.status : "invited",
+          coachId: row.coach_id,
+          coachName: row.coach_name || "(name unavailable)",
+          firstLoginAt: row.first_login_at,
+        })),
+        error: null,
+      });
+    } catch (err) {
+      setOwnerClients({ status: "error", data: null, error: err && err.message ? err.message : "Couldn't load your clients." });
+    }
+  }
+
+  async function ownerToggleClientStatus(client) {
+    // Same transitions as the coach's toggle: deactivate from invited or
+    // active, reactivate always to active.
+    const nextStatus = client.status === "inactive" ? "active" : "inactive";
+
+    setOwnerClientBusyId(client.id);
+    setOwnerClientsActionError(null);
+
+    try {
+      const { error } = await supabase.rpc("owner_set_client_status", { p_client_id: client.id, p_status: nextStatus });
+      if (error) throw error;
+      loadOwnerClients();
+      loadOwnerCoaches();
+    } catch (err) {
+      setOwnerClientsActionError(err && err.message ? err.message : "Couldn't update this client's status. Please try again.");
+    } finally {
+      setOwnerClientBusyId(null);
+    }
+  }
+
+  async function ownerAssignClient(client, coachId) {
+    if (!coachId || coachId === client.coachId) return;
+    const newCoach = (ownerCoaches.data || []).find((c) => c.id === coachId);
+    const newCoachName = newCoach ? newCoach.name : "the new coach";
+    const confirmed = window.confirm(
+      `Move ${client.name} from ${client.coachName} to ${newCoachName}?\n\n` +
+        `Their sent plan and targets stay. Any unsent plan changes, their plan type, and ${client.coachName}'s notification rules for them are removed. ` +
+        `${client.coachName} will no longer see their data.`
+    );
+    if (!confirmed) return;
+
+    setOwnerClientBusyId(client.id);
+    setOwnerClientsActionError(null);
+
+    try {
+      const { error } = await supabase.rpc("owner_assign_client", { p_client_id: client.id, p_coach_id: coachId });
+      if (error) throw error;
+      loadOwnerClients();
+      loadOwnerCoaches();
+    } catch (err) {
+      setOwnerClientsActionError(err && err.message ? err.message : "Couldn't move this client. Please try again.");
+    } finally {
+      setOwnerClientBusyId(null);
+    }
+  }
+
   function startNewCoach() {
     setNewCoachName("");
     setNewCoachEmail("");
@@ -2633,7 +2716,7 @@ export default function CalorieTrackerApp() {
     } catch (_) {
       // Keep the generic wording if the count itself can't be read.
     }
-    return `This coach has ${countLabel} client(s). Remove them before ${action} this coach.`;
+    return `This coach has ${countLabel} client(s). Move them to another coach (Clients) or remove them before ${action} this coach.`;
   }
 
   function startEditCoach(coach) {
@@ -3125,7 +3208,7 @@ export default function CalorieTrackerApp() {
   }
 
   function openChatWithClient(clientId) {
-    setChatSelectedClientId(clientId);
+    setChatPeerId(clientId);
     setView("chat");
   }
 
@@ -3844,6 +3927,15 @@ export default function CalorieTrackerApp() {
     if (roleId === 4 && (view === "home" || view === "users")) {
       loadOwnerCoaches();
     }
+    if (roleId === 4 && (view === "home" || view === "clients")) {
+      loadOwnerClients();
+    }
+    if (roleId === 4 && (view === "clients" || view === "chat")) {
+      loadOwnerCoaches();
+    }
+    if (roleId === 2 && view === "chat") {
+      loadChatOwner();
+    }
     if (roleId === 4 && view === "home") {
       setHomeReminders((prev) => ({ status: "loading", data: prev.data, error: null }));
       loadHomeReminders();
@@ -3852,6 +3944,9 @@ export default function CalorieTrackerApp() {
   }, [view, roleId, session]);
 
   useEffect(() => {
+    if (view !== "clients") {
+      setOwnerClientsActionError(null);
+    }
     if (view !== "users") {
       setNewCoachFormOpen(false);
       setEditingCoachId(null);
@@ -4040,7 +4135,7 @@ export default function CalorieTrackerApp() {
 
   useEffect(() => {
     if (view !== "chat") {
-      setChatSelectedClientId(null);
+      setChatPeerId(null);
       setChatMessages([]);
       setChatError(null);
       setChatInput("");
@@ -4077,7 +4172,7 @@ export default function CalorieTrackerApp() {
     if (view !== "chat" || !session) return;
 
     const myId = session.user.id;
-    const otherId = roleId === 2 ? chatSelectedClientId : myCoachId;
+    const otherId = roleId === 2 || roleId === 4 ? chatPeerId : myCoachId;
     if (!otherId) {
       setChatMessages([]);
       return;
@@ -4112,7 +4207,32 @@ export default function CalorieTrackerApp() {
       supabase.removeChannel(channel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, roleId, chatSelectedClientId, myCoachId, session]);
+  }, [view, roleId, chatPeerId, myCoachId, session]);
+
+  // Coach view: the owner they belong to (owner_coaches), for the pinned
+  // chat thread. Coaches can already read their owner's user_info row.
+  async function loadChatOwner() {
+    if (!session) return;
+
+    try {
+      const { data: link, error: linkErr } = await supabase
+        .from("owner_coaches")
+        .select("owner_id")
+        .eq("coach_id", session.user.id)
+        .maybeSingle();
+      if (linkErr) throw linkErr;
+      if (!link || !link.owner_id) {
+        setChatOwner(null);
+        return;
+      }
+
+      const { data: owner } = await supabase.from("user_info").select("name").eq("id", link.owner_id).maybeSingle();
+      setChatOwner({ id: link.owner_id, name: (owner && owner.name) || "Owner" });
+    } catch (err) {
+      console.error("Couldn't load your owner for chat:", err);
+      setChatOwner(null);
+    }
+  }
 
   async function loadMyCoach() {
     if (!session) return;
@@ -9082,84 +9202,52 @@ export default function CalorieTrackerApp() {
               </div>
             )}
 
-            {view === "chat" && (
-              <div style={panelStyle}>
-                <SectionTitle>Chat</SectionTitle>
-                {clientsLoading ? (
-                  <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
-                ) : clientsError ? (
-                  <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                    {clientsError}
-                  </div>
-                ) : activePlanClients.length === 0 ? (
-                  <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any active clients yet.</div>
-                ) : (
-                  <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
-                    <div
-                      style={{
-                        width: 220,
-                        flexShrink: 0,
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 4,
-                        maxHeight: 480,
-                        overflowY: "auto",
-                      }}
-                    >
-                      {activePlanClients.map((c) => {
-                        const unread = chatUnreadByClient[c.id] || 0;
-                        const selected = chatSelectedClientId === c.id;
-                        return (
-                          <button
-                            key={c.id}
-                            onClick={() => setChatSelectedClientId(c.id)}
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 8,
-                              padding: "9px 12px",
-                              borderRadius: 4,
-                              border: `1px solid ${selected ? TEAL : GRID}`,
-                              background: selected ? TEAL_SOFT : PANEL,
-                              color: selected ? TEAL : INK,
-                              fontFamily: "'Space Grotesk', sans-serif",
-                              fontSize: 13,
-                              fontWeight: 600,
-                              cursor: "pointer",
-                              textAlign: "left",
-                            }}
-                          >
-                            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {c.name}
-                            </span>
-                            {unread > 0 && <UnreadBadge count={unread} />}
-                          </button>
-                        );
-                      })}
-                    </div>
+            {view === "chat" && (() => {
+              // The owner (if any) is pinned above the active clients.
+              const peers = [
+                ...(chatOwner ? [{ id: chatOwner.id, name: chatOwner.name, tag: "Owner" }] : []),
+                ...activePlanClients.map((c) => ({ id: c.id, name: c.name })),
+              ];
+              const selectedPeer = peers.find((p) => p.id === chatPeerId);
 
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      {chatSelectedClientId ? (
+              return (
+                <div style={panelStyle}>
+                  <SectionTitle>Chat</SectionTitle>
+                  {clientsLoading && peers.length === 0 ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
+                  ) : clientsError && peers.length === 0 ? (
+                    <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                      {clientsError}
+                    </div>
+                  ) : peers.length === 0 ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any active clients yet.</div>
+                  ) : (
+                    <ChatLayout
+                      peers={peers}
+                      selectedId={chatPeerId}
+                      onSelect={setChatPeerId}
+                      unreadById={chatUnreadByClient}
+                      emptyLabel="Select a conversation."
+                    >
+                      {selectedPeer && (
                         <ChatThread
                           messages={chatMessages}
                           loading={chatLoading}
                           error={chatError}
                           currentUserId={session && session.user.id}
-                          headerLabel={(clients.find((c) => c.id === chatSelectedClientId) || {}).name}
+                          headerLabel={selectedPeer.name}
                           input={chatInput}
                           onInputChange={setChatInput}
-                          onSend={() => sendChatMessage(chatSelectedClientId)}
+                          onSend={() => sendChatMessage(chatPeerId)}
                           sending={chatSending}
                           sendError={chatSendError}
                         />
-                      ) : (
-                        <div style={{ fontSize: 12, color: INK_SOFT }}>Select a client to view your conversation.</div>
                       )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
+                    </ChatLayout>
+                  )}
+                </div>
+              );
+            })()}
 
             {view === "notifications" && (() => {
               const byEvent = notifView === "byEvent";
@@ -9700,6 +9788,8 @@ export default function CalorieTrackerApp() {
             items={[
               { id: "home", label: "Home", icon: Home },
               { id: "users", label: "Users", icon: Users },
+              { id: "clients", label: "Clients", icon: ClipboardList },
+              { id: "chat", label: "Chat", icon: MessageSquare, badge: chatUnreadTotal },
               { id: "notes", label: "Notes", icon: StickyNote },
               { id: "account", label: "Account", icon: User },
             ]}
@@ -9726,9 +9816,187 @@ export default function CalorieTrackerApp() {
                     )
                   }
                 </HomeCard>
+                <HomeCard title="Clients" accent={TEAL} state={ownerClients}>
+                  {(ownerClientRows) =>
+                    ownerClientRows.length === 0 ? (
+                      <HomeEmptyState>No clients yet.</HomeEmptyState>
+                    ) : (
+                      <div>
+                        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700, color: INK }}>
+                          {ownerClientRows.length}
+                        </div>
+                        <div style={{ fontSize: 12.5, color: INK_SOFT, marginTop: 4 }}>
+                          {COACH_STATUSES.map((st) => `${ownerClientRows.filter((c) => c.status === st).length} ${st}`).join(", ")}
+                        </div>
+                        <button onClick={() => setView("clients")} style={{ ...linkButtonStyle, marginTop: 10 }}>
+                          View all clients →
+                        </button>
+                      </div>
+                    )
+                  }
+                </HomeCard>
                 {renderRemindersCard()}
               </div>
             )}
+
+            {view === "clients" && (() => {
+              const activeCoaches = (ownerCoaches.data || []).filter((c) => c.status === "active");
+              const query = ownerClientsSearch.trim().toLowerCase();
+              const rows = (ownerClients.data || []).filter(
+                (c) =>
+                  (ownerClientsFilter === "all" || c.status === ownerClientsFilter) &&
+                  (!query || `${c.name}\n${c.email}\n${c.coachName}`.toLowerCase().includes(query))
+              );
+
+              return (
+                <div>
+                  <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, marginBottom: 16 }}>
+                    <div style={{ position: "relative", flex: 1, minWidth: 200, maxWidth: 320 }}>
+                      <Search size={14} color={INK_SOFT} style={{ position: "absolute", left: 10, top: 10 }} />
+                      <input
+                        type="text"
+                        placeholder="Search name, email or coach"
+                        value={ownerClientsSearch}
+                        onChange={(e) => setOwnerClientsSearch(e.target.value)}
+                        style={{ ...inputStyle, marginBottom: 0, paddingLeft: 30 }}
+                      />
+                    </div>
+                    <select
+                      value={ownerClientsFilter}
+                      onChange={(e) => setOwnerClientsFilter(e.target.value)}
+                      style={{ ...inputStyle, width: 160, marginBottom: 0 }}
+                      aria-label="Filter by status"
+                    >
+                      <option value="all">All statuses</option>
+                      {COACH_STATUSES.map((st) => (
+                        <option key={st} value={st}>
+                          {coachStatusMeta(st).label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {ownerClientsActionError && (
+                    <div style={{ marginBottom: 12, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                      {ownerClientsActionError}
+                    </div>
+                  )}
+
+                  {ownerClients.status === "error" ? (
+                    <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                      {ownerClients.error}
+                    </div>
+                  ) : ownerClients.data == null ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>Loading clients…</div>
+                  ) : ownerClients.data.length === 0 ? (
+                    <div style={{ ...panelStyle, fontSize: 13, color: INK_SOFT }}>Your coaches don't have any clients yet.</div>
+                  ) : rows.length === 0 ? (
+                    <div style={{ fontSize: 12.5, color: INK_SOFT }}>No clients match these filters.</div>
+                  ) : (
+                    <div style={{ ...panelStyle, padding: 0, overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr>
+                            <th style={thStyle}>Name</th>
+                            <th style={thStyle}>Email</th>
+                            <th style={thStyle}>Coach</th>
+                            <th style={thStyle}>Status</th>
+                            <th style={thStyle}>First login</th>
+                            <th style={thStyle}></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rows.map((c) => {
+                            const busy = ownerClientBusyId === c.id;
+                            // The current coach stays listed even if they're no
+                            // longer active, so the select shows who it is.
+                            const coachOptions = activeCoaches.some((co) => co.id === c.coachId)
+                              ? activeCoaches
+                              : [{ id: c.coachId, name: c.coachName, status: "inactive" }, ...activeCoaches];
+                            return (
+                              <tr key={c.id} style={{ borderTop: `1px solid ${GRID}` }}>
+                                <td style={tdStyle}>{c.name}</td>
+                                <td style={{ ...tdStyle, color: INK_SOFT }}>{c.email || "—"}</td>
+                                <td style={tdStyle}>
+                                  <select
+                                    value={c.coachId || ""}
+                                    onChange={(e) => ownerAssignClient(c, e.target.value)}
+                                    disabled={busy || activeCoaches.length === 0}
+                                    style={{ ...inputStyle, marginBottom: 0, minWidth: 150, padding: "5px 8px" }}
+                                    aria-label={`Coach for ${c.name}`}
+                                  >
+                                    {coachOptions.map((co) => (
+                                      <option key={co.id} value={co.id} disabled={co.status !== "active"}>
+                                        {co.name}
+                                        {co.status !== "active" ? " (not active)" : ""}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </td>
+                                <td style={tdStyle}>
+                                  <CoachStatusBadge status={c.status} />
+                                </td>
+                                <td style={{ ...tdStyle, color: INK_SOFT }}>{c.firstLoginAt ? formatNoteTimestamp(c.firstLoginAt) : "Never"}</td>
+                                <td style={tdStyle}>
+                                  <button onClick={() => ownerToggleClientStatus(c)} style={secondaryButtonStyle} disabled={busy}>
+                                    {busy ? "Saving…" : c.status === "inactive" ? "Reactivate" : "Deactivate"}
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {view === "chat" && (() => {
+              const peers = (ownerCoaches.data || [])
+                .filter((c) => c.status !== "inactive")
+                .map((c) => ({ id: c.id, name: c.name }));
+              const selectedPeer = peers.find((p) => p.id === chatPeerId);
+
+              return (
+                <div style={panelStyle}>
+                  <SectionTitle>Chat</SectionTitle>
+                  {ownerCoaches.status === "error" && peers.length === 0 ? (
+                    <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                      {ownerCoaches.error}
+                    </div>
+                  ) : ownerCoaches.data == null ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>Loading coaches…</div>
+                  ) : peers.length === 0 ? (
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>You don't have any active coaches yet.</div>
+                  ) : (
+                    <ChatLayout
+                      peers={peers}
+                      selectedId={chatPeerId}
+                      onSelect={setChatPeerId}
+                      unreadById={chatUnreadByClient}
+                      emptyLabel="Select a coach to view your conversation."
+                    >
+                      {selectedPeer && (
+                        <ChatThread
+                          messages={chatMessages}
+                          loading={chatLoading}
+                          error={chatError}
+                          currentUserId={session && session.user.id}
+                          headerLabel={selectedPeer.name}
+                          input={chatInput}
+                          onInputChange={setChatInput}
+                          onSend={() => sendChatMessage(chatPeerId)}
+                          sending={chatSending}
+                          sendError={chatSendError}
+                        />
+                      )}
+                    </ChatLayout>
+                  )}
+                </div>
+              );
+            })()}
 
             {view === "notes" && renderNotesScreen()}
 
@@ -11071,6 +11339,60 @@ function formatChatTime(isoString) {
 
 const CHAT_INPUT_MIN_HEIGHT = 38;
 const CHAT_INPUT_MAX_HEIGHT = 110; // ~4-5 lines before internal scrolling kicks in
+
+// Conversation list on the left, the open thread on the right. Used by the
+// coach (owner + clients) and owner (coaches) Chat screens.
+function ChatLayout({ peers, selectedId, onSelect, unreadById, emptyLabel, children }) {
+  return (
+    <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+      <div
+        style={{
+          width: 220,
+          flexShrink: 0,
+          display: "flex",
+          flexDirection: "column",
+          gap: 4,
+          maxHeight: 480,
+          overflowY: "auto",
+        }}
+      >
+        {peers.map((p) => {
+          const unread = unreadById[p.id] || 0;
+          const selected = selectedId === p.id;
+          return (
+            <button
+              key={p.id}
+              onClick={() => onSelect(p.id)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "9px 12px",
+                borderRadius: 4,
+                border: `1px solid ${selected ? TEAL : GRID}`,
+                background: selected ? TEAL_SOFT : PANEL,
+                color: selected ? TEAL : INK,
+                fontFamily: "'Space Grotesk', sans-serif",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: "pointer",
+                textAlign: "left",
+              }}
+            >
+              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+              {p.tag && (
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: INK_SOFT, textTransform: "uppercase" }}>{p.tag}</span>
+              )}
+              {unread > 0 && <UnreadBadge count={unread} />}
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{ flex: 1, minWidth: 0 }}>{children || <div style={{ fontSize: 12, color: INK_SOFT }}>{emptyLabel}</div>}</div>
+    </div>
+  );
+}
 
 function ChatThread({ messages, loading, error, currentUserId, headerLabel, input, onInputChange, onSend, sending, sendError }) {
   const scrollRef = useRef(null);

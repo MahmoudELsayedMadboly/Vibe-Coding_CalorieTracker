@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X, Send, User, StickyNote, Clock, Search, Coffee, Dumbbell, Utensils, Zap, Moon, Apple, ChevronLeft, ChevronRight, Camera } from "lucide-react";
+import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X, Send, User, StickyNote, Clock, Search, Coffee, Dumbbell, Utensils, Zap, Moon, Apple, ChevronLeft, ChevronRight, Camera, Paperclip, FileText, Image as ImageIcon } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import { t, useLanguage, setLanguage, getLanguage, intlLocale, mirrorInRTL, readStoredLanguage } from "./i18n";
 
@@ -93,6 +93,27 @@ function localDateStr(d) {
 
 function todayStr() {
   return localDateStr(new Date());
+}
+
+// Client files (Profile screen). Must match the "client-files" bucket and
+// the client_files constraints in 20261012000000_client_files.sql.
+const CLIENT_FILE_MAX_BYTES = 10 * 1024 * 1024;
+const CLIENT_FILE_MAX_COUNT = 20;
+const CLIENT_FILE_EXT = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "application/pdf": "pdf" };
+const CLIENT_FILE_MIME_BY_EXT = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", pdf: "application/pdf" };
+
+// file.type can be empty (some Android pickers), so fall back to the
+// extension. Returns null for anything not allowed.
+function clientFileMimeType(file) {
+  if (file.type) return CLIENT_FILE_EXT[file.type] ? file.type : null;
+  const extMatch = /\.([a-zA-Z0-9]+)$/.exec(file.name);
+  return (extMatch && CLIENT_FILE_MIME_BY_EXT[extMatch[1].toLowerCase()]) || null;
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function threeDaysAgoStr() {
@@ -1040,6 +1061,13 @@ export default function CalorieTrackerApp() {
   const photoFileInputRef = useRef(null);
   const [photoUploading, setPhotoUploading] = useState(false);
   const [photoError, setPhotoError] = useState(null);
+
+  const [clientFiles, setClientFiles] = useState([]);
+  const [clientFilesLoading, setClientFilesLoading] = useState(false);
+  const [clientFilesError, setClientFilesError] = useState(null);
+  const [clientFileUploads, setClientFileUploads] = useState([]);
+  const [clientFileDeletingId, setClientFileDeletingId] = useState(null);
+  const clientFileInputRef = useRef(null);
 
   const [accountEmail, setAccountEmail] = useState("");
   const [avatarPath, setAvatarPath] = useState(null);
@@ -2031,6 +2059,142 @@ export default function CalorieTrackerApp() {
       setAvatarError(errorText(err, "account.avatarError"));
     } finally {
       setAvatarUploading(false);
+    }
+  }
+
+  async function loadClientFiles() {
+    if (!session || !session.user) return;
+
+    setClientFilesLoading(true);
+    setClientFilesError(null);
+
+    try {
+      const { data: rows, error } = await supabase
+        .from("client_files")
+        .select("id, storage_path, file_name, mime_type, size_bytes, created_at")
+        .eq("user_id", session.user.id)
+        .order("created_at", { ascending: false });
+      if (error) throw error;
+
+      // Thumbnails are a nicety: if signing fails, images fall back to an icon.
+      const imagePaths = (rows || []).filter((row) => row.mime_type.startsWith("image/")).map((row) => row.storage_path);
+      const urlByPath = {};
+      if (imagePaths.length > 0) {
+        const { data: signed, error: signErr } = await supabase.storage.from("client-files").createSignedUrls(imagePaths, 3600);
+        if (signErr) console.error("Couldn't create signed file URLs:", signErr);
+        (signed || []).forEach((s) => {
+          if (s.path && s.signedUrl) urlByPath[s.path] = s.signedUrl;
+        });
+      }
+
+      setClientFiles((rows || []).map((row) => ({ ...row, thumbUrl: urlByPath[row.storage_path] || null })));
+    } catch (err) {
+      setClientFilesError(err && err.message ? err.message : "Couldn't load your files.");
+    } finally {
+      setClientFilesLoading(false);
+    }
+  }
+
+  async function uploadClientFiles(fileList) {
+    if (!session || !session.user) return;
+    const userId = session.user.id;
+    const picked = Array.from(fileList || []);
+    if (picked.length === 0) return;
+
+    // Check type, size and the 20-file cap up front; the bucket and the
+    // client_files constraints enforce the same limits server-side.
+    let slots = CLIENT_FILE_MAX_COUNT - clientFiles.length;
+    const queue = picked.map((file, i) => {
+      const mime = clientFileMimeType(file);
+      let error = null;
+      if (!mime) error = "Only JPG, PNG, WebP and PDF files are allowed.";
+      else if (file.size > CLIENT_FILE_MAX_BYTES) error = `Too large (${formatFileSize(file.size)}). The limit is 10 MB.`;
+      else if (file.size === 0) error = "This file is empty.";
+      else if (slots <= 0) error = `You can attach up to ${CLIENT_FILE_MAX_COUNT} files. Delete one to add another.`;
+      else slots -= 1;
+      return { key: `${Date.now()}-${i}-${file.name}`, file, mime, name: file.name, status: error ? "failed" : "queued", error };
+    });
+
+    setClientFileUploads((prev) => [...prev, ...queue.map(({ file, ...u }) => u)]);
+    if (clientFileInputRef.current) clientFileInputRef.current.value = "";
+
+    const setStatus = (key, patch) => setClientFileUploads((prev) => prev.map((u) => (u.key === key ? { ...u, ...patch } : u)));
+
+    for (const item of queue) {
+      if (item.status !== "queued") continue;
+      setStatus(item.key, { status: "uploading" });
+
+      // Row first: the storage upload policy requires it, which is what
+      // makes the 20-file cap hold. Keep the original name out of the key.
+      const path = `${userId}/${crypto.randomUUID()}.${CLIENT_FILE_EXT[item.mime]}`;
+      const { data: row, error: insertErr } = await supabase
+        .from("client_files")
+        .insert({ user_id: userId, storage_path: path, file_name: item.name.slice(0, 255), mime_type: item.mime, size_bytes: item.file.size })
+        .select("id, storage_path, file_name, mime_type, size_bytes, created_at")
+        .single();
+      if (insertErr) {
+        setStatus(item.key, { status: "failed", error: insertErr.message || "Couldn't save that file." });
+        continue;
+      }
+
+      const { error: uploadErr } = await supabase.storage
+        .from("client-files")
+        .upload(path, item.file, { contentType: item.mime, upsert: false });
+      if (uploadErr) {
+        const { error: cleanupErr } = await supabase.from("client_files").delete().eq("id", row.id);
+        if (cleanupErr) console.error("Couldn't remove the row for a failed upload:", cleanupErr);
+        setStatus(item.key, { status: "failed", error: uploadErr.message || "Couldn't upload that file." });
+        continue;
+      }
+
+      let thumbUrl = null;
+      if (item.mime.startsWith("image/")) {
+        const { data: signed, error: signErr } = await supabase.storage.from("client-files").createSignedUrl(path, 3600);
+        if (signErr) console.error("Couldn't create signed file URL:", signErr);
+        thumbUrl = signed?.signedUrl || null;
+      }
+
+      setClientFiles((prev) => [{ ...row, thumbUrl }, ...prev]);
+      setClientFileUploads((prev) => prev.filter((u) => u.key !== item.key));
+    }
+  }
+
+  async function openClientFile(file) {
+    // Open the tab before the await: Safari (and the iOS home-screen app)
+    // block window.open calls that don't come straight from a tap.
+    const tab = window.open("", "_blank");
+    const { data, error } = await supabase.storage.from("client-files").createSignedUrl(file.storage_path, 300);
+    if (error || !data?.signedUrl) {
+      if (tab) tab.close();
+      setClientFilesError(error && error.message ? error.message : "Couldn't open that file.");
+      return;
+    }
+    if (tab) {
+      tab.opener = null;
+      tab.location.href = data.signedUrl;
+    } else {
+      window.location.href = data.signedUrl;
+    }
+  }
+
+  async function deleteClientFile(file) {
+    if (!window.confirm(`Delete "${file.file_name}"? This can't be undone.`)) return;
+
+    setClientFileDeletingId(file.id);
+    setClientFilesError(null);
+
+    try {
+      // File first, then the row: a leftover row stays listed and can be
+      // deleted again; a leftover object would be invisible.
+      const { error: removeErr } = await supabase.storage.from("client-files").remove([file.storage_path]);
+      if (removeErr) throw removeErr;
+      const { error: deleteErr } = await supabase.from("client_files").delete().eq("id", file.id);
+      if (deleteErr) throw deleteErr;
+      setClientFiles((prev) => prev.filter((f) => f.id !== file.id));
+    } catch (err) {
+      setClientFilesError(err && err.message ? err.message : "Couldn't delete that file.");
+    } finally {
+      setClientFileDeletingId(null);
     }
   }
 
@@ -4183,6 +4347,14 @@ export default function CalorieTrackerApp() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roleId, session]);
+
+  // Reloads (and re-signs thumbnails) each time the Profile tab opens.
+  useEffect(() => {
+    if (session && roleId !== 2 && roleId !== 4 && view === "setup" && configTab === "profile") {
+      loadClientFiles();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, configTab, roleId, session]);
 
   useEffect(() => {
     if (view !== "chat") {
@@ -6796,6 +6968,114 @@ export default function CalorieTrackerApp() {
                 rows={3}
                 style={{ ...inputStyle, resize: "vertical", fontFamily: "'IBM Plex Mono', monospace" }}
               />
+
+              <label style={labelStyle}>Health documents (optional)</label>
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT, marginBottom: 8 }}>
+                  e.g. an InBody report. JPG, PNG, WebP or PDF, up to 10 MB each, {CLIENT_FILE_MAX_COUNT} files max. Files are saved right away and only you can see them.
+                </div>
+                <input
+                  type="file"
+                  multiple
+                  accept="image/jpeg,image/png,image/webp,application/pdf,.jpg,.jpeg,.png,.webp,.pdf"
+                  ref={clientFileInputRef}
+                  onChange={(e) => uploadClientFiles(e.target.files)}
+                  style={{ display: "none" }}
+                />
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                  <button
+                    type="button"
+                    onClick={() => clientFileInputRef.current && clientFileInputRef.current.click()}
+                    disabled={clientFiles.length >= CLIENT_FILE_MAX_COUNT}
+                    style={{ ...secondaryButtonStyle, opacity: clientFiles.length >= CLIENT_FILE_MAX_COUNT ? 0.5 : 1 }}
+                  >
+                    <Paperclip size={14} /> Attach files
+                  </button>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT }}>
+                    {clientFiles.length} / {CLIENT_FILE_MAX_COUNT}
+                  </span>
+                </div>
+
+                {clientFileUploads.map((u) => (
+                  <div
+                    key={u.key}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "8px 10px",
+                      marginBottom: 6,
+                      borderRadius: 4,
+                      background: u.status === "failed" ? RED_SOFT : PAPER,
+                      color: u.status === "failed" ? RED : INK,
+                      fontSize: 12,
+                    }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>{u.name}</div>
+                      <div style={{ fontSize: 11.5 }}>
+                        {u.status === "queued" ? "Waiting…" : u.status === "uploading" ? "Uploading…" : u.error}
+                      </div>
+                    </div>
+                    {u.status === "failed" && (
+                      <button
+                        type="button"
+                        onClick={() => setClientFileUploads((prev) => prev.filter((x) => x.key !== u.key))}
+                        style={{ border: "none", background: "transparent", color: RED, cursor: "pointer", padding: 4, display: "flex" }}
+                        aria-label="Dismiss"
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+
+                {clientFilesError && (
+                  <div style={{ padding: "8px 10px", marginBottom: 6, background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
+                    {clientFilesError}
+                  </div>
+                )}
+
+                {clientFilesLoading && clientFiles.length === 0 && (
+                  <div style={{ fontSize: 12, color: INK_SOFT }}>Loading files…</div>
+                )}
+
+                {clientFiles.map((f) => (
+                  <div
+                    key={f.id}
+                    style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", borderTop: `1px solid ${GRID}` }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => openClientFile(f)}
+                      style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, border: "none", background: "transparent", padding: 0, cursor: "pointer", textAlign: "left", color: INK }}
+                    >
+                      {f.thumbUrl ? (
+                        <img src={f.thumbUrl} alt="" style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 4, border: `1px solid ${GRID}`, flexShrink: 0 }} />
+                      ) : (
+                        <div style={{ width: 48, height: 48, borderRadius: 4, border: `1px solid ${GRID}`, background: PAPER, display: "flex", alignItems: "center", justifyContent: "center", color: INK_SOFT, flexShrink: 0 }}>
+                          {f.mime_type === "application/pdf" ? <FileText size={22} /> : <ImageIcon size={22} />}
+                        </div>
+                      )}
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.file_name}</div>
+                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                          {formatFileSize(f.size_bytes)} · {localDateStr(new Date(f.created_at))}
+                        </div>
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => deleteClientFile(f)}
+                      disabled={clientFileDeletingId === f.id}
+                      style={{ border: "none", background: "transparent", color: RED, cursor: "pointer", padding: 8, display: "flex", flexShrink: 0, opacity: clientFileDeletingId === f.id ? 0.5 : 1 }}
+                      aria-label={`Delete ${f.file_name}`}
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                ))}
+              </div>
 
               <label style={labelStyle}>Goal</label>
               <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>

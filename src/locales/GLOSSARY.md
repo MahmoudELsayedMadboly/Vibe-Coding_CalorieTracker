@@ -62,3 +62,21 @@ notes, chat) is never translated.
 | Log in / Log out / Sign up | تسجيل الدخول / تسجيل الخروج / إنشاء حساب | |
 | Password | كلمة المرور | |
 | Email | البريد الإلكتروني | |
+
+## Added in phase 2 (client and standalone screens)
+
+| English | Arabic | Notes |
+|---|---|---|
+| Breakfast / Lunch / Dinner / Snack | الفطور / الغداء / العشاء / وجبة خفيفة | stored in English, translated for display only |
+| Before training / After training | قبل التمرين / بعد التمرين | |
+| Course: Main / Side1 / Side2 / Drink / Dessert | الطبق الرئيسي / طبق جانبي 1 / طبق جانبي 2 / مشروب / حلوى | |
+| Activity level | مستوى النشاط | Sedentary قليل الحركة · Lightly active نشاط خفيف · Moderately active نشاط متوسط · Active نشاط مرتفع · Very active نشاط مرتفع جدًا |
+| Pace (Mild / Moderate / Aggressive) | الوتيرة (معتدلة / متوسطة / سريعة) | |
+| BMI | مؤشر كتلة الجسم | categories: نقص الوزن · وزن طبيعي · زيادة الوزن · سمنة (الدرجة الأولى/الثانية/الثالثة) |
+| Starting weight | الوزن الابتدائي | |
+| Health documents | المستندات الصحية | |
+| Sex: Male / Female | الجنس: ذكر / أنثى | |
+| Daily log entry / item | إدخال / صنف | |
+| Food list | قائمة الأطعمة | "Configure your food list" = إعداد قائمة أطعمتك |
+| Units: kcal / g / kg / cm | سعرة / غ / كغ / سم | |
+| Telegram | تيليجرام | |

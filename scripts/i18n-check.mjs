@@ -68,7 +68,7 @@ for (const lang of LANGS) {
 }
 
 // Functions that pass a key through to t() (their callers are checked).
-const KEY_FORWARDING_FUNCTIONS = new Set(["errorText"]);
+const KEY_FORWARDING_FUNCTIONS = new Set(["errorText", "errorWithReason", "mealLabel", "courseLabel", "bmiCategoryLabel"]);
 
 // Logical keys: plural forms collapse to their base key.
 function logicalKeys(dict) {
@@ -128,7 +128,7 @@ for (const lang of LANGS) {
   if (lang === REFERENCE) continue;
   for (const [key, value] of Object.entries(dicts[lang])) {
     if (SAME_IN_ALL_LANGUAGES.has(key)) continue;
-    if (value === dicts[REFERENCE][key] && ENGLISH_WORD.test(value)) {
+    if (value === dicts[REFERENCE][key] && ENGLISH_WORD.test(value.replace(/\{\{\s*\w+\s*\}\}/g, ""))) {
       errors.push(`${lang}.json: "${key}" is still the English text`);
     }
   }
@@ -215,6 +215,10 @@ function walk(file, node, parent, enclosingFn) {
       const name = calleeName(node.callee);
       if (node.callee.type === "Identifier" && name === "t") checkKeyArg(file, node.arguments[0], "t", enclosingFn);
       else if (node.callee.type === "Identifier" && name === "errorText") checkKeyArg(file, node.arguments[1], "errorText", enclosingFn);
+      else if (node.callee.type === "Identifier" && name === "errorWithReason") {
+        checkKeyArg(file, node.arguments[1], "errorWithReason", enclosingFn);
+        checkKeyArg(file, node.arguments[2], "errorWithReason", enclosingFn);
+      }
       else if (name && (MESSAGE_SETTER.test(name) || DIALOGS.has(name))) {
         for (const s of renderedStrings(node.arguments[0])) addLeftover(file, s, node);
       }

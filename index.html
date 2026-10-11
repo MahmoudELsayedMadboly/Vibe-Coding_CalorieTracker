@@ -6,6 +6,16 @@
     <meta name="theme-color" content="#146B6B" />
     <link rel="icon" type="image/png" href="/icons/pwa-192x192.png" />
     <title>Calorie Tracker</title>
+    <script>
+      // Apply the language saved on this device before the app loads, so the
+      // login screen doesn't flash left-to-right. Same key as src/i18n.
+      try {
+        if (localStorage.getItem("lang") === "ar") {
+          document.documentElement.lang = "ar";
+          document.documentElement.dir = "rtl";
+        }
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

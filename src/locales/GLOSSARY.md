@@ -41,7 +41,7 @@ notes, chat) is never translated.
 | Profile | الملف الشخصي | |
 | Configuration | الإعدادات | |
 | Daily log | السجل اليومي | |
-| History | السجل السابق | |
+| History | السجل | the Daily log is السجل اليومي |
 | Meal log | سجل الوجبات | |
 | Administration | الإدارة | |
 | Account | الحساب | |

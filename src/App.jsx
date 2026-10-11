@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X, Send, User, StickyNote, Clock, Search, Coffee, Dumbbell, Utensils, Zap, Moon, Apple, ChevronLeft, ChevronRight, Camera } from "lucide-react";
 import { supabase } from "./supabaseClient";
-import { t, useLanguage, setLanguage, getLanguage, intlLocale, mirrorInRTL, normalizeLanguage, readStoredLanguage } from "./i18n";
+import { t, useLanguage, setLanguage, getLanguage, intlLocale, mirrorInRTL, readStoredLanguage } from "./i18n";
 
 const INK = "#1B2430";
 const INK_SOFT = "#5B6472";
@@ -1325,20 +1325,23 @@ export default function CalorieTrackerApp() {
         if (userInfoErr) throw userInfoErr;
 
         setAccountEmail(userInfoRow?.email || "");
-        // The account's saved language wins. An account that has never had
-        // one chosen takes this device's choice (e.g. from the login screen),
-        // saved back so it follows the user to their other devices.
-        const accountLanguage = normalizeLanguage(userInfoRow?.language_preference);
-        if (accountLanguage) {
-          setLanguage(accountLanguage).catch((err) => console.error("Couldn't load the account's language:", err));
-        } else if (userInfoRow) {
+        // language_preference is NOT NULL DEFAULT 'en', so it can't say
+        // whether the user ever chose. On their first login (first_login_at
+        // still empty, set further down) the language picked on this
+        // device's login screen wins and is saved to the account; after
+        // that the account's value wins. Anything but "ar" means English.
+        if (userInfoRow && !userInfoRow.first_login_at) {
+          const deviceLanguage = readStoredLanguage() || getLanguage();
           supabase
             .from("user_info")
-            .update({ language_preference: readStoredLanguage() || getLanguage() })
+            .update({ language_preference: deviceLanguage })
             .eq("id", userId)
             .then(({ error }) => {
               if (error) console.error("Couldn't save the language preference:", error);
             });
+        } else if (userInfoRow) {
+          const accountLanguage = userInfoRow.language_preference === "ar" ? "ar" : "en";
+          setLanguage(accountLanguage).catch((err) => console.error("Couldn't load the account's language:", err));
         }
         // Only an owner's own row carries the organization name; a coach's
         // is loaded from their owner by loadCoachOrganizationName.
@@ -5566,7 +5569,7 @@ export default function CalorieTrackerApp() {
               {t("app.eyebrow")}
             </div>
             {/* Shows the other language in its own name; saved on this device
-                and applied to the account at first login if it has none. */}
+                and applied to the account on its first login. */}
             <button
               lang={language === "ar" ? "en" : "ar"}
               onClick={() => setLanguage(language === "ar" ? "en" : "ar").catch(() => setAuthError(t("language.loadError")))}

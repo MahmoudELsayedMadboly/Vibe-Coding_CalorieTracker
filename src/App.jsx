@@ -24,31 +24,59 @@ const HISTORY_CHART_HEIGHT = 180;
 const HISTORY_COL_WIDTH = 28;
 const HISTORY_COL_GAP = 6;
 
+// Labels in these lists are getters so they're read in the current
+// language at render time.
 const ACTIVITY_LEVELS = [
-  { id: "sedentary", label: "Sedentary", mult: 1.2 },
-  { id: "light", label: "Lightly active", mult: 1.375 },
-  { id: "moderate", label: "Moderately active", mult: 1.55 },
-  { id: "active", label: "Active", mult: 1.725 },
-  { id: "very_active", label: "Very active", mult: 1.9 },
+  { id: "sedentary", get label() { return t("activity.sedentary"); }, mult: 1.2 },
+  { id: "light", get label() { return t("activity.light"); }, mult: 1.375 },
+  { id: "moderate", get label() { return t("activity.moderate"); }, mult: 1.55 },
+  { id: "active", get label() { return t("activity.active"); }, mult: 1.725 },
+  { id: "very_active", get label() { return t("activity.veryActive"); }, mult: 1.9 },
 ];
 
 const RATES = [
-  { id: "mild", label: "Mild", kcal: 250 },
-  { id: "moderate", label: "Moderate", kcal: 500 },
-  { id: "aggressive", label: "Aggressive", kcal: 750 },
+  { id: "mild", get label() { return t("rates.mild"); }, kcal: 250 },
+  { id: "moderate", get label() { return t("rates.moderate"); }, kcal: 500 },
+  { id: "aggressive", get label() { return t("rates.aggressive"); }, kcal: 750 },
 ];
 
-// Display/picker order. meal_logs.meal and plan_foods.meal store these exact strings.
+// Display/picker order. meal_logs.meal and plan_foods.meal store these exact
+// English strings, so they're only translated for display (mealLabel /
+// courseLabel), never when saved or compared.
 const MEALS = ["Breakfast", "Before training", "Lunch", "After training", "Dinner", "Snack"];
 const COURSES = ["Main", "Side1", "Side2", "Drink", "Dessert"];
 
+const MEAL_LABEL_KEYS = {
+  Breakfast: "meals.breakfast",
+  "Before training": "meals.beforeTraining",
+  Lunch: "meals.lunch",
+  "After training": "meals.afterTraining",
+  Dinner: "meals.dinner",
+  Snack: "meals.snack",
+};
+const COURSE_LABEL_KEYS = {
+  Main: "courses.main",
+  Side1: "courses.side1",
+  Side2: "courses.side2",
+  Drink: "courses.drink",
+  Dessert: "courses.dessert",
+};
+
+function mealLabel(meal) {
+  return MEAL_LABEL_KEYS[meal] ? t(MEAL_LABEL_KEYS[meal]) : meal;
+}
+
+function courseLabel(course) {
+  return COURSE_LABEL_KEYS[course] ? t(COURSE_LABEL_KEYS[course]) : course;
+}
+
 const MEASUREMENT_FIELDS = [
-  { key: "neck", label: "Neck" },
-  { key: "waist", label: "Waist" },
-  { key: "shoulder", label: "Shoulder" },
-  { key: "chest", label: "Chest" },
-  { key: "abdomen", label: "Abdomen" },
-  { key: "thighs", label: "Thighs" },
+  { key: "neck", get label() { return t("bodyParts.neck"); } },
+  { key: "waist", get label() { return t("bodyParts.waist"); } },
+  { key: "shoulder", get label() { return t("bodyParts.shoulder"); } },
+  { key: "chest", get label() { return t("bodyParts.chest"); } },
+  { key: "abdomen", get label() { return t("bodyParts.abdomen"); } },
+  { key: "thighs", get label() { return t("bodyParts.thighs"); } },
 ];
 
 function draftKey(userId) {
@@ -111,9 +139,9 @@ function clientFileMimeType(file) {
 }
 
 function formatFileSize(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024) return t("units.bytes", { value: bytes });
+  if (bytes < 1024 * 1024) return t("units.kilobytes", { value: Math.round(bytes / 1024) });
+  return t("units.megabytes", { value: Number((bytes / (1024 * 1024)).toFixed(1)) });
 }
 
 function threeDaysAgoStr() {
@@ -147,11 +175,11 @@ function daysBetweenStr(a, b) {
 }
 
 function planDurationLabel(dateFrom, dateTo) {
-  if (!dateFrom || !dateTo) return "No plan yet";
+  if (!dateFrom || !dateTo) return t("status.noPlan");
   const days = daysBetweenStr(dateFrom, dateTo);
-  if (days < 0) return "No plan yet";
+  if (days < 0) return t("status.noPlan");
   const months = Math.max(1, Math.round(days / 30));
-  return `${months} month${months === 1 ? "" : "s"}`;
+  return t("planDuration.months", { count: months });
 }
 
 // Whole years between a "YYYY-MM-DD" date of birth and today, done in UTC
@@ -173,9 +201,12 @@ function calcAgeFromDOB(dobStr) {
 
 const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+// "Oct 3". English keeps the fixed abbreviations; other languages use Intl
+// (UTC, since the string is a calendar date).
 function shortDayLabel(s) {
   const [, m, d] = s.split("-").map(Number);
-  return `${MONTH_ABBR[m - 1]} ${d}`;
+  if (getLanguage() === "en") return `${MONTH_ABBR[m - 1]} ${d}`;
+  return parseDateStr(s).toLocaleDateString(intlLocale(), { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
 function computeBMI(profile) {
@@ -190,26 +221,35 @@ function computeBMI(profile) {
   const normalMin = 18.5 * heightM * heightM;
   const normalMax = 24.9 * heightM * heightM;
 
+  // `category` is saved to profile.bmi_category_current, so it stays
+  // English; screens show bmiCategoryLabel() instead.
   let category;
+  let categoryKey;
   let status;
 
   if (bmi < 18.5) {
     category = "Underweight";
+    categoryKey = "bmi.underweight";
     status = "yellow";
   } else if (bmi < 25) {
     category = "Normal weight";
+    categoryKey = "bmi.normal";
     status = "green";
   } else if (bmi < 30) {
     category = "Overweight";
+    categoryKey = "bmi.overweight";
     status = "red";
   } else if (bmi < 35) {
     category = "Obese (Class I)";
+    categoryKey = "bmi.obese1";
     status = "red";
   } else if (bmi < 40) {
     category = "Obese (Class II)";
+    categoryKey = "bmi.obese2";
     status = "red";
   } else {
     category = "Obese (Class III)";
+    categoryKey = "bmi.obese3";
     status = "red";
   }
 
@@ -224,17 +264,17 @@ function computeBMI(profile) {
     diffLabel = "below";
   }
 
-  let sentence;
+  return { bmi, category, categoryKey, status, percentDiff, diffLabel };
+}
 
-  if (status === "green") {
-    sentence = "Your BMI falls within the standard weight range for your height.";
-  } else if (diffLabel === "above") {
-    sentence = `Your weight is about ${percentDiff.toFixed(1)}% above the standard range for your height (${category.toLowerCase()}). A structured plan aimed at gradual, steady loss can help bring it back within range.`;
-  } else {
-    sentence = `Your weight is about ${percentDiff.toFixed(1)}% below the standard range for your height (${category.toLowerCase()}). A plan aimed at gradual, healthy weight gain can help bring it within range.`;
-  }
+function bmiCategoryLabel(bmiInfo) {
+  return t(bmiInfo.categoryKey);
+}
 
-  return { bmi, category, status, percentDiff, diffLabel, sentence };
+function bmiSentence(bmiInfo) {
+  if (bmiInfo.status === "green") return t("bmi.sentenceWithin");
+  const vars = { percent: bmiInfo.percentDiff.toFixed(1), category: bmiCategoryLabel(bmiInfo).toLowerCase() };
+  return bmiInfo.diffLabel === "above" ? t("bmi.sentenceAbove", vars) : t("bmi.sentenceBelow", vars);
 }
 
 // Weight used for BMI and plan math: the most recent check-in that recorded
@@ -559,6 +599,13 @@ function errorText(err, fallbackKey) {
   return t(codeKey || fallbackKey);
 }
 
+// "Couldn't X: <Supabase message>" in English, as before; other languages
+// get the translated sentence without the English-only reason.
+function errorWithReason(err, reasonKey, genericKey) {
+  if (getLanguage() !== "en") return t(genericKey);
+  return t(reasonKey, { reason: err && err.message ? err.message : t("common.unknownError") });
+}
+
 // The screen each role lands on after login (and after the forced
 // password change). Clients and standalone users start on "setup".
 function homeViewForRole(roleId) {
@@ -668,7 +715,7 @@ function MetricRow({ label, actual, target, unit }) {
 // legend underneath. Used on the client's My Plan screen and on the coach's
 // Plan Builder / Plan Details screens. Missing values render as "—".
 function DailyTargetCard({ calories, protein, carbs, fat, style }) {
-  const show = (v, unit) => (v === null || v === undefined || v === "" ? "—" : `${v}${unit}`);
+  const show = (v) => (v === null || v === undefined || v === "" ? "—" : v);
 
   return (
     <div
@@ -692,24 +739,24 @@ function DailyTargetCard({ calories, protein, carbs, fat, style }) {
           letterSpacing: 0.5,
         }}
       >
-        Daily target
+        {t("plan.dailyTarget")}
       </div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 5, margin: "2px 0 8px" }}>
         <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700, lineHeight: 1.1, color: INK }}>
-          {show(calories, "")}
+          {show(calories)}
         </span>
-        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: INK_SOFT }}>kcal</span>
+        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: INK_SOFT }}>{t("units.kcal")}</span>
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", columnGap: 16, rowGap: 4 }}>
         {[
-          { key: "protein", label: "Protein", value: protein },
-          { key: "carbs", label: "Carbs", value: carbs },
-          { key: "fat", label: "Fat", value: fat },
+          { key: "protein", label: t("plan.protein"), value: protein },
+          { key: "carbs", label: t("plan.carbs"), value: carbs },
+          { key: "fat", label: t("plan.fat"), value: fat },
         ].map((m) => (
           <span key={m.key} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, whiteSpace: "nowrap" }}>
             <span style={{ width: 8, height: 8, borderRadius: "50%", background: MACRO_COLORS[m.key], flexShrink: 0 }} />
             <span style={{ color: INK_SOFT }}>{m.label}</span>
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: INK }}>{show(m.value, "g")}</span>
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: INK }}>{m.value === null || m.value === undefined || m.value === "" ? "—" : t("units.gramsValue", { value: m.value })}</span>
           </span>
         ))}
       </div>
@@ -753,7 +800,7 @@ function MealPlanCards({ foods, onRemoveFood }) {
                   letterSpacing: 0.5,
                 }}
               >
-                {mealName}
+                {mealLabel(mealName)}
               </span>
             </div>
 
@@ -777,18 +824,18 @@ function MealPlanCards({ foods, onRemoveFood }) {
                       display: "inline-block",
                     }}
                   >
-                    {courseName}
+                    {courseLabel(courseName)}
                   </div>
                   {courseFoods.map((f) => (
                     <div key={f.id} style={foodRowStyle}>
                       <div>
-                        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
+                        <div dir="auto" style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
                         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                          {f.grams}g · {f.calories} kcal
+                          {t("plan.foodRow", { grams: f.grams, calories: f.calories })}
                         </div>
                       </div>
                       {onRemoveFood && (
-                        <button onClick={() => onRemoveFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
+                        <button onClick={() => onRemoveFood(f.id)} style={iconButtonStyle} aria-label={t("plan.removeFood")}>
                           <Trash2 size={14} />
                         </button>
                       )}
@@ -1587,7 +1634,7 @@ export default function CalorieTrackerApp() {
         }
       } catch (err) {
         console.error("Load error:", err);
-        setSaveError("Couldn't load your data: " + (err && err.message ? err.message : "unknown error"));
+        setSaveError(errorWithReason(err, "loadFailed.data", "loadFailed.dataGeneric"));
       } finally {
         setLoaded(true);
       }
@@ -1752,7 +1799,7 @@ export default function CalorieTrackerApp() {
       return true;
     } catch (err) {
       console.error("Storage error:", err);
-      setSaveError("Save failed: " + (err && err.message ? err.message : "unknown error"));
+      setSaveError(errorWithReason(err, "save.failed", "save.failedGeneric"));
       return false;
     } finally {
       setSaving(false);
@@ -1983,7 +2030,7 @@ export default function CalorieTrackerApp() {
       setMeasurements((prev) => [data, ...prev].sort((a, b) => (a.measured_at < b.measured_at ? 1 : -1)));
       setNewMeasurement({ date: todayStr(), weightKg: "", neck: "", waist: "", shoulder: "", chest: "", abdomen: "", thighs: "" });
     } catch (err) {
-      setMeasurementError(err && err.message ? err.message : "Couldn't save that measurement.");
+      setMeasurementError(errorText(err, "measurements.saveFailed"));
     } finally {
       setMeasurementSaving(false);
     }
@@ -2023,7 +2070,7 @@ export default function CalorieTrackerApp() {
       setPhotoFile(null);
       if (photoFileInputRef.current) photoFileInputRef.current.value = "";
     } catch (err) {
-      setPhotoError(err && err.message ? err.message : "Couldn't upload that photo.");
+      setPhotoError(errorText(err, "photos.uploadFailed"));
     } finally {
       setPhotoUploading(false);
     }
@@ -2089,7 +2136,7 @@ export default function CalorieTrackerApp() {
 
       setClientFiles((rows || []).map((row) => ({ ...row, thumbUrl: urlByPath[row.storage_path] || null })));
     } catch (err) {
-      setClientFilesError(err && err.message ? err.message : "Couldn't load your files.");
+      setClientFilesError(errorText(err, "files.loadFailed"));
     } finally {
       setClientFilesLoading(false);
     }
@@ -2107,10 +2154,10 @@ export default function CalorieTrackerApp() {
     const queue = picked.map((file, i) => {
       const mime = clientFileMimeType(file);
       let error = null;
-      if (!mime) error = "Only JPG, PNG, WebP and PDF files are allowed.";
-      else if (file.size > CLIENT_FILE_MAX_BYTES) error = `Too large (${formatFileSize(file.size)}). The limit is 10 MB.`;
-      else if (file.size === 0) error = "This file is empty.";
-      else if (slots <= 0) error = `You can attach up to ${CLIENT_FILE_MAX_COUNT} files. Delete one to add another.`;
+      if (!mime) error = t("files.wrongType");
+      else if (file.size > CLIENT_FILE_MAX_BYTES) error = t("files.tooLarge", { size: formatFileSize(file.size) });
+      else if (file.size === 0) error = t("files.empty");
+      else if (slots <= 0) error = t("files.limit", { max: CLIENT_FILE_MAX_COUNT });
       else slots -= 1;
       return { key: `${Date.now()}-${i}-${file.name}`, file, mime, name: file.name, status: error ? "failed" : "queued", error };
     });
@@ -2133,7 +2180,7 @@ export default function CalorieTrackerApp() {
         .select("id, storage_path, file_name, mime_type, size_bytes, created_at")
         .single();
       if (insertErr) {
-        setStatus(item.key, { status: "failed", error: insertErr.message || "Couldn't save that file." });
+        setStatus(item.key, { status: "failed", error: errorText(insertErr, "files.saveFailed") });
         continue;
       }
 
@@ -2143,7 +2190,7 @@ export default function CalorieTrackerApp() {
       if (uploadErr) {
         const { error: cleanupErr } = await supabase.from("client_files").delete().eq("id", row.id);
         if (cleanupErr) console.error("Couldn't remove the row for a failed upload:", cleanupErr);
-        setStatus(item.key, { status: "failed", error: uploadErr.message || "Couldn't upload that file." });
+        setStatus(item.key, { status: "failed", error: errorText(uploadErr, "files.uploadFailed") });
         continue;
       }
 
@@ -2166,7 +2213,7 @@ export default function CalorieTrackerApp() {
     const { data, error } = await supabase.storage.from("client-files").createSignedUrl(file.storage_path, 300);
     if (error || !data?.signedUrl) {
       if (tab) tab.close();
-      setClientFilesError(error && error.message ? error.message : "Couldn't open that file.");
+      setClientFilesError(errorText(error, "files.openFailed"));
       return;
     }
     if (tab) {
@@ -2178,7 +2225,7 @@ export default function CalorieTrackerApp() {
   }
 
   async function deleteClientFile(file) {
-    if (!window.confirm(`Delete "${file.file_name}"? This can't be undone.`)) return;
+    if (!window.confirm(t("files.deleteConfirm", { name: file.file_name }))) return;
 
     setClientFileDeletingId(file.id);
     setClientFilesError(null);
@@ -2192,7 +2239,7 @@ export default function CalorieTrackerApp() {
       if (deleteErr) throw deleteErr;
       setClientFiles((prev) => prev.filter((f) => f.id !== file.id));
     } catch (err) {
-      setClientFilesError(err && err.message ? err.message : "Couldn't delete that file.");
+      setClientFilesError(errorText(err, "files.deleteFailed"));
     } finally {
       setClientFileDeletingId(null);
     }
@@ -2443,7 +2490,7 @@ export default function CalorieTrackerApp() {
       setNotificationSettings(data);
     } catch (err) {
       console.error("Check connection error:", err);
-      setSaveError("Couldn't check connection: " + (err && err.message ? err.message : "unknown error"));
+      setSaveError(errorWithReason(err, "notifications.checkFailed", "notifications.checkFailedGeneric"));
     } finally {
       setSaving(false);
     }
@@ -2571,28 +2618,28 @@ export default function CalorieTrackerApp() {
     setAddFoodError(null);
 
     if (!newFood.personalFoodId) {
-      setAddFoodError("Select a food from your list first.");
+      setAddFoodError(t("food.selectFirst"));
       return;
     }
 
     const match = personalFoods.find((f) => f.id === newFood.personalFoodId);
 
     if (!match) {
-      setAddFoodError("That food isn't in your list yet. Add it first in \"Configure your food list\".");
+      setAddFoodError(t("food.notInList"));
       return;
     }
 
     const grams = Number(newFood.grams);
 
     if (!grams || grams <= 0) {
-      setAddFoodError("Enter a gram amount.");
+      setAddFoodError(t("food.enterGrams"));
       return;
     }
 
     const alreadyInMeal = foods.some((f) => f.name === match.name && f.meal === newFood.meal && f.course === newFood.course);
 
     if (alreadyInMeal) {
-      setAddFoodError(`"${match.name}" is already added under ${newFood.meal} / ${newFood.course}. Pick a different meal or course to add it again.`);
+      setAddFoodError(t("food.alreadyAdded", { name: match.name, meal: mealLabel(newFood.meal), course: courseLabel(newFood.course) }));
       return;
     }
 
@@ -2628,7 +2675,7 @@ export default function CalorieTrackerApp() {
       setFoods([...foods, food]);
       setNewFood({ personalFoodId: "", grams: "", calories: "", meal: newFood.meal, course: newFood.course });
     } else {
-      setAddFoodError("Couldn't save this food. Please try again.");
+      setAddFoodError(t("food.saveFailed"));
     }
   }
 
@@ -2638,7 +2685,7 @@ export default function CalorieTrackerApp() {
     if (!delErr) {
       setFoods(foods.filter((f) => f.id !== id));
     } else {
-      setAddFoodError("Couldn't remove this food. Please try again.");
+      setAddFoodError(t("food.removeFailed"));
     }
   }
 
@@ -4476,7 +4523,8 @@ export default function CalorieTrackerApp() {
 
       if (coachId) {
         const { data: coachInfo } = await supabase.from("user_info").select("name").eq("id", coachId).maybeSingle();
-        setMyCoachName((coachInfo && coachInfo.name) || "Your coach");
+        // An empty name shows as "Your coach" (translated) where it's used.
+        setMyCoachName((coachInfo && coachInfo.name) || "");
       } else {
         setMyCoachName(null);
       }
@@ -4527,7 +4575,7 @@ export default function CalorieTrackerApp() {
       setChatMessages(data || []);
       await markConversationRead(otherId);
     } catch (err) {
-      setChatError(err && err.message ? err.message : "Couldn't load messages.");
+      setChatError(errorText(err, "chat.loadFailed"));
     } finally {
       setChatLoading(false);
     }
@@ -4601,7 +4649,7 @@ export default function CalorieTrackerApp() {
       setChatInput("");
       notifyNewChatMessage(otherId, session.user.id);
     } catch (err) {
-      setChatSendError(err && err.message ? err.message : "Couldn't send that message.");
+      setChatSendError(errorText(err, "chat.sendFailed"));
     } finally {
       setChatSending(false);
     }
@@ -5470,7 +5518,7 @@ export default function CalorieTrackerApp() {
     setPersonalFoodError(null);
 
     if (!newPersonalFood.name) {
-      setPersonalFoodError("Fill in the food name.");
+      setPersonalFoodError(t("food.nameRequired"));
       return;
     }
 
@@ -5478,14 +5526,14 @@ export default function CalorieTrackerApp() {
     const calPer100g = hasCalories ? Number(newPersonalFood.calPer100g) : null;
 
     if (hasCalories && (!calPer100g || calPer100g <= 0)) {
-      setPersonalFoodError("Calories per 100g must be a positive number, or left blank.");
+      setPersonalFoodError(t("food.caloriesPositive"));
       return;
     }
 
     const duplicate = personalFoods.some((f) => f.name.toLowerCase() === newPersonalFood.name.trim().toLowerCase());
 
     if (duplicate) {
-      setPersonalFoodError("A food with that name is already in your list.");
+      setPersonalFoodError(t("food.duplicate"));
       return;
     }
 
@@ -5506,7 +5554,7 @@ export default function CalorieTrackerApp() {
       setPersonalFoods([...personalFoods, entry]);
       setNewPersonalFood({ name: "", calPer100g: "" });
     } else {
-      setPersonalFoodError("Couldn't save this food. Please try again.");
+      setPersonalFoodError(t("food.saveFailed"));
     }
   }
 
@@ -5516,7 +5564,7 @@ export default function CalorieTrackerApp() {
     if (!delErr) {
       setPersonalFoods(personalFoods.filter((f) => f.id !== id));
     } else {
-      setPersonalFoodError("Couldn't remove this food. Please try again.");
+      setPersonalFoodError(t("food.removeFailed"));
     }
   }
 
@@ -5617,19 +5665,19 @@ export default function CalorieTrackerApp() {
     setEntryError(null);
 
     if (entryFoodId && customName) {
-      setEntryError("You have to enter only one meal — either pick from the list or type a name, not both.");
+      setEntryError(t("log.onlyOne"));
       return;
     }
 
     if (!entryFoodId && !customName) {
-      setEntryError("Select a food from the list, or type a food name.");
+      setEntryError(t("log.selectOrType"));
       return;
     }
 
     const grams = Number(entryGrams);
 
     if (!grams || grams <= 0) {
-      setEntryError("Enter a gram amount.");
+      setEntryError(t("food.enterGrams"));
       return;
     }
 
@@ -5652,7 +5700,7 @@ export default function CalorieTrackerApp() {
       const calPer100g = Number(entryCalPer100g);
 
       if (!entryCalPer100g || !calPer100g || calPer100g <= 0) {
-        setEntryError("Enter calories per 100 gram for this food.");
+        setEntryError(t("log.enterCaloriesPer100"));
         return;
       }
 
@@ -5680,7 +5728,7 @@ export default function CalorieTrackerApp() {
 
       checkCalorieThreshold(nextLogs, session.user.id, effectivePlan.calories, selectedDate);
     } else {
-      setEntryError("Couldn't save this entry. Please try again.");
+      setEntryError(t("log.saveFailed"));
     }
   }
 
@@ -5692,7 +5740,7 @@ export default function CalorieTrackerApp() {
     if (ok) {
       setLogs(nextLogs);
     } else {
-      setEntryError("Couldn't remove this entry. Please try again.");
+      setEntryError(t("log.removeFailed"));
     }
   }
 
@@ -5950,7 +5998,7 @@ export default function CalorieTrackerApp() {
   function renderMeasurementsSection(showOwnSaveButton) {
     return (
     <>
-      <label style={labelStyle}>Date</label>
+      <label style={labelStyle}>{t("common.date")}</label>
       <input
         type="date"
         value={newMeasurement.date}
@@ -5959,7 +6007,7 @@ export default function CalorieTrackerApp() {
         style={inputStyle}
       />
 
-      <label style={labelStyle}>Weight (kg)</label>
+      <label style={labelStyle}>{t("measurements.weightKg")}</label>
       <input
         type="number"
         value={newMeasurement.weightKg}
@@ -5970,7 +6018,7 @@ export default function CalorieTrackerApp() {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
         {MEASUREMENT_FIELDS.map((f) => (
           <div key={f.key}>
-            <label style={labelStyle}>{f.label} (cm)</label>
+            <label style={labelStyle}>{t("measurements.fieldCm", { field: f.label })}</label>
             <input
               type="number"
               value={newMeasurement[f.key]}
@@ -5988,7 +6036,7 @@ export default function CalorieTrackerApp() {
           style={{ ...primaryButtonStyle, marginTop: 14, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
         >
           <Plus size={14} strokeWidth={2.5} />
-          {measurementSaving ? "Saving…" : "Add measurement"}
+          {measurementSaving ? t("common.saving") : t("measurements.add")}
         </button>
       )}
       {showOwnSaveButton && measurementError && (
@@ -5999,11 +6047,11 @@ export default function CalorieTrackerApp() {
 
       <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 18 }}>
         <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
-          Past entries
+          {t("measurements.past")}
         </div>
 
         {measurements.length === 0 ? (
-          <div style={{ fontSize: 12, color: INK_SOFT }}>No measurements logged yet.</div>
+          <div style={{ fontSize: 12, color: INK_SOFT }}>{t("measurements.empty")}</div>
         ) : (
           measurements.map((m) => (
             <div key={m.id} style={{ padding: "8px 0", borderBottom: `1px solid ${GRID}` }}>
@@ -6012,9 +6060,11 @@ export default function CalorieTrackerApp() {
               </div>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT }}>
                 {[
-                  ...(m.weight_kg !== null && m.weight_kg !== undefined ? [`Weight ${m.weight_kg}kg`] : []),
-                  ...MEASUREMENT_FIELDS.filter((f) => m[f.key] !== null && m[f.key] !== undefined).map((f) => `${f.label} ${m[f.key]}cm`),
-                ].join(" · ") || "No values recorded"}
+                  ...(m.weight_kg !== null && m.weight_kg !== undefined ? [t("measurements.weightValue", { value: m.weight_kg })] : []),
+                  ...MEASUREMENT_FIELDS.filter((f) => m[f.key] !== null && m[f.key] !== undefined).map((f) =>
+                    t("measurements.fieldValue", { field: f.label, value: m[f.key] })
+                  ),
+                ].join(" · ") || t("measurements.noValues")}
               </div>
             </div>
           ))
@@ -6027,7 +6077,7 @@ export default function CalorieTrackerApp() {
   function renderPhotosSection(showOwnSaveButton) {
     return (
     <>
-      <label style={labelStyle}>Date</label>
+      <label style={labelStyle}>{t("common.date")}</label>
       <input
         type="date"
         value={newPhotoDate}
@@ -6036,7 +6086,7 @@ export default function CalorieTrackerApp() {
         style={inputStyle}
       />
 
-      <label style={labelStyle}>Photo</label>
+      <label style={labelStyle}>{t("photos.photo")}</label>
       <input
         type="file"
         accept="image/*"
@@ -6052,7 +6102,7 @@ export default function CalorieTrackerApp() {
           style={{ ...primaryButtonStyle, marginTop: 4, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
         >
           <Save size={14} strokeWidth={2.5} />
-          {photoUploading ? "Uploading…" : "Upload photo"}
+          {photoUploading ? t("common.uploading") : t("photos.upload")}
         </button>
       )}
       {showOwnSaveButton && photoError && (
@@ -6063,11 +6113,11 @@ export default function CalorieTrackerApp() {
 
       <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 18 }}>
         <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
-          Past photos
+          {t("photos.past")}
         </div>
 
         {photos.length === 0 ? (
-          <div style={{ fontSize: 12, color: INK_SOFT }}>No progress photos yet.</div>
+          <div style={{ fontSize: 12, color: INK_SOFT }}>{t("photos.empty")}</div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 12 }}>
             {photos.map((p) => (
@@ -6075,7 +6125,7 @@ export default function CalorieTrackerApp() {
                 {p.url ? (
                   <img
                     src={p.url}
-                    alt={`Progress photo from ${p.taken_at}`}
+                    alt={t("photos.alt", { date: p.taken_at })}
                     style={{ width: "100%", aspectRatio: "3 / 4", objectFit: "cover", borderRadius: 4, border: `1px solid ${GRID}`, display: "block" }}
                   />
                 ) : (
@@ -6094,7 +6144,7 @@ export default function CalorieTrackerApp() {
   }
 
   const notificationsSectionContent = !notificationSettings ? (
-    <div style={{ fontSize: 12, color: INK_SOFT }}>Loading notification settings…</div>
+    <div style={{ fontSize: 12, color: INK_SOFT }}>{t("notifications.loading")}</div>
   ) : (
     <>
       <div
@@ -6118,11 +6168,11 @@ export default function CalorieTrackerApp() {
               color: notificationSettings.target ? GREEN : INK_SOFT,
             }}
           >
-            {notificationSettings.target ? "Telegram: Connected ✓" : "Telegram: Not connected"}
+            {notificationSettings.target ? t("notifications.telegramConnected") : t("notifications.telegramNotConnected")}
           </div>
           {!notificationSettings.target && (
             <div style={{ fontSize: 11.5, color: INK_SOFT, marginTop: 4, maxWidth: 320, lineHeight: 1.4 }}>
-              Click below, then press Send in Telegram to connect your account.
+              {t("notifications.telegramHelp")}
             </div>
           )}
         </div>
@@ -6131,7 +6181,7 @@ export default function CalorieTrackerApp() {
           style={{ ...secondaryButtonStyle, fontSize: 11, padding: "6px 10px", flexShrink: 0 }}
           disabled={saving}
         >
-          Check connection
+          {t("notifications.checkConnection")}
         </button>
       </div>
 
@@ -6141,12 +6191,12 @@ export default function CalorieTrackerApp() {
           style={{ ...primaryButtonStyle, width: "auto", marginBottom: 20 }}
           disabled={saving}
         >
-          Connect Telegram
+          {t("notifications.connectTelegram")}
         </button>
       )}
 
       <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16 }}>
-        <label style={labelStyle}>Send me a daily summary</label>
+        <label style={labelStyle}>{t("notifications.dailySummary")}</label>
         <button
           onClick={() =>
             updateNotificationSettings({ daily_summary_enabled: !notificationSettings.daily_summary_enabled })
@@ -6154,12 +6204,12 @@ export default function CalorieTrackerApp() {
           style={{ ...toggleStyle(!!notificationSettings.daily_summary_enabled), marginBottom: 14 }}
           disabled={saving}
         >
-          {notificationSettings.daily_summary_enabled ? "On" : "Off"}
+          {notificationSettings.daily_summary_enabled ? t("common.on") : t("common.off")}
         </button>
 
         {notificationSettings.daily_summary_enabled && (
           <>
-            <label style={labelStyle}>At what time</label>
+            <label style={labelStyle}>{t("notifications.atWhatTime")}</label>
             <input
               type="time"
               value={notificationSettings.daily_summary_time || ""}
@@ -6170,7 +6220,7 @@ export default function CalorieTrackerApp() {
           </>
         )}
 
-        <label style={labelStyle}>Warn me when I'm approaching my limit</label>
+        <label style={labelStyle}>{t("notifications.warnLimit")}</label>
         <button
           onClick={() =>
             updateNotificationSettings({ threshold_enabled: !notificationSettings.threshold_enabled })
@@ -6178,12 +6228,12 @@ export default function CalorieTrackerApp() {
           style={{ ...toggleStyle(!!notificationSettings.threshold_enabled), marginBottom: 14 }}
           disabled={saving}
         >
-          {notificationSettings.threshold_enabled ? "On" : "Off"}
+          {notificationSettings.threshold_enabled ? t("common.on") : t("common.off")}
         </button>
 
         {notificationSettings.threshold_enabled && (
           <>
-            <label style={labelStyle}>Warn me at this % of my daily target</label>
+            <label style={labelStyle}>{t("notifications.warnPercent")}</label>
             <input
               type="number"
               value={thresholdPercentDraft}
@@ -6820,72 +6870,72 @@ export default function CalorieTrackerApp() {
           <div style={{ display: "flex", gap: 4, marginBottom: 20, borderBottom: `1px solid ${GRID}`, paddingBottom: 12 }}>
             {(isManagedClient
               ? [
-                  { id: "profile", label: "Profile Info" },
-                  { id: "myPlan", label: "My Plan" },
+                  { id: "profile", label: t("configTabs.profileInfo") },
+                  { id: "myPlan", label: t("configTabs.myPlan") },
                 ]
               : [
-                  { id: "profile", label: "Profile & program" },
-                  { id: "measurements", label: "Measurements" },
-                  { id: "photos", label: "Progress photos" },
-                  { id: "foodListConfig", label: "Configure your food list" },
-                  { id: "foodMaterials", label: "Create a plan" },
-                  { id: "notifications", label: "Notifications" },
+                  { id: "profile", label: t("configTabs.profileProgram") },
+                  { id: "measurements", label: t("configTabs.measurements") },
+                  { id: "photos", label: t("configTabs.photos") },
+                  { id: "foodListConfig", label: t("configTabs.foodList") },
+                  { id: "foodMaterials", label: t("configTabs.createPlan") },
+                  { id: "notifications", label: t("nav.notifications") },
                 ]
-            ).map((t) => (
+            ).map((tab) => (
               <button
-                key={t.id}
-                onClick={() => setConfigTab(t.id)}
+                key={tab.id}
+                onClick={() => setConfigTab(tab.id)}
                 style={{
                   padding: "7px 14px",
                   borderRadius: 4,
-                  border: `1px solid ${configTab === t.id ? TEAL : GRID}`,
-                  background: configTab === t.id ? TEAL_SOFT : PANEL,
-                  color: configTab === t.id ? TEAL : INK_SOFT,
+                  border: `1px solid ${configTab === tab.id ? TEAL : GRID}`,
+                  background: configTab === tab.id ? TEAL_SOFT : PANEL,
+                  color: configTab === tab.id ? TEAL : INK_SOFT,
                   fontFamily: "'Space Grotesk', sans-serif",
                   fontSize: 12.5,
                   fontWeight: 600,
                   cursor: "pointer",
                 }}
               >
-                {t.label}
+                {tab.label}
               </button>
             ))}
           </div>
 
           {configTab === "profile" && (
             <div style={panelStyle}>
-              <SectionTitle>{isManagedClient ? "Profile Info" : "Profile & program"}</SectionTitle>
+              <SectionTitle>{isManagedClient ? t("configTabs.profileInfo") : t("configTabs.profileProgram")}</SectionTitle>
 
               <div style={{ borderBottom: `1px solid ${GRID}`, paddingBottom: 16, marginBottom: 20 }}>
                 {!isManagedClient && (
                   <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                    Your account (set by your coach)
+                    {t("profile.accountSetByCoach")}
                   </div>
                 )}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                   <div>
-                    <div style={labelStyle}>Name</div>
-                    <div style={{ fontSize: 13 }}>{coachOwnedInfo.name || "—"}</div>
+                    <div style={labelStyle}>{t("profile.name")}</div>
+                    <div style={{ fontSize: 13 }}><bdi>{coachOwnedInfo.name || "—"}</bdi></div>
                   </div>
                   <div>
-                    <div style={labelStyle}>Email</div>
-                    <div style={{ fontSize: 13 }}>{coachOwnedInfo.email || "—"}</div>
+                    <div style={labelStyle}>{t("account.email")}</div>
+                    <div style={{ fontSize: 13 }}><bdi dir="ltr">{coachOwnedInfo.email || "—"}</bdi></div>
                   </div>
                   <div>
-                    <div style={labelStyle}>Mobile number</div>
-                    <div style={{ fontSize: 13 }}>{coachOwnedInfo.phone || "—"}</div>
+                    <div style={labelStyle}>{t("profile.mobile")}</div>
+                    <div style={{ fontSize: 13 }}><bdi dir="ltr">{coachOwnedInfo.phone || "—"}</bdi></div>
                   </div>
                   <div>
-                    <div style={labelStyle}>Plan dates</div>
+                    <div style={labelStyle}>{t("profile.planDates")}</div>
                     <div style={{ fontSize: 13 }}>
                       {coachOwnedInfo.planDateFrom || coachOwnedInfo.planDateTo
-                        ? `${coachOwnedInfo.planDateFrom || "—"} to ${coachOwnedInfo.planDateTo || "—"}`
+                        ? t("common.dateRange", { from: coachOwnedInfo.planDateFrom || "—", to: coachOwnedInfo.planDateTo || "—" })
                         : "—"}
                     </div>
                   </div>
                   {isManagedClient && (
                     <div>
-                      <div style={labelStyle}>Plan type</div>
+                      <div style={labelStyle}>{t("profile.planType")}</div>
                       <div style={{ fontSize: 13 }}>{coachOwnedInfo.planTypeName || "—"}</div>
                     </div>
                   )}
@@ -6894,20 +6944,20 @@ export default function CalorieTrackerApp() {
 
               {isManagedClient && (
                 <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                  Basic Info
+                  {t("profile.basicInfo")}
                 </div>
               )}
 
-              <label style={labelStyle}>Sex</label>
+              <label style={labelStyle}>{t("profile.sex")}</label>
               <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
                 {["male", "female"].map((s) => (
                   <button key={s} onClick={() => setProfile({ ...profile, sex: s })} style={toggleStyle(profile.sex === s)}>
-                    {s === "male" ? "Male" : "Female"}
+                    {s === "male" ? t("profile.male") : t("profile.female")}
                   </button>
                 ))}
               </div>
 
-              <label style={labelStyle}>Date of birth (optional)</label>
+              <label style={labelStyle}>{t("profile.dateOfBirth")}</label>
               <input
                 type="date"
                 value={profile.dateOfBirth || ""}
@@ -6921,11 +6971,11 @@ export default function CalorieTrackerApp() {
               />
               {profile.dateOfBirth && (
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT, marginTop: -8, marginBottom: 14 }}>
-                  Age: {profile.age} (calculated from date of birth)
+                  {t("profile.ageFromBirth", { age: profile.age })}
                 </div>
               )}
 
-              <label style={labelStyle}>Age{profile.dateOfBirth ? " (calculated)" : ""}</label>
+              <label style={labelStyle}>{profile.dateOfBirth ? t("profile.ageCalculated") : t("profile.age")}</label>
               <input
                 type="number"
                 value={profile.age}
@@ -6935,7 +6985,7 @@ export default function CalorieTrackerApp() {
                 disabled={!!profile.dateOfBirth}
               />
 
-              <label style={labelStyle}>Starting weight (kg)</label>
+              <label style={labelStyle}>{t("profile.startingWeight")}</label>
               <input
                 type="number"
                 value={profile.originalWeightKg}
@@ -6946,33 +6996,33 @@ export default function CalorieTrackerApp() {
               />
               {hasWeightCheckIn && (
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT, marginTop: -8, marginBottom: 14 }}>
-                  Locked after your first weigh-in. Log your current weight with your measurements.
+                  {t("profile.weightLocked")}
                 </div>
               )}
 
-              <label style={labelStyle}>Height (cm)</label>
+              <label style={labelStyle}>{t("profile.height")}</label>
               <input type="number" value={profile.heightCm} onChange={(e) => setProfile({ ...profile, heightCm: e.target.value })} style={inputStyle} />
 
-              <label style={labelStyle}>Activity level</label>
+              <label style={labelStyle}>{t("profile.activity")}</label>
               <select value={profile.activity} onChange={(e) => setProfile({ ...profile, activity: e.target.value })} style={inputStyle}>
                 {ACTIVITY_LEVELS.map((a) => (
                   <option key={a.id} value={a.id}>{a.label}</option>
                 ))}
               </select>
 
-              <label style={labelStyle}>Health issues or conditions (optional)</label>
+              <label style={labelStyle}>{t("profile.healthNotes")}</label>
               <textarea
                 value={profile.healthNotes || ""}
                 onChange={(e) => setProfile({ ...profile, healthNotes: e.target.value })}
-                placeholder="e.g. knee injury, hypertension, food allergies…"
+                placeholder={t("profile.healthNotesPlaceholder")}
                 rows={3}
                 style={{ ...inputStyle, resize: "vertical", fontFamily: "'IBM Plex Mono', monospace" }}
               />
 
-              <label style={labelStyle}>Health documents (optional)</label>
+              <label style={labelStyle}>{t("files.label")}</label>
               <div style={{ marginBottom: 14 }}>
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT, marginBottom: 8 }}>
-                  e.g. an InBody report. JPG, PNG, WebP or PDF, up to 10 MB each, {CLIENT_FILE_MAX_COUNT} files max. Files are saved right away and only you can see them.
+                  {t("files.help", { max: CLIENT_FILE_MAX_COUNT })}
                 </div>
                 <input
                   type="file"
@@ -6989,7 +7039,7 @@ export default function CalorieTrackerApp() {
                     disabled={clientFiles.length >= CLIENT_FILE_MAX_COUNT}
                     style={{ ...secondaryButtonStyle, opacity: clientFiles.length >= CLIENT_FILE_MAX_COUNT ? 0.5 : 1 }}
                   >
-                    <Paperclip size={14} /> Attach files
+                    <Paperclip size={14} /> {t("files.attach")}
                   </button>
                   <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT }}>
                     {clientFiles.length} / {CLIENT_FILE_MAX_COUNT}
@@ -7012,9 +7062,9 @@ export default function CalorieTrackerApp() {
                     }}
                   >
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>{u.name}</div>
+                      <div dir="auto" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600, textAlign: "start" }}>{u.name}</div>
                       <div style={{ fontSize: 11.5 }}>
-                        {u.status === "queued" ? "Waiting…" : u.status === "uploading" ? "Uploading…" : u.error}
+                        {u.status === "queued" ? t("files.waiting") : u.status === "uploading" ? t("common.uploading") : u.error}
                       </div>
                     </div>
                     {u.status === "failed" && (
@@ -7022,7 +7072,7 @@ export default function CalorieTrackerApp() {
                         type="button"
                         onClick={() => setClientFileUploads((prev) => prev.filter((x) => x.key !== u.key))}
                         style={{ border: "none", background: "transparent", color: RED, cursor: "pointer", padding: 4, display: "flex" }}
-                        aria-label="Dismiss"
+                        aria-label={t("files.dismiss")}
                       >
                         <X size={14} />
                       </button>
@@ -7037,7 +7087,7 @@ export default function CalorieTrackerApp() {
                 )}
 
                 {clientFilesLoading && clientFiles.length === 0 && (
-                  <div style={{ fontSize: 12, color: INK_SOFT }}>Loading files…</div>
+                  <div style={{ fontSize: 12, color: INK_SOFT }}>{t("files.loading")}</div>
                 )}
 
                 {clientFiles.map((f) => (
@@ -7048,7 +7098,7 @@ export default function CalorieTrackerApp() {
                     <button
                       type="button"
                       onClick={() => openClientFile(f)}
-                      style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, border: "none", background: "transparent", padding: 0, cursor: "pointer", textAlign: "left", color: INK }}
+                      style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, border: "none", background: "transparent", padding: 0, cursor: "pointer", textAlign: "start", color: INK }}
                     >
                       {f.thumbUrl ? (
                         <img src={f.thumbUrl} alt="" style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 4, border: `1px solid ${GRID}`, flexShrink: 0 }} />
@@ -7058,9 +7108,9 @@ export default function CalorieTrackerApp() {
                         </div>
                       )}
                       <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.file_name}</div>
+                        <div dir="auto" style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "start" }}>{f.file_name}</div>
                         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                          {formatFileSize(f.size_bytes)} · {localDateStr(new Date(f.created_at))}
+                          {t("files.meta", { size: formatFileSize(f.size_bytes), date: localDateStr(new Date(f.created_at)) })}
                         </div>
                       </div>
                     </button>
@@ -7069,7 +7119,7 @@ export default function CalorieTrackerApp() {
                       onClick={() => deleteClientFile(f)}
                       disabled={clientFileDeletingId === f.id}
                       style={{ border: "none", background: "transparent", color: RED, cursor: "pointer", padding: 8, display: "flex", flexShrink: 0, opacity: clientFileDeletingId === f.id ? 0.5 : 1 }}
-                      aria-label={`Delete ${f.file_name}`}
+                      aria-label={t("files.deleteLabel", { name: f.file_name })}
                     >
                       <Trash2 size={16} />
                     </button>
@@ -7077,18 +7127,18 @@ export default function CalorieTrackerApp() {
                 ))}
               </div>
 
-              <label style={labelStyle}>Goal</label>
+              <label style={labelStyle}>{t("profile.goal")}</label>
               <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
                 {["cut", "maintain", "bulk"].map((g) => (
                   <button key={g} onClick={() => setGoal({ ...goal, type: g })} style={{ ...toggleStyle(goal.type === g), flex: 1 }}>
-                    {g === "cut" ? "Cut" : g === "bulk" ? "Bulk" : "Maintain"}
+                    {g === "cut" ? t("profile.cut") : g === "bulk" ? t("profile.bulk") : t("profile.maintain")}
                   </button>
                 ))}
               </div>
 
               {goal.type !== "maintain" && (
                 <>
-                  <label style={labelStyle}>Pace</label>
+                  <label style={labelStyle}>{t("profile.pace")}</label>
                   <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
                     {RATES.map((r) => (
                       <button key={r.id} onClick={() => setGoal({ ...goal, rate: r.id })} style={{ ...toggleStyle(goal.rate === r.id), flex: 1, fontSize: 11 }}>
@@ -7102,7 +7152,7 @@ export default function CalorieTrackerApp() {
               {!isManagedClient && bmiInfo && (
                 <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 12, marginTop: 4, marginBottom: 4 }}>
                   <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                    Weight vs. international standard (BMI)
+                    {t("bmi.title")}
                   </div>
 
                   <div
@@ -7117,19 +7167,24 @@ export default function CalorieTrackerApp() {
                     }}
                   >
                     <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 12, fontWeight: 700, color: STATUS_META[bmiInfo.status].color, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                      {bmiInfo.category}
+                      {bmiCategoryLabel(bmiInfo)}
                     </span>
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: STATUS_META[bmiInfo.status].color }}>
-                      BMI {bmiInfo.bmi.toFixed(1)}
-                      {bmiInfo.diffLabel !== "within" && ` · ${bmiInfo.percentDiff.toFixed(1)}% ${bmiInfo.diffLabel} standard`}
+                      {t("bmi.value", { value: bmiInfo.bmi.toFixed(1) })}
+                      {bmiInfo.diffLabel !== "within" &&
+                        ` · ${
+                          bmiInfo.diffLabel === "above"
+                            ? t("bmi.aboveStandard", { percent: bmiInfo.percentDiff.toFixed(1) })
+                            : t("bmi.belowStandard", { percent: bmiInfo.percentDiff.toFixed(1) })
+                        }`}
                     </span>
                   </div>
 
                   <p style={{ fontSize: 12.5, lineHeight: 1.6, color: INK, margin: "0 0 4px 0" }}>
-                    {bmiInfo.sentence}
+                    {bmiSentence(bmiInfo)}
                   </p>
                   <p style={{ fontSize: 10.5, lineHeight: 1.5, color: INK_SOFT, margin: 0, fontStyle: "italic" }}>
-                    BMI is a general screening measure, not a diagnosis — it doesn't account for muscle mass, body composition, or individual health context.
+                    {t("bmi.disclaimer")}
                   </p>
                 </div>
               )}
@@ -7149,28 +7204,30 @@ export default function CalorieTrackerApp() {
                 >
                   <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 12, fontWeight: 700, color: TEAL, textTransform: "uppercase", letterSpacing: 0.5 }}>
                     {planOverride
-                      ? (JSON.stringify(planOverride) === JSON.stringify(savedPlanOverride) ? "Active plan (manual)" : "Proposed plan (manual)")
-                      : "Active plan (calculated)"}
+                      ? (JSON.stringify(planOverride) === JSON.stringify(savedPlanOverride) ? t("profile.activeManual") : t("profile.proposedManual"))
+                      : t("profile.activeCalculated")}
                   </span>
                   <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: TEAL }}>
-                    {effectivePlan.calories} kcal · P{effectivePlan.protein} C{effectivePlan.carbs} F{effectivePlan.fat}
+                    {t("profile.macroSummary", { calories: effectivePlan.calories, protein: effectivePlan.protein, carbs: effectivePlan.carbs, fat: effectivePlan.fat })}
                   </span>
                 </div>
 
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT, marginBottom: 8 }}>
-                  Calculated plan (from your profile & goal): {computedPlan.calories} kcal · P{computedPlan.protein} C{computedPlan.carbs} F{computedPlan.fat}
+                  {t("profile.calculatedPlan", {
+                    summary: t("profile.macroSummary", { calories: computedPlan.calories, protein: computedPlan.protein, carbs: computedPlan.carbs, fat: computedPlan.fat }),
+                  })}
                 </div>
                 <button
                   onClick={() => { setPlanOverride(null); setSavedPlanOverride(null); persist({ planOverride: null }); }}
                   style={{ ...toggleStyle(!planOverride), fontSize: 11, marginBottom: 10 }}
                 >
-                  Use calculated plan
+                  {t("profile.useCalculated")}
                 </button>
 
-                <label style={labelStyle}>Or set a manual daily target (kcal)</label>
+                <label style={labelStyle}>{t("profile.manualTarget")}</label>
                 <input
                   type="number"
-                  placeholder="e.g. 2200"
+                  placeholder={t("profile.manualTargetPlaceholder")}
                   value={planOverride ? planOverride.calories : ""}
                   onChange={(e) => {
                     const cal = Number(e.target.value) || 0;
@@ -7191,7 +7248,7 @@ export default function CalorieTrackerApp() {
                 <>
                   <button onClick={saveSetup} style={{ ...primaryButtonStyle, marginTop: 8, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}>
                     {setupSavedFlash ? <Check size={14} strokeWidth={2.5} /> : <Save size={14} strokeWidth={2.5} />}
-                    {setupSavedFlash ? "Configuration saved" : "Save configuration"}
+                    {setupSavedFlash ? t("profile.configSaved") : t("profile.saveConfig")}
                   </button>
                   {saveError && (
                     <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
@@ -7204,12 +7261,12 @@ export default function CalorieTrackerApp() {
               {isManagedClient && (
                 <>
                   <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 20, marginTop: 24 }}>
-                    <SectionTitle>Measurements</SectionTitle>
+                    <SectionTitle>{t("configTabs.measurements")}</SectionTitle>
                     {renderMeasurementsSection(false)}
                   </div>
 
                   <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 20, marginTop: 24 }}>
-                    <SectionTitle>Progress photos</SectionTitle>
+                    <SectionTitle>{t("configTabs.photos")}</SectionTitle>
                     {renderPhotosSection(false)}
                   </div>
 
@@ -7220,7 +7277,7 @@ export default function CalorieTrackerApp() {
                       style={{ ...primaryButtonStyle, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
                     >
                       {setupSavedFlash ? <Check size={14} strokeWidth={2.5} /> : <Save size={14} strokeWidth={2.5} />}
-                      {saving || measurementSaving || photoUploading ? "Saving…" : setupSavedFlash ? "Saved" : "Save"}
+                      {saving || measurementSaving || photoUploading ? t("common.saving") : setupSavedFlash ? t("common.saved") : t("common.save")}
                     </button>
                     {(saveError || measurementError || photoError) && (
                       <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
@@ -7235,20 +7292,20 @@ export default function CalorieTrackerApp() {
 
           {isManagedClient && configTab === "myPlan" && (
             <div style={panelStyle}>
-              <SectionTitle>My Plan</SectionTitle>
+              <SectionTitle>{t("configTabs.myPlan")}</SectionTitle>
 
               {ownPlanStatus !== "active" ? (
-                <div style={{ fontSize: 12, color: INK_SOFT }}>No active plan configured.</div>
+                <div style={{ fontSize: 12, color: INK_SOFT }}>{t("myPlan.noActivePlan")}</div>
               ) : (
                 <>
                   {planName && (
                     <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 6 }}>
-                      {planName}
+                      <bdi>{planName}</bdi>
                     </div>
                   )}
                   {(planDateFrom || planDateTo) && (
                     <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: INK_SOFT, marginBottom: 14 }}>
-                      {planDateFrom || "—"} to {planDateTo || "—"}
+                      {t("common.dateRange", { from: planDateFrom || "—", to: planDateTo || "—" })}
                     </div>
                   )}
 
@@ -7261,7 +7318,7 @@ export default function CalorieTrackerApp() {
                   />
 
                   {foods.length === 0 ? (
-                    <div style={{ fontSize: 12, color: INK_SOFT }}>Your coach hasn't added any foods to your plan yet.</div>
+                    <div style={{ fontSize: 12, color: INK_SOFT }}>{t("myPlan.noFoodsFromCoach")}</div>
                   ) : (
                     <MealPlanCards foods={foods} />
                   )}
@@ -7272,23 +7329,23 @@ export default function CalorieTrackerApp() {
 
           {!isManagedClient && configTab === "measurements" && (
             <div style={panelStyle}>
-              <SectionTitle>Measurements</SectionTitle>
+              <SectionTitle>{t("configTabs.measurements")}</SectionTitle>
               {renderMeasurementsSection(true)}
             </div>
           )}
 
           {!isManagedClient && configTab === "photos" && (
             <div style={panelStyle}>
-              <SectionTitle>Progress photos</SectionTitle>
+              <SectionTitle>{t("configTabs.photos")}</SectionTitle>
               {renderPhotosSection(true)}
             </div>
           )}
 
           {!isManagedClient && configTab === "foodMaterials" && (
             <div style={panelStyle}>
-              <SectionTitle>Create a plan</SectionTitle>
+              <SectionTitle>{t("configTabs.createPlan")}</SectionTitle>
               <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 10 }}>
-                Define your plan
+                {t("createPlan.define")}
               </div>
               <div style={{ marginBottom: 14 }}>
                 <span
@@ -7302,7 +7359,7 @@ export default function CalorieTrackerApp() {
                     fontWeight: 700,
                   }}
                 >
-                  This plan's daily target: {effectivePlan.calories} kcal
+                  {t("createPlan.dailyTarget", { calories: effectivePlan.calories })}
                 </span>
               </div>
               <div
@@ -7317,13 +7374,13 @@ export default function CalorieTrackerApp() {
                   marginBottom: 14,
                 }}
               >
-                Select a food from your list, then enter the grams — calories are calculated automatically from the calories per 100g you set in "Configure your food list".
+                {t("createPlan.help")}
               </div>
 
-              <label style={labelStyle}>Plan name</label>
+              <label style={labelStyle}>{t("createPlan.name")}</label>
               <input
                 type="text"
-                placeholder="e.g. Cutting phase — September"
+                placeholder={t("createPlan.namePlaceholder")}
                 value={planName}
                 onChange={(e) => {
                   const val = e.target.value;
@@ -7335,7 +7392,7 @@ export default function CalorieTrackerApp() {
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 6 }}>
                 <div>
-                  <label style={labelStyle}>Date from</label>
+                  <label style={labelStyle}>{t("dates.from")}</label>
                   <input
                     type="date"
                     value={planDateFrom}
@@ -7348,7 +7405,7 @@ export default function CalorieTrackerApp() {
                   />
                 </div>
                 <div>
-                  <label style={labelStyle}>Date to</label>
+                  <label style={labelStyle}>{t("dates.to")}</label>
                   <input
                     type="date"
                     value={planDateTo}
@@ -7363,14 +7420,14 @@ export default function CalorieTrackerApp() {
               </div>
               {planDateFrom && planDateTo && planDateTo < planDateFrom ? (
                 <div style={{ marginBottom: 16, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                  "Date to" can't be earlier than "Date from". Please enter a valid date range.
+                  {t("dates.invalidRange")}
                 </div>
               ) : (
                 <div style={{ marginBottom: 16 }} />
               )}
 
               <div style={{ marginBottom: 14 }}>
-                <label style={labelStyle}>Food name</label>
+                <label style={labelStyle}>{t("food.name")}</label>
                 <select
                   value={newFood.personalFoodId}
                   onChange={(e) => {
@@ -7380,16 +7437,16 @@ export default function CalorieTrackerApp() {
                   style={inputStyle}
                   disabled={personalFoods.length === 0}
                 >
-                  <option value="">{personalFoods.length === 0 ? "No foods configured yet" : "Select a food…"}</option>
+                  <option value="">{personalFoods.length === 0 ? t("food.noneConfigured") : t("food.select")}</option>
                   {personalFoods.map((f) => (
                     <option key={f.id} value={f.id}>{f.name}</option>
                   ))}
                 </select>
 
-                <label style={labelStyle}>Grams</label>
+                <label style={labelStyle}>{t("food.grams")}</label>
                 <input
                   type="number"
-                  placeholder="Grams"
+                  placeholder={t("food.grams")}
                   value={newFood.grams}
                   onChange={(e) => {
                     const grams = e.target.value;
@@ -7401,16 +7458,16 @@ export default function CalorieTrackerApp() {
                   style={inputStyle}
                 />
 
-                <label style={labelStyle}>Calories</label>
+                <label style={labelStyle}>{t("food.calories")}</label>
                 <input
                   type="number"
-                  placeholder="Calories"
+                  placeholder={t("food.calories")}
                   value={newFood.calories}
                   readOnly
                   style={{ ...inputStyle, background: PAPER, color: INK_SOFT, cursor: "not-allowed" }}
                 />
 
-                <label style={labelStyle}>Meal</label>
+                <label style={labelStyle}>{t("food.meal")}</label>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
                   {MEALS.map((m) => (
                     <button
@@ -7418,12 +7475,12 @@ export default function CalorieTrackerApp() {
                       onClick={() => setNewFood({ ...newFood, meal: m })}
                       style={{ ...toggleStyle(newFood.meal === m), fontSize: 11, padding: "6px 10px" }}
                     >
-                      {m}
+                      {mealLabel(m)}
                     </button>
                   ))}
                 </div>
 
-                <label style={labelStyle}>Course</label>
+                <label style={labelStyle}>{t("food.course")}</label>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
                   {COURSES.map((c) => (
                     <button
@@ -7431,13 +7488,13 @@ export default function CalorieTrackerApp() {
                       onClick={() => setNewFood({ ...newFood, course: c })}
                       style={{ ...toggleStyle(newFood.course === c), fontSize: 11, padding: "6px 10px" }}
                     >
-                      {c}
+                      {courseLabel(c)}
                     </button>
                   ))}
                 </div>
 
                 <button onClick={addFood} style={{ ...secondaryButtonStyle, width: "auto", background: GREEN, border: `1px solid ${GREEN}`, color: "#FFFFFF" }}>
-                  <Plus size={14} strokeWidth={2.5} /> Add food
+                  <Plus size={14} strokeWidth={2.5} /> {t("createPlan.addFood")}
                 </button>
 
                 {addFoodError && (
@@ -7448,7 +7505,7 @@ export default function CalorieTrackerApp() {
               </div>
 
               <div style={{ maxHeight: 340, overflowY: "auto" }}>
-                {foods.length === 0 && <div style={{ fontSize: 12, color: INK_SOFT }}>No foods added yet.</div>}
+                {foods.length === 0 && <div style={{ fontSize: 12, color: INK_SOFT }}>{t("createPlan.noFoods")}</div>}
                 {MEALS.map((mealName) => {
                   const mealFoods = foods.filter((f) => f.meal === mealName);
                   if (mealFoods.length === 0) return null;
@@ -7477,7 +7534,7 @@ export default function CalorieTrackerApp() {
                             letterSpacing: 0.5,
                           }}
                         >
-                          {mealName}
+                          {mealLabel(mealName)}
                         </span>
                       </div>
                       {COURSES.map((courseName) => {
@@ -7500,17 +7557,17 @@ export default function CalorieTrackerApp() {
                                 display: "inline-block",
                               }}
                             >
-                              {courseName}
+                              {courseLabel(courseName)}
                             </div>
                             {courseFoods.map((f) => (
                               <div key={f.id} style={foodRowStyle}>
                                 <div>
-                                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
+                                  <div dir="auto" style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
                                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                                    {f.grams}g · {f.calories} kcal
+                                    {t("plan.foodRow", { grams: f.grams, calories: f.calories })}
                                   </div>
                                 </div>
-                                <button onClick={() => removeFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
+                                <button onClick={() => removeFood(f.id)} style={iconButtonStyle} aria-label={t("plan.removeFood")}>
                                   <Trash2 size={14} />
                                 </button>
                               </div>
@@ -7527,7 +7584,7 @@ export default function CalorieTrackerApp() {
 
           {!isManagedClient && configTab === "foodListConfig" && (
             <div style={panelStyle}>
-              <SectionTitle>Configure your food list</SectionTitle>
+              <SectionTitle>{t("configTabs.foodList")}</SectionTitle>
               <div
                 style={{
                   fontSize: 12,
@@ -7540,21 +7597,21 @@ export default function CalorieTrackerApp() {
                   marginBottom: 14,
                 }}
               >
-                Build your own personal food database. Add each food's calories per 100g once here, and it becomes selectable in the Food materials tab.
+                {t("foodList.help")}
               </div>
 
-              <label style={labelStyle}>Food name</label>
+              <label style={labelStyle}>{t("food.name")}</label>
               <input
-                placeholder="Food name"
+                placeholder={t("food.name")}
                 value={newPersonalFood.name}
                 onChange={(e) => setNewPersonalFood({ ...newPersonalFood, name: e.target.value })}
                 style={inputStyle}
               />
-              <label style={labelStyle}>Calories per 100g (optional)</label>
+              <label style={labelStyle}>{t("foodList.caloriesOptional")}</label>
               <input
                 type="text"
                 inputMode="decimal"
-                placeholder="Calories per 100g"
+                placeholder={t("foodList.caloriesPlaceholder")}
                 value={newPersonalFood.calPer100g}
                 onChange={(e) => {
                   const raw = e.target.value.replace(/[^0-9.]/g, "");
@@ -7566,7 +7623,7 @@ export default function CalorieTrackerApp() {
                 style={inputStyle}
               />
               <button onClick={addPersonalFood} style={{ ...secondaryButtonStyle, width: "auto", background: GREEN, border: `1px solid ${GREEN}`, color: "#FFFFFF" }}>
-                <Plus size={14} strokeWidth={2.5} /> Add to list
+                <Plus size={14} strokeWidth={2.5} /> {t("foodList.add")}
               </button>
               {personalFoodError && (
                 <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
@@ -7575,16 +7632,16 @@ export default function CalorieTrackerApp() {
               )}
 
               <div style={{ marginTop: 16, maxHeight: 340, overflowY: "auto" }}>
-                {personalFoods.length === 0 && <div style={{ fontSize: 12, color: INK_SOFT }}>No foods in your list yet.</div>}
+                {personalFoods.length === 0 && <div style={{ fontSize: 12, color: INK_SOFT }}>{t("foodList.empty")}</div>}
                 {personalFoods.map((f) => (
                   <div key={f.id} style={foodRowStyle}>
                     <div>
-                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
+                      <div dir="auto" style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{f.name}</div>
                       <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                        {f.calPer100g ? `${f.calPer100g} kcal / 100g` : "No calories set"}
+                        {f.calPer100g ? t("foodList.perHundred", { value: f.calPer100g }) : t("foodList.noCalories")}
                       </div>
                     </div>
-                    <button onClick={() => removePersonalFood(f.id)} style={iconButtonStyle} aria-label="Remove food">
+                    <button onClick={() => removePersonalFood(f.id)} style={iconButtonStyle} aria-label={t("plan.removeFood")}>
                       <Trash2 size={14} />
                     </button>
                   </div>
@@ -7595,7 +7652,7 @@ export default function CalorieTrackerApp() {
 
           {!isManagedClient && configTab === "notifications" && (
             <div style={panelStyle}>
-              <SectionTitle>Notifications</SectionTitle>
+              <SectionTitle>{t("nav.notifications")}</SectionTitle>
               {notificationsSectionContent}
             </div>
           )}
@@ -7604,7 +7661,7 @@ export default function CalorieTrackerApp() {
 
       {isManagedClient && view === "notifications" && (
         <div style={panelStyle}>
-          <SectionTitle>Notifications</SectionTitle>
+          <SectionTitle>{t("nav.notifications")}</SectionTitle>
           {notificationsSectionContent}
         </div>
       )}
@@ -7615,9 +7672,9 @@ export default function CalorieTrackerApp() {
         <>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
           <div style={panelStyle}>
-            <SectionTitle>Add meal</SectionTitle>
+            <SectionTitle>{t("log.addMeal")}</SectionTitle>
 
-            <label style={labelStyle}>Date</label>
+            <label style={labelStyle}>{t("common.date")}</label>
             <input
               type="date"
               value={selectedDate}
@@ -7627,7 +7684,7 @@ export default function CalorieTrackerApp() {
               style={inputStyle}
             />
 
-            <label style={labelStyle}>Log this entry under</label>
+            <label style={labelStyle}>{t("log.logUnder")}</label>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
               {MEALS.map((m) => (
                 <button
@@ -7635,42 +7692,42 @@ export default function CalorieTrackerApp() {
                   onClick={() => setLogMeal(m)}
                   style={{ ...toggleStyle(logMeal === m), fontSize: 11, padding: "6px 10px" }}
                 >
-                  {m}
+                  {mealLabel(m)}
                 </button>
               ))}
             </div>
 
-            <label style={labelStyle}>From food list</label>
+            <label style={labelStyle}>{t("log.fromList")}</label>
             <select
               value={entryFoodId}
               onChange={(e) => setEntryFoodId(e.target.value)}
               style={inputStyle}
               disabled={uniquePlanFoodNames.length === 0}
             >
-              <option value="">{uniquePlanFoodNames.length === 0 ? "No foods configured yet" : "Select a food…"}</option>
+              <option value="">{uniquePlanFoodNames.length === 0 ? t("food.noneConfigured") : t("food.select")}</option>
               {uniquePlanFoodNames.map((name) => (
                 <option key={name} value={name}>{name}</option>
               ))}
             </select>
 
-            <label style={labelStyle}>Or log anything not in the list (manual entry)</label>
+            <label style={labelStyle}>{t("log.manualEntry")}</label>
             <input
-              placeholder="Item name"
+              placeholder={t("log.itemName")}
               value={customName}
               onChange={(e) => setCustomName(e.target.value)}
               style={inputStyle}
             />
 
-            <label style={labelStyle}>Grams</label>
-            <input type="number" placeholder="Grams" value={entryGrams} onChange={(e) => setEntryGrams(e.target.value)} style={inputStyle} />
+            <label style={labelStyle}>{t("food.grams")}</label>
+            <input type="number" placeholder={t("food.grams")} value={entryGrams} onChange={(e) => setEntryGrams(e.target.value)} style={inputStyle} />
 
             {customName && !entryFoodId && (
               <>
-                <label style={labelStyle}>Calories per 100 gram</label>
+                <label style={labelStyle}>{t("log.caloriesPer100")}</label>
                 <input
                   type="text"
                   inputMode="numeric"
-                  placeholder="Calories per 100 gram"
+                  placeholder={t("log.caloriesPer100")}
                   value={entryCalPer100g}
                   onChange={(e) => setEntryCalPer100g(e.target.value.replace(/[^0-9]/g, ""))}
                   style={inputStyle}
@@ -7678,7 +7735,7 @@ export default function CalorieTrackerApp() {
               </>
             )}
 
-            <label style={labelStyle}>Calories per your entered grams</label>
+            <label style={labelStyle}>{t("log.caloriesForGrams")}</label>
             <input
               type="number"
               value={entryCalories}
@@ -7687,7 +7744,7 @@ export default function CalorieTrackerApp() {
             />
 
             <button onClick={addEntry} style={{ ...secondaryButtonStyle, width: "auto", background: GREEN, border: `1px solid ${GREEN}`, color: "#FFFFFF" }}>
-              <Plus size={14} strokeWidth={2.5} /> Log this item
+              <Plus size={14} strokeWidth={2.5} /> {t("log.logItem")}
             </button>
             {entryError && (
               <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
@@ -7697,10 +7754,10 @@ export default function CalorieTrackerApp() {
 
             <div style={{ marginTop: 16 }}>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                My meals
+                {t("log.myMeals")}
               </div>
 
-              <label style={labelStyle}>Filter by</label>
+              <label style={labelStyle}>{t("log.filterBy")}</label>
               <select
                 value={tableFilterType}
                 onChange={(e) => {
@@ -7713,17 +7770,17 @@ export default function CalorieTrackerApp() {
                 }}
                 style={inputStyle}
               >
-                <option value="">No filter</option>
-                <option value="date">Date</option>
-                <option value="meal">Meal</option>
-                <option value="food">Food</option>
+                <option value="">{t("log.noFilter")}</option>
+                <option value="date">{t("common.date")}</option>
+                <option value="meal">{t("food.meal")}</option>
+                <option value="food">{t("food.food")}</option>
               </select>
 
               {tableFilterType === "date" && (
                 <>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 6 }}>
                     <div>
-                      <label style={labelStyle}>Date from</label>
+                      <label style={labelStyle}>{t("dates.from")}</label>
                       <input
                         type="date"
                         value={tableFilterDateFrom}
@@ -7732,7 +7789,7 @@ export default function CalorieTrackerApp() {
                       />
                     </div>
                     <div>
-                      <label style={labelStyle}>Date to</label>
+                      <label style={labelStyle}>{t("dates.to")}</label>
                       <input
                         type="date"
                         value={tableFilterDateTo}
@@ -7743,7 +7800,7 @@ export default function CalorieTrackerApp() {
                   </div>
                   {tableFilterDateFrom && tableFilterDateTo && tableFilterDateTo < tableFilterDateFrom && (
                     <div style={{ marginBottom: 10, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
-                      "Date to" can't be earlier than "Date from". Please enter a valid date range.
+                      {t("dates.invalidRange")}
                     </div>
                   )}
                 </>
@@ -7751,15 +7808,15 @@ export default function CalorieTrackerApp() {
 
               {tableFilterType === "meal" && (
                 <div style={{ marginBottom: 10 }}>
-                  <label style={labelStyle}>Meal</label>
+                  <label style={labelStyle}>{t("food.meal")}</label>
                   <select
                     value={tableFilterMeal}
                     onChange={(e) => { setTableFilterMeal(e.target.value); setTablePage(1); }}
                     style={{ ...inputStyle, marginBottom: 0 }}
                   >
-                    <option value="">All meals</option>
+                    <option value="">{t("log.allMeals")}</option>
                     {MEALS.map((m) => (
-                      <option key={m} value={m}>{m}</option>
+                      <option key={m} value={m}>{mealLabel(m)}</option>
                     ))}
                   </select>
                 </div>
@@ -7767,13 +7824,13 @@ export default function CalorieTrackerApp() {
 
               {tableFilterType === "food" && (
                 <div style={{ marginBottom: 10 }}>
-                  <label style={labelStyle}>Food</label>
+                  <label style={labelStyle}>{t("food.food")}</label>
                   <select
                     value={tableFilterFood}
                     onChange={(e) => { setTableFilterFood(e.target.value); setTablePage(1); }}
                     style={{ ...inputStyle, marginBottom: 0 }}
                   >
-                    <option value="">All foods</option>
+                    <option value="">{t("log.allFoods")}</option>
                     {uniqueFoodNames.map((n) => (
                       <option key={n} value={n}>{n}</option>
                     ))}
@@ -7793,22 +7850,22 @@ export default function CalorieTrackerApp() {
                   }}
                   style={{ ...secondaryButtonStyle, fontSize: 11, padding: "5px 10px", marginBottom: 10 }}
                 >
-                  Clear filter
+                  {t("log.clearFilter")}
                 </button>
               )}
 
-              {filteredMealEntries.length === 0 && <div style={{ fontSize: 12, color: INK_SOFT }}>No meals match this view yet.</div>}
+              {filteredMealEntries.length === 0 && <div style={{ fontSize: 12, color: INK_SOFT }}>{t("log.noMatch")}</div>}
               {filteredMealEntries.length > 0 && (
                 <>
                   <div style={{ border: `1px solid ${GRID}`, borderRadius: 4 }}>
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                       <thead>
                         <tr style={{ background: TEAL_SOFT }}>
-                          <th style={thStyle}>Date</th>
-                          <th style={thStyle}>Meal</th>
-                          <th style={thStyle}>Food</th>
-                          <th style={thStyle}>Grams (g)</th>
-                          <th style={thStyle}>Calories (kcal)</th>
+                          <th style={thStyle}>{t("common.date")}</th>
+                          <th style={thStyle}>{t("food.meal")}</th>
+                          <th style={thStyle}>{t("food.food")}</th>
+                          <th style={thStyle}>{t("log.gramsHeader")}</th>
+                          <th style={thStyle}>{t("log.caloriesHeader")}</th>
                           <th style={thStyle}></th>
                         </tr>
                       </thead>
@@ -7816,12 +7873,12 @@ export default function CalorieTrackerApp() {
                         {pagedMealEntries.map((e) => (
                           <tr key={e.id} style={{ borderTop: `1px solid ${GRID}` }}>
                             <td style={tdStyle}>{e.date}</td>
-                            <td style={tdStyle}>{e.meal || "—"}</td>
-                            <td style={{ ...tdStyle, fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600 }}>{e.name}</td>
+                            <td style={tdStyle}>{e.meal ? mealLabel(e.meal) : "—"}</td>
+                            <td style={{ ...tdStyle, fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600 }}><bdi>{e.name}</bdi></td>
                             <td style={tdStyle}>{e.grams || 0}</td>
                             <td style={tdStyle}>{e.calories}</td>
                             <td style={{ ...tdStyle, textAlign: "end" }}>
-                              <button onClick={() => removeEntryOn(e.date, e.id)} style={iconButtonStyle} aria-label="Remove entry">
+                              <button onClick={() => removeEntryOn(e.date, e.id)} style={iconButtonStyle} aria-label={t("log.removeEntry")}>
                                 <Trash2 size={13} />
                               </button>
                             </td>
@@ -7837,17 +7894,17 @@ export default function CalorieTrackerApp() {
                       disabled={clampedTablePage <= 1}
                       style={{ ...secondaryButtonStyle, fontSize: 11, padding: "5px 10px", opacity: clampedTablePage <= 1 ? 0.5 : 1, cursor: clampedTablePage <= 1 ? "not-allowed" : "pointer" }}
                     >
-                      Previous
+                      {t("pagination.previous")}
                     </button>
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                      Page {clampedTablePage} of {totalTablePages}
+                      {t("pagination.pageOf", { page: clampedTablePage, total: totalTablePages })}
                     </span>
                     <button
                       onClick={() => setTablePage((p) => Math.min(totalTablePages, p + 1))}
                       disabled={clampedTablePage >= totalTablePages}
                       style={{ ...secondaryButtonStyle, fontSize: 11, padding: "5px 10px", opacity: clampedTablePage >= totalTablePages ? 0.5 : 1, cursor: clampedTablePage >= totalTablePages ? "not-allowed" : "pointer" }}
                     >
-                      Next
+                      {t("pagination.next")}
                     </button>
                   </div>
                 </>
@@ -7856,19 +7913,19 @@ export default function CalorieTrackerApp() {
           </div>
 
           <div style={panelStyle}>
-            <SectionTitle>Today vs plan</SectionTitle>
-            <MetricRow label="Calories" actual={dayTotals.calories} target={effectivePlan.calories} unit=" kcal" />
+            <SectionTitle>{t("log.todayVsPlan")}</SectionTitle>
+            <MetricRow label={t("food.calories")} actual={dayTotals.calories} target={effectivePlan.calories} unit={` ${t("units.kcal")}`} />
             <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 12, lineHeight: 1.5 }}>
-              Green means within {TOLERANCE * 100}% of target. Red means over. Yellow means under.
+              {t("log.legend", { percent: TOLERANCE * 100 })}
             </div>
           </div>
         </div>
 
         <div style={{ ...panelStyle, marginTop: 20 }}>
-          <SectionTitle>Plan comparison</SectionTitle>
+          <SectionTitle>{t("log.planComparison")}</SectionTitle>
 
           {ownPlanStatus !== "active" ? (
-            <div style={{ fontSize: 12, color: INK_SOFT }}>No active plan configured.</div>
+            <div style={{ fontSize: 12, color: INK_SOFT }}>{t("myPlan.noActivePlan")}</div>
           ) : (
           <>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
@@ -7883,11 +7940,11 @@ export default function CalorieTrackerApp() {
                 cursor: !planDateFrom || comparisonDayIndex <= 1 ? "not-allowed" : "pointer",
               }}
             >
-              Previous
+              {t("pagination.previous")}
             </button>
             <div style={{ textAlign: "center" }}>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                Day {comparisonDayIndex} of {planTotalDays}
+                {t("log.dayOf", { day: comparisonDayIndex, total: planTotalDays })}
               </div>
               <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 700 }}>
                 {comparisonDate}
@@ -7904,12 +7961,12 @@ export default function CalorieTrackerApp() {
                 cursor: !planDateTo || comparisonDayIndex >= planTotalDays ? "not-allowed" : "pointer",
               }}
             >
-              Next
+              {t("pagination.next")}
             </button>
           </div>
 
           {actualEntriesForDay.length === 0 ? (
-            <div style={{ fontSize: 12, color: INK_SOFT }}>Nothing logged for this day yet.</div>
+            <div style={{ fontSize: 12, color: INK_SOFT }}>{t("log.nothingLogged")}</div>
           ) : (
             <>
               <div
@@ -7925,11 +7982,11 @@ export default function CalorieTrackerApp() {
               >
                 <div>
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: STATUS_META[dailyStatus].color, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>
-                    Daily total
+                    {t("log.dailyTotal")}
                   </div>
                   <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 700 }}>
                     {dailyActualTotal}
-                    <span style={{ fontSize: 15, fontWeight: 600, color: INK_SOFT }}> / {effectivePlan.calories} kcal</span>
+                    <span style={{ fontSize: 15, fontWeight: 600, color: INK_SOFT }}> / {t("units.kcalValue", { value: effectivePlan.calories })}</span>
                   </div>
                 </div>
                 <StatusBadge status={dailyStatus} />
@@ -7959,10 +8016,10 @@ export default function CalorieTrackerApp() {
                           letterSpacing: 0.5,
                         }}
                       >
-                        {mealName}
+                        {mealLabel(mealName)}
                       </span>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL }}>
-                        {mealActualTotal} / {mealConfiguredTotal} kcal
+                        {t("log.ofTarget", { actual: mealActualTotal, target: mealConfiguredTotal })}
                       </span>
                     </div>
 
@@ -7972,11 +8029,16 @@ export default function CalorieTrackerApp() {
                       return (
                         <div key={row.name} style={foodRowStyle}>
                           <div>
-                            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{row.name}</div>
+                            <div dir="auto" style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{row.name}</div>
                             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
                               {row.matched
-                                ? `${row.actualGrams} / ${row.configuredGrams} g · ${row.actualCalories} / ${row.configuredCalories} kcal`
-                                : `${row.actualGrams} g · ${row.actualCalories} kcal`}
+                                ? t("log.matchedRow", {
+                                    actualGrams: row.actualGrams,
+                                    configuredGrams: row.configuredGrams,
+                                    actualCalories: row.actualCalories,
+                                    configuredCalories: row.configuredCalories,
+                                  })
+                                : t("log.unmatchedRow", { grams: row.actualGrams, calories: row.actualCalories })}
                             </div>
                           </div>
                           {row.matched ? (
@@ -7997,7 +8059,7 @@ export default function CalorieTrackerApp() {
                                 letterSpacing: 0.4,
                               }}
                             >
-                              Not tracked
+                              {t("log.notTracked")}
                             </span>
                           )}
                         </div>
@@ -8017,15 +8079,15 @@ export default function CalorieTrackerApp() {
       {view === "history" && (
         <div style={panelStyle}>
           <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 4 }}>
-            Daily total vs configured target
+            {t("history.title")}
           </div>
 
           {planExpired ? (
-            <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 10 }}>No active plan configured.</div>
+            <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 10 }}>{t("myPlan.noActivePlan")}</div>
           ) : (
             <>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT, marginBottom: 20 }}>
-                dashed line = {effectivePlan.calories} kcal target
+                {t("history.dashedLine", { calories: effectivePlan.calories })}
               </div>
 
               <div dir="ltr" style={{ overflowX: "auto" }}>
@@ -8054,7 +8116,7 @@ export default function CalorieTrackerApp() {
                         whiteSpace: "nowrap",
                       }}
                     >
-                      {effectivePlan.calories} kcal
+                      {t("units.kcalValue", { value: effectivePlan.calories })}
                     </span>
                     <div style={{ display: "flex", alignItems: "flex-end", height: "100%", gap: HISTORY_COL_GAP }}>
                       {historyDayData.map((d) => {
@@ -8076,7 +8138,7 @@ export default function CalorieTrackerApp() {
                           >
                             {d.hasEntries && (
                               <div
-                                title={`${d.date}: ${d.actualTotal} kcal`}
+                                title={t("history.barTitle", { date: d.date, calories: d.actualTotal })}
                                 style={{
                                   width: "70%",
                                   height: `${barPct}%`,
@@ -8120,11 +8182,11 @@ export default function CalorieTrackerApp() {
                 ))}
                 <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
                   <span style={{ width: 14, borderTop: `2px dashed ${INK_SOFT}`, display: "inline-block" }} />
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT }}>Target</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT }}>{t("history.target")}</span>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
                   <span style={{ width: 10, height: 10, borderRadius: 2, border: `1px dashed ${GRID}`, display: "inline-block" }} />
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT }}>Not logged</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: INK_SOFT }}>{t("history.notLogged")}</span>
                 </div>
               </div>
 
@@ -8143,7 +8205,7 @@ export default function CalorieTrackerApp() {
                     <div>
                       <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>{d.date}</div>
                       <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-                        {d.actualTotal} / {effectivePlan.calories} kcal
+                        {t("log.ofTarget", { actual: d.actualTotal, target: effectivePlan.calories })}
                       </div>
                     </div>
                     {d.hasEntries ? (
@@ -8164,7 +8226,7 @@ export default function CalorieTrackerApp() {
                           letterSpacing: 0.4,
                         }}
                       >
-                        Not logged
+                        {t("history.notLogged")}
                       </span>
                     )}
                   </div>
@@ -8177,18 +8239,18 @@ export default function CalorieTrackerApp() {
 
       {view === "chat" && (
         <div style={panelStyle}>
-          <SectionTitle>Chat</SectionTitle>
+          <SectionTitle>{t("nav.chat")}</SectionTitle>
           {myCoachLoading ? (
-            <div style={{ fontSize: 12, color: INK_SOFT }}>Loading…</div>
+            <div style={{ fontSize: 12, color: INK_SOFT }}>{t("common.loading")}</div>
           ) : !myCoachId ? (
-            <div style={{ fontSize: 12.5, color: INK_SOFT }}>You don't have an active coach yet.</div>
+            <div style={{ fontSize: 12.5, color: INK_SOFT }}>{t("chat.noCoach")}</div>
           ) : (
             <ChatThread
               messages={chatMessages}
               loading={chatLoading}
               error={chatError}
               currentUserId={session && session.user.id}
-              headerLabel={myCoachName || "Your coach"}
+              headerLabel={myCoachName || t("chat.yourCoach")}
               input={chatInput}
               onInputChange={setChatInput}
               onSend={() => sendChatMessage(myCoachId)}

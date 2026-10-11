@@ -17,7 +17,13 @@
     "send": "Send",
     "close": "Close",
     "uploading": "Uploading…",
-    "genericError": "Something went wrong."
+    "genericError": "Something went wrong.",
+    "date": "Date",
+    "loading": "Loading…",
+    "on": "On",
+    "off": "Off",
+    "unknownError": "unknown error",
+    "dateRange": "{{from}} to {{to}}"
   },
   "language": {
     "label": "Language",
@@ -68,7 +74,9 @@
   },
   "loadFailed": {
     "title": "Couldn't load your account",
-    "body": "Something went wrong while signing you in."
+    "body": "Something went wrong while signing you in.",
+    "data": "Couldn't load your data: {{reason}}",
+    "dataGeneric": "Couldn't load your data."
   },
   "account": {
     "title": "Account",
@@ -146,6 +154,271 @@
     "loading": "Loading messages…",
     "empty": "No messages yet. Say hello!",
     "placeholder": "Type a message…",
-    "sending": "Sending…"
+    "sending": "Sending…",
+    "yourCoach": "Your coach",
+    "noCoach": "You don't have an active coach yet.",
+    "loadFailed": "Couldn't load messages.",
+    "sendFailed": "Couldn't send that message."
+  },
+  "units": {
+    "kcal": "kcal",
+    "kcalValue": "{{value}} kcal",
+    "gramsValue": "{{value}}g",
+    "bytes": "{{value}} B",
+    "kilobytes": "{{value}} KB",
+    "megabytes": "{{value}} MB"
+  },
+  "meals": {
+    "breakfast": "Breakfast",
+    "beforeTraining": "Before training",
+    "lunch": "Lunch",
+    "afterTraining": "After training",
+    "dinner": "Dinner",
+    "snack": "Snack"
+  },
+  "courses": {
+    "main": "Main",
+    "side1": "Side1",
+    "side2": "Side2",
+    "drink": "Drink",
+    "dessert": "Dessert"
+  },
+  "activity": {
+    "sedentary": "Sedentary",
+    "light": "Lightly active",
+    "moderate": "Moderately active",
+    "active": "Active",
+    "veryActive": "Very active"
+  },
+  "rates": {
+    "mild": "Mild",
+    "moderate": "Moderate",
+    "aggressive": "Aggressive"
+  },
+  "bodyParts": {
+    "neck": "Neck",
+    "waist": "Waist",
+    "shoulder": "Shoulder",
+    "chest": "Chest",
+    "abdomen": "Abdomen",
+    "thighs": "Thighs"
+  },
+  "bmi": {
+    "underweight": "Underweight",
+    "normal": "Normal weight",
+    "overweight": "Overweight",
+    "obese1": "Obese (Class I)",
+    "obese2": "Obese (Class II)",
+    "obese3": "Obese (Class III)",
+    "title": "Weight vs. international standard (BMI)",
+    "value": "BMI {{value}}",
+    "aboveStandard": "{{percent}}% above standard",
+    "belowStandard": "{{percent}}% below standard",
+    "sentenceWithin": "Your BMI falls within the standard weight range for your height.",
+    "sentenceAbove": "Your weight is about {{percent}}% above the standard range for your height ({{category}}). A structured plan aimed at gradual, steady loss can help bring it back within range.",
+    "sentenceBelow": "Your weight is about {{percent}}% below the standard range for your height ({{category}}). A plan aimed at gradual, healthy weight gain can help bring it within range.",
+    "disclaimer": "BMI is a general screening measure, not a diagnosis — it doesn't account for muscle mass, body composition, or individual health context."
+  },
+  "planDuration": {
+    "months_one": "{{count}} month",
+    "months_other": "{{count}} months"
+  },
+  "save": {
+    "failed": "Save failed: {{reason}}",
+    "failedGeneric": "Save failed."
+  },
+  "configTabs": {
+    "profileInfo": "Profile Info",
+    "myPlan": "My Plan",
+    "profileProgram": "Profile & program",
+    "measurements": "Measurements",
+    "photos": "Progress photos",
+    "foodList": "Configure your food list",
+    "createPlan": "Create a plan"
+  },
+  "profile": {
+    "accountSetByCoach": "Your account (set by your coach)",
+    "name": "Name",
+    "mobile": "Mobile number",
+    "planDates": "Plan dates",
+    "planType": "Plan type",
+    "basicInfo": "Basic Info",
+    "sex": "Sex",
+    "male": "Male",
+    "female": "Female",
+    "dateOfBirth": "Date of birth (optional)",
+    "ageFromBirth": "Age: {{age}} (calculated from date of birth)",
+    "age": "Age",
+    "ageCalculated": "Age (calculated)",
+    "startingWeight": "Starting weight (kg)",
+    "weightLocked": "Locked after your first weigh-in. Log your current weight with your measurements.",
+    "height": "Height (cm)",
+    "activity": "Activity level",
+    "healthNotes": "Health issues or conditions (optional)",
+    "healthNotesPlaceholder": "e.g. knee injury, hypertension, food allergies…",
+    "goal": "Goal",
+    "cut": "Cut",
+    "maintain": "Maintain",
+    "bulk": "Bulk",
+    "pace": "Pace",
+    "activeManual": "Active plan (manual)",
+    "proposedManual": "Proposed plan (manual)",
+    "activeCalculated": "Active plan (calculated)",
+    "macroSummary": "{{calories}} kcal · P{{protein}} C{{carbs}} F{{fat}}",
+    "calculatedPlan": "Calculated plan (from your profile & goal): {{summary}}",
+    "useCalculated": "Use calculated plan",
+    "manualTarget": "Or set a manual daily target (kcal)",
+    "manualTargetPlaceholder": "e.g. 2200",
+    "configSaved": "Configuration saved",
+    "saveConfig": "Save configuration"
+  },
+  "files": {
+    "label": "Health documents (optional)",
+    "help": "e.g. an InBody report. JPG, PNG, WebP or PDF, up to 10 MB each, {{max}} files max. Files are saved right away and only you can see them.",
+    "attach": "Attach files",
+    "waiting": "Waiting…",
+    "dismiss": "Dismiss",
+    "loading": "Loading files…",
+    "deleteLabel": "Delete {{name}}",
+    "deleteConfirm": "Delete \"{{name}}\"? This can't be undone.",
+    "wrongType": "Only JPG, PNG, WebP and PDF files are allowed.",
+    "tooLarge": "Too large ({{size}}). The limit is 10 MB.",
+    "empty": "This file is empty.",
+    "limit": "You can attach up to {{max}} files. Delete one to add another.",
+    "loadFailed": "Couldn't load your files.",
+    "saveFailed": "Couldn't save that file.",
+    "uploadFailed": "Couldn't upload that file.",
+    "openFailed": "Couldn't open that file.",
+    "deleteFailed": "Couldn't delete that file.",
+    "meta": "{{size}} · {{date}}"
+  },
+  "measurements": {
+    "weightKg": "Weight (kg)",
+    "fieldCm": "{{field}} (cm)",
+    "add": "Add measurement",
+    "past": "Past entries",
+    "empty": "No measurements logged yet.",
+    "weightValue": "Weight {{value}}kg",
+    "fieldValue": "{{field}} {{value}}cm",
+    "noValues": "No values recorded",
+    "saveFailed": "Couldn't save that measurement."
+  },
+  "photos": {
+    "photo": "Photo",
+    "upload": "Upload photo",
+    "past": "Past photos",
+    "empty": "No progress photos yet.",
+    "alt": "Progress photo from {{date}}",
+    "uploadFailed": "Couldn't upload that photo."
+  },
+  "notifications": {
+    "loading": "Loading notification settings…",
+    "telegramConnected": "Telegram: Connected ✓",
+    "telegramNotConnected": "Telegram: Not connected",
+    "telegramHelp": "Click below, then press Send in Telegram to connect your account.",
+    "checkConnection": "Check connection",
+    "connectTelegram": "Connect Telegram",
+    "dailySummary": "Send me a daily summary",
+    "atWhatTime": "At what time",
+    "warnLimit": "Warn me when I'm approaching my limit",
+    "warnPercent": "Warn me at this % of my daily target",
+    "checkFailed": "Couldn't check connection: {{reason}}",
+    "checkFailedGeneric": "Couldn't check connection."
+  },
+  "myPlan": {
+    "noActivePlan": "No active plan configured.",
+    "noFoodsFromCoach": "Your coach hasn't added any foods to your plan yet."
+  },
+  "plan": {
+    "dailyTarget": "Daily target",
+    "protein": "Protein",
+    "carbs": "Carbs",
+    "fat": "Fat",
+    "removeFood": "Remove food",
+    "foodRow": "{{grams}}g · {{calories}} kcal"
+  },
+  "createPlan": {
+    "define": "Define your plan",
+    "dailyTarget": "This plan's daily target: {{calories}} kcal",
+    "help": "Select a food from your list, then enter the grams — calories are calculated automatically from the calories per 100g you set in \"Configure your food list\".",
+    "name": "Plan name",
+    "namePlaceholder": "e.g. Cutting phase — September",
+    "addFood": "Add food",
+    "noFoods": "No foods added yet."
+  },
+  "dates": {
+    "from": "Date from",
+    "to": "Date to",
+    "invalidRange": "\"Date to\" can't be earlier than \"Date from\". Please enter a valid date range."
+  },
+  "food": {
+    "name": "Food name",
+    "noneConfigured": "No foods configured yet",
+    "select": "Select a food…",
+    "grams": "Grams",
+    "calories": "Calories",
+    "meal": "Meal",
+    "course": "Course",
+    "food": "Food",
+    "selectFirst": "Select a food from your list first.",
+    "notInList": "That food isn't in your list yet. Add it first in \"Configure your food list\".",
+    "enterGrams": "Enter a gram amount.",
+    "alreadyAdded": "\"{{name}}\" is already added under {{meal}} / {{course}}. Pick a different meal or course to add it again.",
+    "saveFailed": "Couldn't save this food. Please try again.",
+    "removeFailed": "Couldn't remove this food. Please try again.",
+    "nameRequired": "Fill in the food name.",
+    "caloriesPositive": "Calories per 100g must be a positive number, or left blank.",
+    "duplicate": "A food with that name is already in your list."
+  },
+  "foodList": {
+    "help": "Build your own personal food database. Add each food's calories per 100g once here, and it becomes selectable in the Food materials tab.",
+    "caloriesOptional": "Calories per 100g (optional)",
+    "caloriesPlaceholder": "Calories per 100g",
+    "add": "Add to list",
+    "empty": "No foods in your list yet.",
+    "perHundred": "{{value}} kcal / 100g",
+    "noCalories": "No calories set"
+  },
+  "log": {
+    "addMeal": "Add meal",
+    "logUnder": "Log this entry under",
+    "fromList": "From food list",
+    "manualEntry": "Or log anything not in the list (manual entry)",
+    "itemName": "Item name",
+    "caloriesPer100": "Calories per 100 gram",
+    "caloriesForGrams": "Calories per your entered grams",
+    "logItem": "Log this item",
+    "myMeals": "My meals",
+    "filterBy": "Filter by",
+    "noFilter": "No filter",
+    "allMeals": "All meals",
+    "allFoods": "All foods",
+    "clearFilter": "Clear filter",
+    "noMatch": "No meals match this view yet.",
+    "gramsHeader": "Grams (g)",
+    "caloriesHeader": "Calories (kcal)",
+    "removeEntry": "Remove entry",
+    "todayVsPlan": "Today vs plan",
+    "legend": "Green means within {{percent}}% of target. Red means over. Yellow means under.",
+    "planComparison": "Plan comparison",
+    "dayOf": "Day {{day}} of {{total}}",
+    "nothingLogged": "Nothing logged for this day yet.",
+    "dailyTotal": "Daily total",
+    "ofTarget": "{{actual}} / {{target}} kcal",
+    "matchedRow": "{{actualGrams}} / {{configuredGrams}} g · {{actualCalories}} / {{configuredCalories}} kcal",
+    "unmatchedRow": "{{grams}} g · {{calories}} kcal",
+    "notTracked": "Not tracked",
+    "onlyOne": "You have to enter only one meal — either pick from the list or type a name, not both.",
+    "selectOrType": "Select a food from the list, or type a food name.",
+    "enterCaloriesPer100": "Enter calories per 100 gram for this food.",
+    "saveFailed": "Couldn't save this entry. Please try again.",
+    "removeFailed": "Couldn't remove this entry. Please try again."
+  },
+  "history": {
+    "title": "Daily total vs configured target",
+    "dashedLine": "dashed line = {{calories}} kcal target",
+    "barTitle": "{{date}}: {{calories}} kcal",
+    "target": "Target",
+    "notLogged": "Not logged"
   }
 }

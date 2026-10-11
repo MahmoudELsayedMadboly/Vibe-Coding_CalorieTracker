@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Check, AlertTriangle, TrendingDown, Save, Home, Users, ClipboardList, Bell, Settings, MessageSquare, Pencil, X, Send, User, StickyNote, Clock, Search, Coffee, Dumbbell, Utensils, Zap, Moon, Apple, ChevronLeft, ChevronRight, Camera } from "lucide-react";
 import { supabase } from "./supabaseClient";
+import { t, useLanguage, setLanguage, getLanguage, intlLocale, mirrorInRTL, normalizeLanguage, readStoredLanguage } from "./i18n";
 
 const INK = "#1B2430";
 const INK_SOFT = "#5B6472";
@@ -340,9 +341,9 @@ function splitPhoneByDialCode(phone) {
 const COACH_STATUSES = ["invited", "active", "inactive"];
 
 function coachStatusMeta(status) {
-  if (status === "active") return { label: "Active", color: GREEN, soft: GREEN_SOFT };
-  if (status === "inactive") return { label: "Inactive", color: INK_SOFT, soft: GRID };
-  return { label: "Invited", color: AMBER, soft: AMBER_SOFT };
+  if (status === "active") return { label: t("status.active"), color: GREEN, soft: GREEN_SOFT };
+  if (status === "inactive") return { label: t("status.inactive"), color: INK_SOFT, soft: GRID };
+  return { label: t("status.invited"), color: AMBER, soft: AMBER_SOFT };
 }
 
 // coach_clients.status follows the same invited → active → inactive
@@ -425,10 +426,10 @@ function splitPlanVersions(rows) {
 }
 
 function planStatusMeta(status) {
-  if (status === "active") return { label: "Active", color: GREEN, soft: GREEN_SOFT };
-  if (status === "draft") return { label: "Draft", color: TEAL, soft: TEAL_SOFT };
-  if (status === "inactive") return { label: "Inactive", color: INK_SOFT, soft: "#EEEEEC" };
-  return { label: "No plan yet", color: INK_SOFT, soft: "#EEEEEC" };
+  if (status === "active") return { label: t("status.active"), color: GREEN, soft: GREEN_SOFT };
+  if (status === "draft") return { label: t("status.draft"), color: TEAL, soft: TEAL_SOFT };
+  if (status === "inactive") return { label: t("status.inactive"), color: INK_SOFT, soft: "#EEEEEC" };
+  return { label: t("status.noPlan"), color: INK_SOFT, soft: "#EEEEEC" };
 }
 
 function eventKindLabel(kind) {
@@ -482,7 +483,7 @@ function UnreadBadge({ count }) {
         fontFamily: "'IBM Plex Mono', monospace",
         fontSize: 10,
         fontWeight: 700,
-        marginLeft: "auto",
+        marginInlineStart: "auto",
       }}
     >
       {count > 99 ? "99+" : count}
@@ -515,6 +516,28 @@ function describeEditUserError(reason, roleLabel) {
   }
 }
 
+// Supabase Auth error codes with their own translated message.
+const AUTH_ERROR_KEYS = {
+  invalid_credentials: "auth.errors.invalidCredentials",
+  email_not_confirmed: "auth.errors.emailNotConfirmed",
+  over_request_rate_limit: "auth.errors.rateLimited",
+  over_email_send_rate_limit: "auth.errors.rateLimited",
+  user_already_exists: "auth.errors.alreadySignedUp",
+  email_exists: "auth.errors.alreadySignedUp",
+  weak_password: "auth.errors.weakPassword",
+  same_password: "auth.errors.samePassword",
+  signup_disabled: "auth.errors.signupDisabled",
+};
+
+// Message for a caught Supabase error. Supabase's own messages are English
+// only, so English keeps showing them as before, and other languages show
+// the translated message for a known auth code or the given fallback key.
+function errorText(err, fallbackKey) {
+  if (getLanguage() === "en") return err && err.message ? err.message : t(fallbackKey);
+  const codeKey = err && err.code && AUTH_ERROR_KEYS[err.code];
+  return t(codeKey || fallbackKey);
+}
+
 // The screen each role lands on after login (and after the forced
 // password change). Clients and standalone users start on "setup".
 function homeViewForRole(roleId) {
@@ -543,10 +566,11 @@ function statusFor(actual, target) {
   return "green";
 }
 
+// Labels are getters so they're read in the current language at render time.
 const STATUS_META = {
-  green: { color: GREEN, soft: GREEN_SOFT, label: "On target", icon: Check },
-  red: { color: RED, soft: RED_SOFT, label: "Exceeded", icon: AlertTriangle },
-  yellow: { color: AMBER, soft: AMBER_SOFT, label: "Below target", icon: TrendingDown },
+  green: { color: GREEN, soft: GREEN_SOFT, get label() { return t("status.onTarget"); }, icon: Check },
+  red: { color: RED, soft: RED_SOFT, get label() { return t("status.exceeded"); }, icon: AlertTriangle },
+  yellow: { color: AMBER, soft: AMBER_SOFT, get label() { return t("status.belowTarget"); }, icon: TrendingDown },
 };
 
 function StatusBadge({ status }) {
@@ -597,7 +621,7 @@ function MetricRow({ label, actual, target, unit }) {
         <div
           style={{
             position: "absolute",
-            left: `${(100 - TOLERANCE * 100)}%`,
+            insetInlineStart: `${(100 - TOLERANCE * 100)}%`,
             width: `${TOLERANCE * 2 * 100}%`,
             top: 0,
             bottom: 0,
@@ -607,11 +631,11 @@ function MetricRow({ label, actual, target, unit }) {
         <div
           style={{
             position: "absolute",
-            left: 0,
+            insetInlineStart: 0,
             width: `${pct}%`,
             top: 0,
             bottom: 0,
-            borderRight: `2px solid ${meta.color}`,
+            borderInlineEnd: `2px solid ${meta.color}`,
           }}
         />
       </div>
@@ -1024,7 +1048,7 @@ export default function CalorieTrackerApp() {
   const [avatarError, setAvatarError] = useState(null);
   const avatarFileInputRef = useRef(null);
 
-  const [languagePreference, setLanguagePreference] = useState("en");
+  const language = useLanguage();
   const [languageSaving, setLanguageSaving] = useState(false);
   const [languageFlash, setLanguageFlash] = useState(false);
   const [languageError, setLanguageError] = useState(null);
@@ -1127,11 +1151,11 @@ export default function CalorieTrackerApp() {
   }, [notificationSettings?.threshold_percent]);
 
   function passwordStrengthError(pw) {
-    if (pw.length < 8) return "Password must be at least 8 characters.";
-    if (!/[a-z]/.test(pw)) return "Password must include a lowercase letter.";
-    if (!/[A-Z]/.test(pw)) return "Password must include an uppercase letter.";
-    if (!/[0-9]/.test(pw)) return "Password must include a number.";
-    if (!/[^A-Za-z0-9]/.test(pw)) return "Password must include a special character.";
+    if (pw.length < 8) return t("password.tooShort8");
+    if (!/[a-z]/.test(pw)) return t("password.needsLowercase");
+    if (!/[A-Z]/.test(pw)) return t("password.needsUppercase");
+    if (!/[0-9]/.test(pw)) return t("password.needsNumber");
+    if (!/[^A-Za-z0-9]/.test(pw)) return t("password.needsSpecial");
     return null;
   }
 
@@ -1140,7 +1164,7 @@ export default function CalorieTrackerApp() {
     setAuthNotice(null);
 
     if (!authEmail || !authPassword) {
-      setAuthError("Enter both an email and a password.");
+      setAuthError(t("auth.errors.missingFields"));
       return;
     }
 
@@ -1163,16 +1187,16 @@ export default function CalorieTrackerApp() {
         // registered and confirmed (this is intentional, to avoid leaking which
         // emails exist). An empty identities array is the documented way to tell.
         if (data && data.user && data.user.identities && data.user.identities.length === 0) {
-          setAuthError("This email is already signed up. Please log in instead.");
+          setAuthError(t("auth.errors.alreadySignedUp"));
         } else {
-          setAuthNotice("Account created. If email confirmation is required, check your inbox before logging in.");
+          setAuthNotice(t("auth.signupNotice"));
         }
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
         if (error) throw error;
       }
     } catch (err) {
-      setAuthError(err && err.message ? err.message : "Something went wrong.");
+      setAuthError(errorText(err, "common.genericError"));
     } finally {
       setAuthBusy(false);
     }
@@ -1301,7 +1325,21 @@ export default function CalorieTrackerApp() {
         if (userInfoErr) throw userInfoErr;
 
         setAccountEmail(userInfoRow?.email || "");
-        setLanguagePreference(userInfoRow?.language_preference || "en");
+        // The account's saved language wins. An account that has never had
+        // one chosen takes this device's choice (e.g. from the login screen),
+        // saved back so it follows the user to their other devices.
+        const accountLanguage = normalizeLanguage(userInfoRow?.language_preference);
+        if (accountLanguage) {
+          setLanguage(accountLanguage).catch((err) => console.error("Couldn't load the account's language:", err));
+        } else if (userInfoRow) {
+          supabase
+            .from("user_info")
+            .update({ language_preference: readStoredLanguage() || getLanguage() })
+            .eq("id", userId)
+            .then(({ error }) => {
+              if (error) console.error("Couldn't save the language preference:", error);
+            });
+        }
         // Only an owner's own row carries the organization name; a coach's
         // is loaded from their owner by loadCoachOrganizationName.
         if (userInfoRow?.role_id === 4) {
@@ -1987,18 +2025,28 @@ export default function CalorieTrackerApp() {
       setAvatarUrl(signedData?.signedUrl || null);
       if (avatarFileInputRef.current) avatarFileInputRef.current.value = "";
     } catch (err) {
-      setAvatarError(err && err.message ? err.message : "Couldn't upload that photo.");
+      setAvatarError(errorText(err, "account.avatarError"));
     } finally {
       setAvatarUploading(false);
     }
   }
 
+  // Switches the app right away, then saves the choice to the account so it
+  // follows the user to their other devices.
   async function saveLanguagePreference(next) {
     if (!session || !session.user) return;
 
-    setLanguagePreference(next);
     setLanguageSaving(true);
     setLanguageError(null);
+
+    try {
+      await setLanguage(next);
+    } catch (err) {
+      console.error("Couldn't load language:", err);
+      setLanguageError(t("language.loadError"));
+      setLanguageSaving(false);
+      return;
+    }
 
     try {
       const { error } = await supabase.from("user_info").update({ language_preference: next }).eq("id", session.user.id);
@@ -2006,7 +2054,7 @@ export default function CalorieTrackerApp() {
       setLanguageFlash(true);
       setTimeout(() => setLanguageFlash(false), 2500);
     } catch (err) {
-      setLanguageError(err && err.message ? err.message : "Couldn't save your language preference.");
+      setLanguageError(errorText(err, "language.saveError"));
     } finally {
       setLanguageSaving(false);
     }
@@ -2016,11 +2064,11 @@ export default function CalorieTrackerApp() {
     setPasswordError(null);
 
     if (!newPassword || newPassword.length < 6) {
-      setPasswordError("Password must be at least 6 characters.");
+      setPasswordError(t("password.tooShort6"));
       return;
     }
     if (newPassword !== confirmPassword) {
-      setPasswordError("Passwords don't match.");
+      setPasswordError(t("password.mismatch"));
       return;
     }
 
@@ -2035,7 +2083,7 @@ export default function CalorieTrackerApp() {
       setPasswordFlash(true);
       setTimeout(() => setPasswordFlash(false), 2500);
     } catch (err) {
-      setPasswordError(err && err.message ? err.message : "Couldn't change your password.");
+      setPasswordError(errorText(err, "password.changeFailed"));
     } finally {
       setPasswordSaving(false);
     }
@@ -2052,7 +2100,7 @@ export default function CalorieTrackerApp() {
         return;
       }
       if (forcedPassword !== forcedPasswordConfirm) {
-        setForcedPasswordError("Passwords don't match.");
+        setForcedPasswordError(t("password.mismatch"));
         return;
       }
     }
@@ -2086,8 +2134,8 @@ export default function CalorieTrackerApp() {
     } catch (err) {
       setForcedPasswordError(
         forcedPasswordUpdatedRef.current
-          ? "Your password was changed, but we couldn't finish setting up your account. Please try again."
-          : err && err.message ? err.message : "Couldn't change your password."
+          ? t("forcedPassword.partialFailure")
+          : errorText(err, "password.changeFailed")
       );
     } finally {
       setForcedPasswordBusy(false);
@@ -2121,7 +2169,7 @@ export default function CalorieTrackerApp() {
       if (ownerErr) throw ownerErr;
       setOrganizationName((owner && owner.organization_name) || "");
     } catch (err) {
-      setOrganizationNameError(err && err.message ? err.message : "Couldn't load your organization name.");
+      setOrganizationNameError(errorText(err, "account.organizationLoadError"));
     }
   }
 
@@ -2143,7 +2191,7 @@ export default function CalorieTrackerApp() {
       setOrganizationNameFlash(true);
       setTimeout(() => setOrganizationNameFlash(false), 2500);
     } catch (err) {
-      setOrganizationNameError(err && err.message ? err.message : "Couldn't save your organization name.");
+      setOrganizationNameError(errorText(err, "account.organizationSaveError"));
     } finally {
       setOrganizationNameSaving(false);
     }
@@ -2437,7 +2485,7 @@ export default function CalorieTrackerApp() {
     setError(null);
 
     if (!text) {
-      setError(isIdea ? "Type your idea first." : "Describe the bug first.");
+      setError(isIdea ? t("feedback.ideaEmpty") : t("feedback.bugEmpty"));
       return;
     }
 
@@ -2453,7 +2501,7 @@ export default function CalorieTrackerApp() {
       setFlash(true);
       setTimeout(() => setFlash(false), 2500);
     } else {
-      setError("Couldn't submit. Please try again.");
+      setError(t("feedback.submitFailed"));
     }
   }
 
@@ -5499,7 +5547,7 @@ export default function CalorieTrackerApp() {
   if (session === undefined) {
     return (
       <div style={{ fontFamily: "'Inter', sans-serif", padding: "3rem", textAlign: "center", color: INK_SOFT }}>
-        Checking session…
+        {t("app.checkingSession")}
       </div>
     );
   }
@@ -5513,14 +5561,25 @@ export default function CalorieTrackerApp() {
           rel="stylesheet"
         />
         <div style={{ background: PANEL, border: `1px solid ${GRID}`, borderRadius: 6, padding: "2rem", width: "100%", maxWidth: 360 }}>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 6 }}>
-            nutrition tracker
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, marginBottom: 6 }}>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL, letterSpacing: 1.5, textTransform: "uppercase" }}>
+              {t("app.eyebrow")}
+            </div>
+            {/* Shows the other language in its own name; saved on this device
+                and applied to the account at first login if it has none. */}
+            <button
+              lang={language === "ar" ? "en" : "ar"}
+              onClick={() => setLanguage(language === "ar" ? "en" : "ar").catch(() => setAuthError(t("language.loadError")))}
+              style={{ ...linkButtonStyle, fontSize: 12 }}
+            >
+              {language === "ar" ? t("language.en") : t("language.ar")}
+            </button>
           </div>
           <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 20px 0" }}>
-            {authMode === "signup" ? "Create an account" : "Log in"}
+            {authMode === "signup" ? t("auth.signupTitle") : t("auth.loginTitle")}
           </h1>
 
-          <label style={labelStyle}>Email</label>
+          <label style={labelStyle}>{t("auth.email")}</label>
           <input
             type="email"
             value={authEmail}
@@ -5529,7 +5588,7 @@ export default function CalorieTrackerApp() {
             autoComplete="email"
           />
 
-          <label style={labelStyle}>Password</label>
+          <label style={labelStyle}>{t("auth.password")}</label>
           <input
             type="password"
             value={authPassword}
@@ -5539,7 +5598,7 @@ export default function CalorieTrackerApp() {
           />
           {authMode === "signup" && (
             <div style={{ marginTop: -10, marginBottom: 14, fontSize: 11, color: INK_SOFT, lineHeight: 1.4 }}>
-              At least 8 characters, with an uppercase letter, lowercase letter, number, and special character.
+              {t("password.rules")}
             </div>
           )}
 
@@ -5548,7 +5607,7 @@ export default function CalorieTrackerApp() {
             disabled={authBusy}
             style={{ ...primaryButtonStyle, width: "100%", marginTop: 4, opacity: authBusy ? 0.6 : 1 }}
           >
-            {authBusy ? "Please wait…" : authMode === "signup" ? "Sign up" : "Log in"}
+            {authBusy ? t("common.pleaseWait") : authMode === "signup" ? t("auth.signUp") : t("auth.logIn")}
           </button>
 
           {authError && (
@@ -5563,12 +5622,12 @@ export default function CalorieTrackerApp() {
           )}
 
           <div style={{ marginTop: 16, textAlign: "center", fontSize: 12.5, color: INK_SOFT }}>
-            {authMode === "signup" ? "Already have an account?" : "Don't have an account?"}{" "}
+            {authMode === "signup" ? t("auth.haveAccount") : t("auth.noAccount")}{" "}
             <button
               onClick={() => { setAuthMode(authMode === "signup" ? "login" : "signup"); setAuthError(null); setAuthNotice(null); }}
               style={{ background: "none", border: "none", color: TEAL, fontWeight: 600, cursor: "pointer", padding: 0, fontSize: 12.5 }}
             >
-              {authMode === "signup" ? "Log in" : "Sign up"}
+              {authMode === "signup" ? t("auth.logIn") : t("auth.signUp")}
             </button>
           </div>
         </div>
@@ -5579,7 +5638,7 @@ export default function CalorieTrackerApp() {
   if (!loaded || passwordGate.userId !== session.user.id) {
     return (
       <div style={{ fontFamily: "'Inter', sans-serif", padding: "3rem", textAlign: "center", color: INK_SOFT }}>
-        Loading your data…
+        {t("app.loadingData")}
       </div>
     );
   }
@@ -5600,18 +5659,18 @@ export default function CalorieTrackerApp() {
         />
         <div style={{ background: PANEL, border: `1px solid ${GRID}`, borderRadius: 6, padding: "2rem", width: "100%", maxWidth: 360 }}>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 6 }}>
-            nutrition tracker
+            {t("app.eyebrow")}
           </div>
           {passwordGateStatus === "required" ? (
             <>
               <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px 0" }}>
-                Set new password
+                {t("forcedPassword.title")}
               </h1>
               <div style={{ fontSize: 12.5, color: INK_SOFT, marginBottom: 18, lineHeight: 1.5 }}>
-                You signed in with a temporary password. Choose a new one to continue.
+                {t("forcedPassword.intro")}
               </div>
 
-              <label style={labelStyle}>New password</label>
+              <label style={labelStyle}>{t("password.new")}</label>
               <input
                 type="password"
                 value={forcedPassword}
@@ -5620,7 +5679,7 @@ export default function CalorieTrackerApp() {
                 autoComplete="new-password"
                 disabled={forcedPasswordBusy}
               />
-              <label style={labelStyle}>Confirm password</label>
+              <label style={labelStyle}>{t("password.confirm")}</label>
               <input
                 type="password"
                 value={forcedPasswordConfirm}
@@ -5630,7 +5689,7 @@ export default function CalorieTrackerApp() {
                 disabled={forcedPasswordBusy}
               />
               <div style={{ marginTop: -10, marginBottom: 14, fontSize: 11, color: INK_SOFT, lineHeight: 1.4 }}>
-                At least 8 characters, with an uppercase letter, lowercase letter, number, and special character.
+                {t("password.rules")}
               </div>
 
               <button
@@ -5638,7 +5697,7 @@ export default function CalorieTrackerApp() {
                 disabled={forcedPasswordBusy}
                 style={{ ...primaryButtonStyle, width: "100%", marginTop: 4, opacity: forcedPasswordBusy ? 0.6 : 1 }}
               >
-                {forcedPasswordBusy ? "Please wait…" : "Set password"}
+                {forcedPasswordBusy ? t("common.pleaseWait") : t("forcedPassword.submit")}
               </button>
 
               {forcedPasswordError && (
@@ -5650,20 +5709,20 @@ export default function CalorieTrackerApp() {
           ) : (
             <>
               <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, margin: "0 0 8px 0" }}>
-                Couldn't load your account
+                {t("loadFailed.title")}
               </h1>
               <div style={{ fontSize: 12.5, color: INK_SOFT, marginBottom: 18, lineHeight: 1.5 }}>
-                {saveError || "Something went wrong while signing you in."}
+                {saveError || t("loadFailed.body")}
               </div>
               <button onClick={() => window.location.reload()} style={{ ...primaryButtonStyle, width: "100%" }}>
-                Try again
+                {t("common.tryAgain")}
               </button>
             </>
           )}
 
           <div style={{ marginTop: 16, textAlign: "center" }}>
             <button onClick={handleLogout} style={{ ...linkButtonStyle, fontSize: 12.5 }}>
-              Log out
+              {t("app.logOut")}
             </button>
           </div>
         </div>
@@ -5989,22 +6048,22 @@ export default function CalorieTrackerApp() {
 
   const accountScreenContent = (
     <div style={panelStyle}>
-      <SectionTitle>Account</SectionTitle>
+      <SectionTitle>{t("account.title")}</SectionTitle>
 
       <div style={{ marginBottom: 20 }}>
-        <label style={labelStyle}>Email</label>
+        <label style={labelStyle}>{t("account.email")}</label>
         <div style={{ fontSize: 13 }}>{accountEmail || "—"}</div>
       </div>
 
       <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
         <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
-          Profile picture
+          {t("account.avatarTitle")}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 10 }}>
           {avatarUrl ? (
             <img
               src={avatarUrl}
-              alt="Avatar"
+              alt={t("account.avatarAlt")}
               style={{ width: 72, height: 72, borderRadius: "50%", objectFit: "cover", border: `1px solid ${GRID}` }}
             />
           ) : (
@@ -6036,7 +6095,7 @@ export default function CalorieTrackerApp() {
               style={{ fontSize: 12 }}
               disabled={avatarUploading}
             />
-            {avatarUploading && <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 4 }}>Uploading…</div>}
+            {avatarUploading && <div style={{ fontSize: 11, color: INK_SOFT, marginTop: 4 }}>{t("common.uploading")}</div>}
           </div>
         </div>
         {avatarError && (
@@ -6048,11 +6107,11 @@ export default function CalorieTrackerApp() {
 
       {roleId === 4 && (
         <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
-          <label style={labelStyle}>Organization name</label>
+          <label style={labelStyle}>{t("account.organizationName")}</label>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
             <input
               type="text"
-              placeholder="Your organization"
+              placeholder={t("account.organizationPlaceholder")}
               value={organizationNameDraft}
               onChange={(e) => setOrganizationNameDraft(e.target.value)}
               style={{ ...inputStyle, width: 280, marginBottom: 0 }}
@@ -6064,10 +6123,10 @@ export default function CalorieTrackerApp() {
               style={{ ...primaryButtonStyle, width: "auto", background: GREEN, border: `1px solid ${GREEN}`, opacity: organizationNameSaving || organizationNameDraft.trim() === organizationName ? 0.6 : 1 }}
             >
               <Save size={14} strokeWidth={2.5} />
-              {organizationNameSaving ? "Saving…" : "Save"}
+              {organizationNameSaving ? t("common.saving") : t("common.save")}
             </button>
           </div>
-          {organizationNameFlash && <div style={{ fontSize: 11, color: GREEN, marginTop: 4 }}>Saved</div>}
+          {organizationNameFlash && <div style={{ fontSize: 11, color: GREEN, marginTop: 4 }}>{t("common.saved")}</div>}
           {organizationNameError && (
             <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
               {organizationNameError}
@@ -6078,7 +6137,7 @@ export default function CalorieTrackerApp() {
 
       {roleId === 2 && (
         <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
-          <label style={labelStyle}>Organization name</label>
+          <label style={labelStyle}>{t("account.organizationName")}</label>
           <input
             type="text"
             value={organizationName}
@@ -6096,17 +6155,17 @@ export default function CalorieTrackerApp() {
       )}
 
       <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
-        <label style={labelStyle}>Language</label>
+        <label style={labelStyle}>{t("language.label")}</label>
         <select
-          value={languagePreference}
+          value={language}
           onChange={(e) => saveLanguagePreference(e.target.value)}
           style={{ ...inputStyle, width: 220 }}
           disabled={languageSaving}
         >
-          <option value="en">English</option>
-          <option value="ar">Arabic</option>
+          <option value="en" lang="en">{t("language.en")}</option>
+          <option value="ar" lang="ar">{t("language.ar")}</option>
         </select>
-        {languageFlash && <div style={{ fontSize: 11, color: GREEN, marginTop: 4 }}>Saved</div>}
+        {languageFlash && <div style={{ fontSize: 11, color: GREEN, marginTop: 4 }}>{t("common.saved")}</div>}
         {languageError && (
           <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
             {languageError}
@@ -6116,9 +6175,9 @@ export default function CalorieTrackerApp() {
 
       <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16, marginBottom: 20 }}>
         <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600, marginBottom: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.5 }}>
-          Change password
+          {t("account.changePassword")}
         </div>
-        <label style={labelStyle}>New password</label>
+        <label style={labelStyle}>{t("password.new")}</label>
         <input
           type="password"
           value={newPassword}
@@ -6126,7 +6185,7 @@ export default function CalorieTrackerApp() {
           style={inputStyle}
           disabled={passwordSaving}
         />
-        <label style={labelStyle}>Confirm password</label>
+        <label style={labelStyle}>{t("password.confirm")}</label>
         <input
           type="password"
           value={confirmPassword}
@@ -6140,7 +6199,7 @@ export default function CalorieTrackerApp() {
           style={{ ...primaryButtonStyle, width: "auto", background: GREEN, border: `1px solid ${GREEN}` }}
         >
           {passwordFlash ? <Check size={14} strokeWidth={2.5} /> : <Save size={14} strokeWidth={2.5} />}
-          {passwordSaving ? "Saving…" : passwordFlash ? "Password changed" : "Change password"}
+          {passwordSaving ? t("common.saving") : passwordFlash ? t("account.passwordChanged") : t("account.changePassword")}
         </button>
         {passwordError && (
           <div style={{ marginTop: 8, padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>
@@ -6151,7 +6210,7 @@ export default function CalorieTrackerApp() {
 
       <div style={{ borderTop: `1px solid ${GRID}`, paddingTop: 16 }}>
         <button onClick={handleLogout} style={secondaryButtonStyle}>
-          Log out
+          {t("app.logOut")}
         </button>
       </div>
     </div>
@@ -6189,7 +6248,7 @@ export default function CalorieTrackerApp() {
                       background: "transparent",
                       padding: 0,
                       cursor: "pointer",
-                      textAlign: "left",
+                      textAlign: "start",
                     }}
                   >
                     <span style={{ ...homeRowNameStyle, maxWidth: "100%" }}>{noteDisplayTitle(note)}</span>
@@ -6293,7 +6352,7 @@ export default function CalorieTrackerApp() {
               {editingNote && (
                 <button
                   onClick={() => deleteNote(editingNote)}
-                  style={{ ...secondaryButtonStyle, marginLeft: "auto", color: RED }}
+                  style={{ ...secondaryButtonStyle, marginInlineStart: "auto", color: RED }}
                   disabled={noteFormBusy}
                 >
                   <Trash2 size={13} /> Delete
@@ -6318,13 +6377,13 @@ export default function CalorieTrackerApp() {
               <div>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 16 }}>
                   <div style={{ position: "relative", flex: 1, maxWidth: 320 }}>
-                    <Search size={14} color={INK_SOFT} style={{ position: "absolute", left: 10, top: 10 }} />
+                    <Search size={14} color={INK_SOFT} style={{ position: "absolute", insetInlineStart: 10, top: 10 }} />
                     <input
                       type="text"
                       placeholder="Search notes"
                       value={notesSearch}
                       onChange={(e) => setNotesSearch(e.target.value)}
-                      style={{ ...inputStyle, marginBottom: 0, paddingLeft: 30 }}
+                      style={{ ...inputStyle, marginBottom: 0, paddingInlineStart: 30 }}
                     />
                   </div>
                   <button onClick={startNewNote} style={primaryButtonStyle}>
@@ -6339,7 +6398,7 @@ export default function CalorieTrackerApp() {
                   </label>
                   {notificationPermission === "default" && (
                     <button onClick={enableSystemNotifications} style={linkButtonStyle}>
-                      <Bell size={13} style={{ verticalAlign: -2, marginRight: 4 }} />
+                      <Bell size={13} style={{ verticalAlign: -2, marginInlineEnd: 4 }} />
                       Enable notifications
                     </button>
                   )}
@@ -6383,7 +6442,7 @@ export default function CalorieTrackerApp() {
                             display: "flex",
                             flexDirection: "column",
                             gap: 6,
-                            borderLeft: `3px solid ${active ? reminderColor(note.reminder_at) : GRID}`,
+                            borderInlineStart: `3px solid ${active ? reminderColor(note.reminder_at) : GRID}`,
                           }}
                         >
                           <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
@@ -6434,7 +6493,7 @@ export default function CalorieTrackerApp() {
                               {active && (
                                 <span
                                   style={{
-                                    marginLeft: 4,
+                                    marginInlineStart: 4,
                                     padding: "1px 6px",
                                     borderRadius: 999,
                                     background: reminderColor(note.reminder_at) === RED ? RED_SOFT : reminderColor(note.reminder_at) === AMBER ? AMBER_SOFT : TEAL_SOFT,
@@ -6478,70 +6537,70 @@ export default function CalorieTrackerApp() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", borderBottom: `1px solid ${GRID}`, paddingBottom: 16, marginBottom: 20 }}>
         <div>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: TEAL, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 6 }}>
-            nutrition tracker
+            {t("app.eyebrow")}
           </div>
           <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 24, fontWeight: 700, margin: 0 }}>
-            {view === "setup" && (isManagedClient ? "Profile" : "Configuration")}
-            {view === "log" && "Daily log"}
-            {view === "history" && "History"}
-            {view === "home" && "Home"}
-            {view === "users" && "Users"}
-            {view === "clients" && "Clients"}
-            {view === "plans" && "Plans"}
-            {view === "administration" && "Administration"}
-            {view === "chat" && "Chat"}
-            {view === "notifications" && "Notifications"}
-            {view === "notes" && "Notes"}
-            {view === "account" && "Account"}
-            {view === "client-detail" && "Client details"}
-            {view === "coach-detail" && "Coach details"}
-            {view === "client-meal-log" && "Meal log"}
-            {view === "client-checkin-history" && "Check-in history"}
+            {view === "setup" && (isManagedClient ? t("nav.profile") : t("nav.configuration"))}
+            {view === "log" && t("nav.log")}
+            {view === "history" && t("nav.history")}
+            {view === "home" && t("nav.home")}
+            {view === "users" && t("nav.users")}
+            {view === "clients" && t("nav.clients")}
+            {view === "plans" && t("nav.plans")}
+            {view === "administration" && t("nav.administration")}
+            {view === "chat" && t("nav.chat")}
+            {view === "notifications" && t("nav.notifications")}
+            {view === "notes" && t("nav.notes")}
+            {view === "account" && t("nav.account")}
+            {view === "client-detail" && t("nav.clientDetail")}
+            {view === "coach-detail" && t("nav.coachDetail")}
+            {view === "client-meal-log" && t("nav.mealLog")}
+            {view === "client-checkin-history" && t("nav.checkinHistory")}
           </h1>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-            {saving ? "saving…" : "saved"}
+            {saving ? t("app.savingStatus") : t("app.savedStatus")}
           </span>
           <button onClick={handleLogout} style={{ ...secondaryButtonStyle, fontSize: 11, padding: "5px 10px" }}>
-            Log out
+            {t("app.logOut")}
           </button>
         </div>
       </div>
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 16, padding: "10px 14px", background: PANEL, border: `1px solid ${GRID}`, borderRadius: 6, marginBottom: 20 }}>
         <div style={{ flex: "1 1 240px", minWidth: 200 }}>
-          <label style={labelStyle}>Suggest a new idea</label>
+          <label style={labelStyle}>{t("feedback.ideaLabel")}</label>
           <div style={{ display: "flex", gap: 6 }}>
             <input
               type="text"
-              placeholder="Have an idea for the app?"
+              placeholder={t("feedback.ideaPlaceholder")}
               value={ideaText}
               onChange={(e) => setIdeaText(e.target.value)}
               style={{ ...smallInputStyle, flex: 1 }}
             />
             <button onClick={() => submitFeedback("idea")} style={{ ...secondaryButtonStyle, fontSize: 11, padding: "7px 10px" }}>
-              Send
+              {t("common.send")}
             </button>
           </div>
-          {ideaFlash && <div style={{ marginTop: 4, fontSize: 11, color: GREEN }}>Thanks — got it!</div>}
+          {ideaFlash && <div style={{ marginTop: 4, fontSize: 11, color: GREEN }}>{t("feedback.thanks")}</div>}
           {ideaError && <div style={{ marginTop: 4, fontSize: 11, color: RED }}>{ideaError}</div>}
         </div>
         <div style={{ flex: "1 1 240px", minWidth: 200 }}>
-          <label style={labelStyle}>Report a bug</label>
+          <label style={labelStyle}>{t("feedback.bugLabel")}</label>
           <div style={{ display: "flex", gap: 6 }}>
             <input
               type="text"
-              placeholder="Found something broken?"
+              placeholder={t("feedback.bugPlaceholder")}
               value={bugText}
               onChange={(e) => setBugText(e.target.value)}
               style={{ ...smallInputStyle, flex: 1 }}
             />
             <button onClick={() => submitFeedback("bug")} style={{ ...secondaryButtonStyle, fontSize: 11, padding: "7px 10px" }}>
-              Send
+              {t("common.send")}
             </button>
           </div>
-          {bugFlash && <div style={{ marginTop: 4, fontSize: 11, color: GREEN }}>Thanks — got it!</div>}
+          {bugFlash && <div style={{ marginTop: 4, fontSize: 11, color: GREEN }}>{t("feedback.thanks")}</div>}
           {bugError && <div style={{ marginTop: 4, fontSize: 11, color: RED }}>{bugError}</div>}
         </div>
       </div>
@@ -6550,12 +6609,12 @@ export default function CalorieTrackerApp() {
       <>
       <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
         {[
-          { id: "setup", label: isManagedClient ? "Profile" : "Configuration" },
-          { id: "log", label: "Daily log" },
-          { id: "history", label: "History" },
-          ...(roleId === 3 ? [{ id: "chat", label: "Chat" }] : []),
-          ...(isManagedClient ? [{ id: "notifications", label: "Notifications" }] : []),
-          { id: "account", label: "Account" },
+          { id: "setup", label: isManagedClient ? t("nav.profile") : t("nav.configuration") },
+          { id: "log", label: t("nav.log") },
+          { id: "history", label: t("nav.history") },
+          ...(roleId === 3 ? [{ id: "chat", label: t("nav.chat") }] : []),
+          ...(isManagedClient ? [{ id: "notifications", label: t("nav.notifications") }] : []),
+          { id: "account", label: t("nav.account") },
         ].map((t) => (
           <button
             key={t.id}
@@ -7478,7 +7537,7 @@ export default function CalorieTrackerApp() {
                             <td style={{ ...tdStyle, fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600 }}>{e.name}</td>
                             <td style={tdStyle}>{e.grams || 0}</td>
                             <td style={tdStyle}>{e.calories}</td>
-                            <td style={{ ...tdStyle, textAlign: "right" }}>
+                            <td style={{ ...tdStyle, textAlign: "end" }}>
                               <button onClick={() => removeEntryOn(e.date, e.id)} style={iconButtonStyle} aria-label="Remove entry">
                                 <Trash2 size={13} />
                               </button>
@@ -7686,7 +7745,7 @@ export default function CalorieTrackerApp() {
                 dashed line = {effectivePlan.calories} kcal target
               </div>
 
-              <div style={{ overflowX: "auto" }}>
+              <div dir="ltr" style={{ overflowX: "auto" }}>
                 <div style={{ minWidth: historyDayDates.length * (HISTORY_COL_WIDTH + HISTORY_COL_GAP), paddingTop: 20 }}>
                   <div style={{ position: "relative", height: HISTORY_CHART_HEIGHT }}>
                     <div
@@ -7863,14 +7922,14 @@ export default function CalorieTrackerApp() {
         <div style={{ display: "flex", gap: 24, alignItems: "flex-start" }}>
           <SidebarNav
             items={[
-              { id: "home", label: "Home", icon: Home },
-              { id: "clients", label: "Clients", icon: Users },
-              { id: "plans", label: "Plans", icon: ClipboardList },
-              { id: "administration", label: "Administration", icon: Settings },
-              { id: "chat", label: "Chat", icon: MessageSquare, badge: chatUnreadTotal },
-              { id: "notifications", label: "Notifications", icon: Bell },
-              { id: "notes", label: "Notes", icon: StickyNote },
-              { id: "account", label: "Account", icon: User },
+              { id: "home", label: t("nav.home"), icon: Home },
+              { id: "clients", label: t("nav.clients"), icon: Users },
+              { id: "plans", label: t("nav.plans"), icon: ClipboardList },
+              { id: "administration", label: t("nav.administration"), icon: Settings },
+              { id: "chat", label: t("nav.chat"), icon: MessageSquare, badge: chatUnreadTotal },
+              { id: "notifications", label: t("nav.notifications"), icon: Bell },
+              { id: "notes", label: t("nav.notes"), icon: StickyNote },
+              { id: "account", label: t("nav.account"), icon: User },
             ]}
             view={view}
             onSelect={setView}
@@ -8040,12 +8099,12 @@ export default function CalorieTrackerApp() {
                               borderTop: `1px solid ${GRID}`,
                               background: "transparent",
                               cursor: "pointer",
-                              textAlign: "left",
+                              textAlign: "start",
                             }}
                           >
                             <span style={homeCountStyle}>{data.requestsCount}</span>
                             <span style={homeCountLabelStyle}>{data.requestsCount === 1 ? "pending food request" : "pending food requests"}</span>
-                            <span style={{ ...linkButtonStyle, marginLeft: "auto" }}>Review →</span>
+                            <span style={{ ...linkButtonStyle, marginInlineStart: "auto" }}>Review →</span>
                           </button>
                         </>
                       )
@@ -8066,7 +8125,7 @@ export default function CalorieTrackerApp() {
                             <HomeRow key={c.id}>
                               <div style={{ flex: 1, minWidth: 0, ...homeRowNameStyle }}>{c.name}</div>
                               <UnreadBadge count={c.count} />
-                              <button onClick={() => openChatWithClient(c.id)} style={{ ...linkButtonStyle, marginLeft: 10 }}>
+                              <button onClick={() => openChatWithClient(c.id)} style={{ ...linkButtonStyle, marginInlineStart: 10 }}>
                                 Open chat
                               </button>
                             </HomeRow>
@@ -8103,7 +8162,7 @@ export default function CalorieTrackerApp() {
                                 borderTop: `1px solid ${GRID}`,
                                 background: "transparent",
                                 cursor: "pointer",
-                                textAlign: "left",
+                                textAlign: "start",
                                 color: INK,
                               }}
                             >
@@ -9076,7 +9135,7 @@ export default function CalorieTrackerApp() {
                                       ? `${et.default_value.percent}%`
                                       : "—"}
                                   </td>
-                                  <td style={{ ...tdStyle, textAlign: "right" }}>
+                                  <td style={{ ...tdStyle, textAlign: "end" }}>
                                     <button onClick={() => startEditEventType(et)} style={iconButtonStyle} aria-label={`Edit ${et.name}`}>
                                       <Pencil size={14} />
                                     </button>
@@ -9368,7 +9427,7 @@ export default function CalorieTrackerApp() {
                                   <td style={tdStyle}>{et.name}</td>
                                   <td style={tdStyle}>{eventKindLabel(et.condition_kind)}</td>
                                   <td style={tdStyle}>{formatEventValue(et.condition_kind, et.default_value)}</td>
-                                  <td style={{ ...tdStyle, textAlign: "right" }}>
+                                  <td style={{ ...tdStyle, textAlign: "end" }}>
                                     <button onClick={() => setNotifDetailEventTypeId(et.id)} style={{ ...secondaryButtonStyle, display: "inline-flex" }}>
                                       View details
                                     </button>
@@ -9404,7 +9463,7 @@ export default function CalorieTrackerApp() {
                               {activePlanClients.map((c) => (
                                 <tr key={c.id} style={{ borderTop: `1px solid ${GRID}` }}>
                                   <td style={tdStyle}>{c.name}</td>
-                                  <td style={{ ...tdStyle, textAlign: "right" }}>
+                                  <td style={{ ...tdStyle, textAlign: "end" }}>
                                     <button onClick={() => setNotifDetailClientId(c.id)} style={{ ...secondaryButtonStyle, display: "inline-flex" }}>
                                       View details
                                     </button>
@@ -9786,12 +9845,12 @@ export default function CalorieTrackerApp() {
         <div style={{ display: "flex", gap: 24, alignItems: "flex-start" }}>
           <SidebarNav
             items={[
-              { id: "home", label: "Home", icon: Home },
-              { id: "users", label: "Users", icon: Users },
-              { id: "clients", label: "Clients", icon: ClipboardList },
-              { id: "chat", label: "Chat", icon: MessageSquare, badge: chatUnreadTotal },
-              { id: "notes", label: "Notes", icon: StickyNote },
-              { id: "account", label: "Account", icon: User },
+              { id: "home", label: t("nav.home"), icon: Home },
+              { id: "users", label: t("nav.users"), icon: Users },
+              { id: "clients", label: t("nav.clients"), icon: ClipboardList },
+              { id: "chat", label: t("nav.chat"), icon: MessageSquare, badge: chatUnreadTotal },
+              { id: "notes", label: t("nav.notes"), icon: StickyNote },
+              { id: "account", label: t("nav.account"), icon: User },
             ]}
             view={view}
             onSelect={setView}
@@ -9852,13 +9911,13 @@ export default function CalorieTrackerApp() {
                 <div>
                   <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, marginBottom: 16 }}>
                     <div style={{ position: "relative", flex: 1, minWidth: 200, maxWidth: 320 }}>
-                      <Search size={14} color={INK_SOFT} style={{ position: "absolute", left: 10, top: 10 }} />
+                      <Search size={14} color={INK_SOFT} style={{ position: "absolute", insetInlineStart: 10, top: 10 }} />
                       <input
                         type="text"
                         placeholder="Search name, email or coach"
                         value={ownerClientsSearch}
                         onChange={(e) => setOwnerClientsSearch(e.target.value)}
-                        style={{ ...inputStyle, marginBottom: 0, paddingLeft: 30 }}
+                        style={{ ...inputStyle, marginBottom: 0, paddingInlineStart: 30 }}
                       />
                     </div>
                     <select
@@ -10373,11 +10432,11 @@ function NoteReminderAlerts({ userId, muted, refreshKey, onDueDismissed }) {
   return (
     <div
       role="region"
-      aria-label="Reminders"
+      aria-label={t("reminders.region")}
       aria-live="assertive"
       style={{
         position: "fixed",
-        right: 16,
+        insetInlineEnd: 16,
         bottom: 16,
         zIndex: 1100,
         width: "min(360px, calc(100vw - 32px))",
@@ -10390,13 +10449,13 @@ function NoteReminderAlerts({ userId, muted, refreshKey, onDueDismissed }) {
     >
       {popups.length > 1 && (
         <button onClick={() => popups.forEach(close)} style={{ ...secondaryButtonStyle, alignSelf: "flex-end", background: PANEL }}>
-          Close all ({popups.length})
+          {t("reminders.closeAll", { count: popups.length })}
         </button>
       )}
       {popups.map((popup) => {
         const due = popup.kind === "due";
         const at = new Date(popup.reminderAt);
-        const time = at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+        const time = at.toLocaleTimeString(intlLocale(), { hour: "numeric", minute: "2-digit" });
         const late = due && Date.now() - at.getTime() > 5 * 60 * 1000;
         return (
           <div
@@ -10405,7 +10464,7 @@ function NoteReminderAlerts({ userId, muted, refreshKey, onDueDismissed }) {
             style={{
               ...panelStyle,
               padding: "0.9rem 1rem",
-              borderLeft: `3px solid ${due ? RED : AMBER}`,
+              borderInlineStart: `3px solid ${due ? RED : AMBER}`,
               boxShadow: "0 6px 24px rgba(27, 36, 48, 0.18)",
               display: "flex",
               alignItems: "flex-start",
@@ -10415,16 +10474,20 @@ function NoteReminderAlerts({ userId, muted, refreshKey, onDueDismissed }) {
             <Bell size={16} color={due ? RED : AMBER} style={{ flexShrink: 0, marginTop: 2 }} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: due ? RED : AMBER, marginBottom: 4 }}>
-                {due ? (late ? `Was due ${formatNoteTimestamp(popup.reminderAt)}` : `Due now · ${time}`) : `In 1 hour · ${time}`}
+                {due
+                  ? late
+                    ? t("reminders.wasDue", { when: formatNoteTimestamp(popup.reminderAt) })
+                    : t("reminders.dueNow", { time })
+                  : t("reminders.inOneHour", { time })}
               </div>
-              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 600, color: INK, overflowWrap: "anywhere" }}>
+              <div dir="auto" style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 600, color: INK, overflowWrap: "anywhere" }}>
                 {popup.title}
               </div>
             </div>
             <button
               onClick={() => close(popup)}
-              aria-label={`Close reminder for ${popup.title}`}
-              title="Close"
+              aria-label={t("reminders.closeFor", { title: popup.title })}
+              title={t("common.close")}
               style={{ ...iconButtonStyle, border: `1px solid ${GRID}`, borderRadius: 4, padding: 4, color: INK_SOFT }}
             >
               <X size={14} />
@@ -10497,7 +10560,12 @@ function showSystemReminderNotification(popups) {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
   if (document.visibilityState === "visible") return;
 
-  const title = popups.length === 1 ? (popups[0].kind === "due" ? "Reminder due" : "Reminder in 1 hour") : `${popups.length} reminders`;
+  const title =
+    popups.length === 1
+      ? popups[0].kind === "due"
+        ? t("reminders.systemDue")
+        : t("reminders.systemSoon")
+      : t("reminders.systemCount", { count: popups.length });
   const body = popups.map((p) => p.title).join("\n");
   const options = { body, tag: "note-reminders", icon: "/icons/pwa-192x192.png" };
 
@@ -10542,7 +10610,7 @@ function SidebarNav({ items, view, onSelect }) {
             fontSize: 13,
             fontWeight: 600,
             cursor: "pointer",
-            textAlign: "left",
+            textAlign: "start",
           }}
         >
           <t.icon size={16} />
@@ -10566,17 +10634,17 @@ function Pagination({ page, totalPages, onPageChange }) {
         disabled={atFirst}
         style={{ ...secondaryButtonStyle, fontSize: 11, padding: "5px 10px", opacity: atFirst ? 0.5 : 1, cursor: atFirst ? "not-allowed" : "pointer" }}
       >
-        Previous
+        {t("pagination.previous")}
       </button>
       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
-        Page {page} of {totalPages}
+        {t("pagination.pageOf", { page, total: totalPages })}
       </span>
       <button
         onClick={() => onPageChange(Math.min(totalPages, page + 1))}
         disabled={atLast}
         style={{ ...secondaryButtonStyle, fontSize: 11, padding: "5px 10px", opacity: atLast ? 0.5 : 1, cursor: atLast ? "not-allowed" : "pointer" }}
       >
-        Next
+        {t("pagination.next")}
       </button>
     </div>
   );
@@ -10701,7 +10769,7 @@ function OwnerCoachList({ state, rows, emptyText, noMatchText, onViewDetails }) 
 
 function HomeCard({ title, accent, state, children }) {
   return (
-    <div style={{ ...panelStyle, borderLeft: `3px solid ${accent}` }}>
+    <div style={{ ...panelStyle, borderInlineStart: `3px solid ${accent}` }}>
       <SectionTitle>{title}</SectionTitle>
       {state.status === "error" ? (
         <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>{state.error}</div>
@@ -10858,7 +10926,7 @@ function LatestCheckInCard({ currentWeight, bmiInfo, latestMeasurementsRow, late
             {currentWeight ? (
               <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 30, fontWeight: 700, lineHeight: 1 }}>
                 {currentWeight.weightKg}
-                <span style={{ fontSize: 14, fontWeight: 600, color: INK_SOFT, marginLeft: 4 }}>kg</span>
+                <span style={{ fontSize: 14, fontWeight: 600, color: INK_SOFT, marginInlineStart: 4 }}>kg</span>
               </span>
             ) : (
               <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 600, color: INK_SOFT }}>Weight not recorded</span>
@@ -10933,7 +11001,7 @@ function CoachCheckInHistory({ clientName, onBack, state, onOpenPhoto }) {
                         <td style={tdStyle}>
                           {String(m.measured_at).slice(0, 10)}
                           {isBaseline && (
-                            <span style={{ marginLeft: 6, fontSize: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.4 }}>baseline</span>
+                            <span style={{ marginInlineStart: 6, fontSize: 10, color: INK_SOFT, textTransform: "uppercase", letterSpacing: 0.4 }}>baseline</span>
                           )}
                         </td>
                         <td style={tdStyle}>{cell(m.weight_kg, " kg")}</td>
@@ -11007,7 +11075,7 @@ function PhotoLightbox({ photo, onClose }) {
       <button
         onClick={onClose}
         aria-label="Close photo"
-        style={{ position: "absolute", top: 12, right: 12, border: "none", background: "transparent", color: "#fff", cursor: "pointer", padding: 6 }}
+        style={{ position: "absolute", top: 12, insetInlineEnd: 12, border: "none", background: "transparent", color: "#fff", cursor: "pointer", padding: 6 }}
       >
         <X size={22} />
       </button>
@@ -11091,7 +11159,7 @@ function CoachMealLog({ clientName, date, onDateChange, onBack, day, trend }) {
         <div style={{ fontSize: 12, color: INK_SOFT }}>Loading meals…</div>
       ) : (
         <>
-          <div style={{ ...panelStyle, borderLeft: `3px solid ${target > 0 ? STATUS_META[status].color : GRID}` }}>
+          <div style={{ ...panelStyle, borderInlineStart: `3px solid ${target > 0 ? STATUS_META[status].color : GRID}` }}>
             <SectionTitle>Day total</SectionTitle>
             <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: 12 }}>
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 32, fontWeight: 600, color: INK }}>
@@ -11134,7 +11202,7 @@ function CoachMealLog({ clientName, date, onDateChange, onBack, day, trend }) {
                         style={{ width: `${(s.subtotal / maxMealSubtotal) * 100}%`, height: "100%", background: TEAL, borderRadius: 3 }}
                       />
                     </div>
-                    <span style={{ ...monoSmall, width: 64, textAlign: "right", flexShrink: 0, color: INK }}>{s.subtotal} kcal</span>
+                    <span style={{ ...monoSmall, width: 64, textAlign: "end", flexShrink: 0, color: INK }}>{s.subtotal} kcal</span>
                   </div>
                 ))}
               </div>
@@ -11147,7 +11215,7 @@ function CoachMealLog({ clientName, date, onDateChange, onBack, day, trend }) {
               ) : !trend.data ? (
                 <div style={{ fontSize: 12, color: INK_SOFT }}>Loading trend…</div>
               ) : (
-                <>
+                <div dir="ltr">
                   <div style={{ position: "relative", height: 150 }}>
                     {target > 0 && (
                       <>
@@ -11222,7 +11290,7 @@ function CoachMealLog({ clientName, date, onDateChange, onBack, day, trend }) {
                       </div>
                     ))}
                   </div>
-                </>
+                </div>
               )}
             </div>
           </div>
@@ -11291,7 +11359,7 @@ function toDateTimeLocalValue(d) {
 function noteDisplayTitle(note) {
   if (note.title && note.title.trim()) return note.title.trim();
   const firstLine = (note.content || "").trim().split("\n")[0];
-  return firstLine.length > 40 ? `${firstLine.slice(0, 40)}…` : firstLine || "Untitled note";
+  return firstLine.length > 40 ? `${firstLine.slice(0, 40)}…` : firstLine || t("notes.untitled");
 }
 
 function isActiveReminder(note) {
@@ -11324,7 +11392,7 @@ function formatNoteTimestamp(isoString) {
   if (!isoString) return "";
   const d = new Date(isoString);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  return d.toLocaleString(intlLocale(), { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 function formatChatTime(isoString) {
@@ -11333,8 +11401,8 @@ function formatChatTime(isoString) {
   if (Number.isNaN(d.getTime())) return "";
 
   const isToday = d.toDateString() === new Date().toDateString();
-  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  return isToday ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+  const time = d.toLocaleTimeString(intlLocale(), { hour: "2-digit", minute: "2-digit" });
+  return isToday ? time : `${d.toLocaleDateString(intlLocale(), { month: "short", day: "numeric" })} ${time}`;
 }
 
 const CHAT_INPUT_MIN_HEIGHT = 38;
@@ -11376,7 +11444,7 @@ function ChatLayout({ peers, selectedId, onSelect, unreadById, emptyLabel, child
                 fontSize: 13,
                 fontWeight: 600,
                 cursor: "pointer",
-                textAlign: "left",
+                textAlign: "start",
               }}
             >
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
@@ -11449,11 +11517,11 @@ function ChatThread({ messages, loading, error, currentUserId, headerLabel, inpu
         }}
       >
         {loading ? (
-          <div style={{ fontSize: 12, color: INK_SOFT }}>Loading messages…</div>
+          <div style={{ fontSize: 12, color: INK_SOFT }}>{t("chat.loading")}</div>
         ) : error ? (
           <div style={{ padding: "8px 10px", background: RED_SOFT, color: RED, borderRadius: 4, fontSize: 12 }}>{error}</div>
         ) : messages.length === 0 ? (
-          <div style={{ fontSize: 12, color: INK_SOFT }}>No messages yet. Say hello!</div>
+          <div style={{ fontSize: 12, color: INK_SOFT }}>{t("chat.empty")}</div>
         ) : (
           messages.map((m) => {
             const isMine = m.sender_id === currentUserId;
@@ -11471,14 +11539,14 @@ function ChatThread({ messages, loading, error, currentUserId, headerLabel, inpu
                     fontSize: 13,
                   }}
                 >
-                  <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{m.body}</div>
+                  <div dir="auto" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{m.body}</div>
                   <div
                     style={{
                       marginTop: 4,
                       fontFamily: "'IBM Plex Mono', monospace",
                       fontSize: 9.5,
                       opacity: 0.75,
-                      textAlign: "right",
+                      textAlign: "end",
                     }}
                   >
                     {formatChatTime(m.created_at)}
@@ -11499,7 +11567,7 @@ function ChatThread({ messages, loading, error, currentUserId, headerLabel, inpu
       <form onSubmit={handleSubmit} style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
         <textarea
           ref={textareaRef}
-          placeholder="Type a message…"
+          placeholder={t("chat.placeholder")}
           value={input}
           onChange={(e) => onInputChange(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -11516,7 +11584,7 @@ function ChatThread({ messages, loading, error, currentUserId, headerLabel, inpu
           }}
         />
         <button type="submit" style={{ ...primaryButtonStyle, width: "auto" }} disabled={sending || !input.trim()}>
-          <Send size={14} strokeWidth={2.5} /> {sending ? "Sending…" : "Send"}
+          <Send size={14} strokeWidth={2.5} style={mirrorInRTL()} /> {sending ? t("chat.sending") : t("common.send")}
         </button>
       </form>
     </div>
@@ -11670,7 +11738,7 @@ const foodRowStyle = {
 };
 
 const thStyle = {
-  textAlign: "left",
+  textAlign: "start",
   padding: "8px 10px",
   fontFamily: "'IBM Plex Mono', monospace",
   fontSize: 10.5,

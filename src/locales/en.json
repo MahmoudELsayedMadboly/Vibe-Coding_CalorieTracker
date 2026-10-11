@@ -1,0 +1,151 @@
+{
+  "app": {
+    "title": "Calorie Tracker",
+    "eyebrow": "nutrition tracker",
+    "checkingSession": "Checking session…",
+    "loadingData": "Loading your data…",
+    "savingStatus": "saving…",
+    "savedStatus": "saved",
+    "logOut": "Log out"
+  },
+  "common": {
+    "pleaseWait": "Please wait…",
+    "tryAgain": "Try again",
+    "save": "Save",
+    "saving": "Saving…",
+    "saved": "Saved",
+    "send": "Send",
+    "close": "Close",
+    "uploading": "Uploading…",
+    "genericError": "Something went wrong."
+  },
+  "language": {
+    "label": "Language",
+    "en": "English",
+    "ar": "العربية",
+    "saveError": "Couldn't save your language preference.",
+    "loadError": "Couldn't load that language. Check your connection and try again."
+  },
+  "auth": {
+    "loginTitle": "Log in",
+    "signupTitle": "Create an account",
+    "email": "Email",
+    "password": "Password",
+    "logIn": "Log in",
+    "signUp": "Sign up",
+    "haveAccount": "Already have an account?",
+    "noAccount": "Don't have an account?",
+    "signupNotice": "Account created. If email confirmation is required, check your inbox before logging in.",
+    "errors": {
+      "missingFields": "Enter both an email and a password.",
+      "alreadySignedUp": "This email is already signed up. Please log in instead.",
+      "invalidCredentials": "Incorrect email or password.",
+      "emailNotConfirmed": "Confirm your email address first, using the link in your inbox.",
+      "rateLimited": "Too many attempts. Wait a minute and try again.",
+      "weakPassword": "This password is too weak. Choose a stronger one.",
+      "samePassword": "The new password must be different from your current one.",
+      "signupDisabled": "Sign-up is currently closed."
+    }
+  },
+  "password": {
+    "rules": "At least 8 characters, with an uppercase letter, lowercase letter, number, and special character.",
+    "tooShort8": "Password must be at least 8 characters.",
+    "tooShort6": "Password must be at least 6 characters.",
+    "needsLowercase": "Password must include a lowercase letter.",
+    "needsUppercase": "Password must include an uppercase letter.",
+    "needsNumber": "Password must include a number.",
+    "needsSpecial": "Password must include a special character.",
+    "mismatch": "Passwords don't match.",
+    "changeFailed": "Couldn't change your password.",
+    "new": "New password",
+    "confirm": "Confirm password"
+  },
+  "forcedPassword": {
+    "title": "Set new password",
+    "intro": "You signed in with a temporary password. Choose a new one to continue.",
+    "submit": "Set password",
+    "partialFailure": "Your password was changed, but we couldn't finish setting up your account. Please try again."
+  },
+  "loadFailed": {
+    "title": "Couldn't load your account",
+    "body": "Something went wrong while signing you in."
+  },
+  "account": {
+    "title": "Account",
+    "email": "Email",
+    "avatarTitle": "Profile picture",
+    "avatarAlt": "Avatar",
+    "avatarError": "Couldn't upload that photo.",
+    "organizationName": "Organization name",
+    "organizationPlaceholder": "Your organization",
+    "organizationLoadError": "Couldn't load your organization name.",
+    "organizationSaveError": "Couldn't save your organization name.",
+    "changePassword": "Change password",
+    "passwordChanged": "Password changed"
+  },
+  "feedback": {
+    "ideaLabel": "Suggest a new idea",
+    "ideaPlaceholder": "Have an idea for the app?",
+    "bugLabel": "Report a bug",
+    "bugPlaceholder": "Found something broken?",
+    "thanks": "Thanks — got it!",
+    "ideaEmpty": "Type your idea first.",
+    "bugEmpty": "Describe the bug first.",
+    "submitFailed": "Couldn't submit. Please try again."
+  },
+  "nav": {
+    "profile": "Profile",
+    "configuration": "Configuration",
+    "log": "Daily log",
+    "history": "History",
+    "home": "Home",
+    "users": "Users",
+    "clients": "Clients",
+    "plans": "Plans",
+    "administration": "Administration",
+    "chat": "Chat",
+    "notifications": "Notifications",
+    "notes": "Notes",
+    "account": "Account",
+    "clientDetail": "Client details",
+    "coachDetail": "Coach details",
+    "mealLog": "Meal log",
+    "checkinHistory": "Check-in history"
+  },
+  "status": {
+    "active": "Active",
+    "inactive": "Inactive",
+    "invited": "Invited",
+    "draft": "Draft",
+    "noPlan": "No plan yet",
+    "onTarget": "On target",
+    "exceeded": "Exceeded",
+    "belowTarget": "Below target"
+  },
+  "pagination": {
+    "previous": "Previous",
+    "next": "Next",
+    "pageOf": "Page {{page}} of {{total}}"
+  },
+  "reminders": {
+    "region": "Reminders",
+    "closeAll": "Close all ({{count}})",
+    "wasDue": "Was due {{when}}",
+    "dueNow": "Due now · {{time}}",
+    "inOneHour": "In 1 hour · {{time}}",
+    "closeFor": "Close reminder for {{title}}",
+    "systemDue": "Reminder due",
+    "systemSoon": "Reminder in 1 hour",
+    "systemCount_one": "{{count}} reminder",
+    "systemCount_other": "{{count}} reminders"
+  },
+  "notes": {
+    "untitled": "Untitled note"
+  },
+  "chat": {
+    "loading": "Loading messages…",
+    "empty": "No messages yet. Say hello!",
+    "placeholder": "Type a message…",
+    "sending": "Sending…"
+  }
+}
